@@ -1,0 +1,824 @@
+package cc
+
+import (
+	"math/bits"
+	"reflect"
+	"runtime"
+	"sync/atomic"
+	"time"
+	"unsafe"
+
+	"github.com/llxisdsh/cc/internal/opt"
+)
+
+// ============================================================================
+// Private Constants
+// ============================================================================
+
+const (
+	intSize       = 32 << (^uint(0) >> 63) // 32 or 64
+	maxInt        = 1<<(intSize-1) - 1     // maxInt32 or maxInt64
+	cacheLineSize = opt.CacheLineSize_     // size of a cache line in bytes
+)
+
+const (
+	// opByteIdx reserves the highest byte of meta for extended status flags
+	opByteIdx    = 7
+	opLockMask   = uint64(1) << (opByteIdx*8 + 7)
+	metaDataMask = uint64(0x00ffffffffffffff)
+
+	// entriesPerBucket defines the number of per-bucket entry pointers.
+	// Computed at compile time to avoid padding while packing buckets
+	// tightly within cache lines.
+	//
+	// Calculation:
+	//   ptrSize  = sizeof(unsafe.Pointer)
+	//   overhead = 8(meta) + ptrSize(next)
+	//   target   = min(CacheLineSize, base)
+	//   base     = 32 on 32-bit, 64 on 64-bit
+	//   entries  = min(7, (target - overhead) / ptrSize)
+	//
+	// Rationale:
+	//   - 64-bit: bucket size becomes 64B → 1/2/4 buckets per
+	//     64/128/256B cache line, with no per-bucket padding.
+	//   - 32-bit: bucket size becomes 32B → 2/4/8 buckets per
+	//     64/128/256B cache line, also without padding.
+	//
+	// Example outcomes (ptrSize, cacheLineSize → entries):
+	//   (8,  32) → 2  ; (8,  64) → 6 ; (8, 128) → 6 ; (8, 256) → 6
+	//   (4,  32) → 5  ; (4,  64) → 5 ; (4, 128) → 5 ; (4, 256) → 5
+	pointerSize    = int(unsafe.Sizeof(unsafe.Pointer(nil)))
+	bucketOverhead = int(unsafe.Sizeof(struct {
+		meta uint64
+		next unsafe.Pointer
+	}{}))
+	maxBucketBytes   = min(int(cacheLineSize), 32+32*(pointerSize/8))
+	entriesPerBucket = min(opByteIdx, (maxBucketBytes-bucketOverhead)/pointerSize)
+
+	// Metadata constants for bucket entry management
+	metaEmpty uint64 = 0
+	metaMask  uint64 = 0x8080808080808080 >>
+		(64 - min(entriesPerBucket*8, 64))
+	slotEmpty uint8 = 0
+	slotMask  uint8 = 0x80
+)
+
+const (
+	// shrinkFraction: shrink table when occupancy < 1/shrinkFraction
+	shrinkFraction = 8
+	// loadFactor: resize table when occupancy > loadFactor
+	loadFactor = 0.75
+	// minTableLen: minimum number of buckets
+	minTableLen = 32
+	// minBucketsPerCPU: threshold for parallel resizing
+	minBucketsPerCPU = 4
+	// asyncThreshold: threshold for asynchronous resize
+	asyncThreshold = 128 * 1024
+	// resizeOverPartition: over-partition factor to reduce resize tail latency
+	resizeOverPartition = 8
+	// enableFastPath: optimize read operations by avoiding locks when possible
+	// Can reduce latency by up to 100x in read-heavy scenarios
+	enableFastPath = true
+)
+
+type mapRebuildHint uint8
+
+const (
+	mapNoHint mapRebuildHint = iota
+	mapGrowHint
+	mapShrinkHint
+	mapRebuildAllowWritersHint
+	mapRebuildBlockWritersHint
+)
+
+type computeOp uint8
+
+const (
+	cancelOp computeOp = iota
+	updateOp
+	deleteOp
+)
+
+// ============================================================================
+// Private struct definitions
+// ============================================================================
+
+// counterStripe represents a striped counter to reduce contention.
+//
+// Padding strategy:
+//   - amd64: Padding is omitted by default — performance is identical
+//     with or without padding on this architecture.
+//   - Other 64‑bit arches: Padding is automatically enabled by default
+//     to prevent false sharing.
+//   - 32‑bit arches: Padding is automatically disabled to save memory.
+//
+// Manual override via build options:
+//   - cc_enable_padding – force padding on any architecture.
+//   - cc_disable_padding – force disable padding on any architecture.
+//
+// When padding is active, each stripe occupies a full cache line.
+// This consumes a small amount of extra memory, but significantly reduces
+// performance loss due to false sharing.
+type counterStripe struct {
+	_ [(opt.CacheLineSize_ - unsafe.Sizeof(struct {
+		c uintptr
+	}{})%opt.CacheLineSize_) % opt.CacheLineSize_ * opt.Padding_]byte
+	c uintptr // Counter value, accessed atomically
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// calcParallelism calculates the number of goroutines for parallel processing.
+//
+// Parameters:
+//   - items: Number of items to process.
+//   - threshold: Minimum threshold to enable parallel processing.
+//   - number of available CPU cores
+//
+// Returns:
+//   - chunks: Suggested degree of parallelism (number of goroutines).
+//
+//go:nosplit
+func calcParallelism(items, threshold, cpus int) int {
+	if items <= threshold {
+		return 1
+	}
+	chunks := min(items/threshold, cpus)
+	// chunkSz = (items + chunks - 1) / chunks
+	return chunks
+}
+
+// calcTableLen computes the bucket count for the table
+// return value must be a power of 2
+//
+//go:nosplit
+func calcTableLen(capacity int) int {
+	tableLen := minTableLen
+	const minThreshold = int(float64(minTableLen*entriesPerBucket) * loadFactor)
+	if capacity >= minThreshold {
+		const invFactor = 1.0 / (float64(entriesPerBucket) * loadFactor)
+		// +entriesPerBucket-1 is used to compensate for calculation
+		// inaccuracies
+		tableLen = nextPowOf2(
+			int(float64(capacity+entriesPerBucket-1) * invFactor),
+		)
+	}
+	return tableLen
+}
+
+// calcSizeLen computes the size count for the table
+// return value must be a power of 2
+//
+//go:nosplit
+func calcSizeLen(tableLen, cpus int) int {
+	return nextPowOf2(min(cpus, tableLen>>10))
+}
+
+// nextPowOf2 calculates the smallest power of 2 that is greater than or equal
+// to n.
+// Compatible with both 32-bit and 64-bit systems.
+//
+//go:nosplit
+func nextPowOf2(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	v := n - 1
+	v |= v >> 1
+	v |= v >> 2
+	v |= v >> 4
+	v |= v >> 8
+	v |= v >> 16
+	if intSize == 64 {
+		v |= v >> 32
+	}
+	return v + 1
+}
+
+// noescape hides a pointer from escape analysis. noescape is
+// the identity function, but escape analysis doesn't think the
+// output depends on the input.  noescape is inlined and currently
+// compiles down to zero instructions.
+// USE CAREFULLY!
+//
+//go:nosplit
+//go:nocheckptr
+func noescape(p unsafe.Pointer) unsafe.Pointer {
+	x := uintptr(p)
+	//nolint:all
+	//goland:noinspection ALL
+	return unsafe.Pointer(x ^ 0)
+}
+
+//go:nosplit
+//go:nocheckptr
+func noEscape[T any](p *T) *T {
+	return (*T)(noescape(unsafe.Pointer(p)))
+}
+
+// ============================================================================
+// SWAR Utilities
+// ============================================================================
+
+// enableHashSpread: improve hash distribution for non-integer keys
+// Reduces collisions for complex types but adds computational overhead
+const enableHashSpread = false
+
+// spread improves hash distribution by XORing the original hash with its high
+// bits.
+// This function increases randomness in the lower bits of the hash value,
+// which helps reduce collisions when calculating bucket indices.
+// It's particularly effective for hash values where significant bits
+// are concentrated in the upper positions.
+//
+//go:nosplit
+func spread(h uintptr) uintptr {
+	// Multi-stage hash spreading for better low-byte information density
+	// Stage 1: Mix high bits into low bits with 16-bit shift
+	h ^= h >> 16
+	// Stage 2: Further mix with 8-bit shift to enhance byte-level distribution
+	h ^= h >> 8
+	// Stage 3: Final mix with 4-bit shift for maximum low-byte entropy
+	h ^= h >> 4
+	// Multiply by odd constant to ensure all bits contribute to low byte
+	// 0x9e3779b1 is the golden ratio hash constant (32-bit)
+	// For 64-bit systems, we use 0x9e3779b97f4a7c15
+	if unsafe.Sizeof(h) == 8 {
+		var c64 uint64 = 0x9e3779b97f4a7c15
+		h *= uintptr(c64)
+	} else {
+		var c32 uint32 = 0x9e3779b1
+		h *= uintptr(c32)
+	}
+	return h
+}
+
+// h1 extracts the bucket index from a hash value.
+//
+//go:nosplit
+func h1(h uintptr, intKey bool) int {
+	if intKey {
+		// Possible values: [1,2,3,4,...entriesPerBucket].
+		return int(h) / entriesPerBucket
+	}
+	if enableHashSpread {
+		return int(spread(h)) >> 7
+	}
+
+	return int(h) >> 7
+}
+
+// h2 extracts the byte-level hash for in-bucket lookups.
+//
+//go:nosplit
+func h2(h uintptr) uint8 {
+	if enableHashSpread {
+		return uint8(spread(h)) | slotMask
+	}
+
+	return uint8(h) | slotMask
+}
+
+// broadcast replicates a byte value across all bytes of an uint64.
+//
+//go:nosplit
+func broadcast(b uint8) uint64 {
+	return 0x101010101010101 * uint64(b)
+}
+
+// firstMarkedByteIndex finds the index of the first marked byte in an uint64.
+// It uses the trailing zeros count to determine the position of the first set
+// bit, then converts that bit position to a byte index (dividing by 8).
+//
+// Parameters:
+//   - w: A uint64 value with bits set to mark specific bytes
+//
+// Returns:
+//   - The index (0-7) of the first marked byte in the uint64
+//
+//go:nosplit
+func firstMarkedByteIndex(w uint64) int {
+	return bits.TrailingZeros64(w) >> 3
+}
+
+// markZeroBytes implements SWAR (SIMD Within A Register) byte search.
+// It may produce false positives (e.g., for 0x0100), so results should be
+// verified. Returns an uint64 with the most significant bit of each byte set if
+// that byte is zero.
+//
+// Notes:
+//   - This SWAR algorithm identifies byte positions containing zero values.
+//   - The operation (w - 0x0101010101010101) triggers underflow for zero-value
+//     bytes, causing their most significant bit (MSB) to flip to 1.
+//   - The subsequent &^ operation isolates the MSB markers specifically for
+//     bytes, that were originally zero.
+//   - Finally, & metaMask filters to only consider relevant data slots,
+//     using the mask-defined marker bits (MSB of each byte).
+//
+//go:nosplit
+func markZeroBytes(w uint64) uint64 {
+	return (w - 0x0101010101010101) &^ w & metaMask
+}
+
+// setByte sets the byte at index idx in the uint64 w to the value b.
+// Returns the modified uint64 value.
+//
+//go:nosplit
+func setByte(w uint64, b uint8, idx int) uint64 {
+	shift := idx << 3
+	return (w &^ (0xff << shift)) | (uint64(b) << shift)
+}
+
+// ============================================================================
+// Slice Utilities
+// ============================================================================
+
+// unsafeSlice provides semi-ergonomic limited slice-like functionality
+// without bounds checking for fixed sized slices.
+type unsafeSlice[T any] struct {
+	ptr unsafe.Pointer
+}
+
+func makeUnsafeSlice[T any](s []T) unsafeSlice[T] {
+	return unsafeSlice[T]{ptr: unsafe.Pointer(unsafe.SliceData(s))}
+}
+
+//go:nosplit
+func (s unsafeSlice[T]) At(i int) *T {
+	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*new(T))*uintptr(i)))
+}
+
+// ============================================================================
+// Locker Utilities
+// ============================================================================
+
+// noCopy may be added to structs which must not be copied
+// after the first use.
+//
+// See https://golang.org/issues/8005#issuecomment-190753527
+// for details.
+//
+// Note that it must not be embedded, due to the Lock and Unlock methods.
+type noCopy struct{}
+
+// Lock is a no-op used by -copylocks checker from `go vet`.
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
+
+func trySpin(spins *int) bool {
+	if runtime_canSpin(*spins) {
+		*spins++
+		runtime_doSpin()
+		return true
+	}
+	return false
+}
+
+func delay(spins *int) {
+	if trySpin(spins) {
+		return
+	}
+	*spins = 0
+	// prioritizeLowLatency: lower latency over CPU usage.
+	// Uses runtime.Gosched() for faster retries, unlike time.Sleep()
+	// which increases throughput but results in slightly higher tail latency.
+	const prioritizeLowLatency = false
+	if prioritizeLowLatency {
+		runtime.Gosched()
+	} else {
+		// time.Sleep with non-zero duration (≈Millisecond level) works
+		// effectively as backoff under high concurrency.
+		// The 500µs duration is derived from Facebook/folly's implementation:
+		// https://github.com/facebook/folly/blob/main/folly/synchronization/detail/Sleeper.h
+		time.Sleep(500 * time.Microsecond)
+	}
+}
+
+// nolint:all
+//
+//go:linkname runtime_canSpin sync.runtime_canSpin
+//goland:noinspection ALL
+func runtime_canSpin(i int) bool
+
+// nolint:all
+//
+//go:linkname runtime_doSpin sync.runtime_doSpin
+//goland:noinspection ALL
+func runtime_doSpin()
+
+// ============================================================================
+// Hash Utilities
+// ============================================================================
+
+type (
+	// HashFunc is the function to hash a value of type K.
+	HashFunc func(ptr unsafe.Pointer, seed uintptr) uintptr
+	// EqualFunc is the function to compare two values of type V.
+	EqualFunc func(ptr unsafe.Pointer, other unsafe.Pointer) bool
+)
+
+func defaultHasher[K comparable, V any]() (
+	keyHash HashFunc,
+	valEqual EqualFunc,
+	intKey bool,
+) {
+	keyHash, valEqual = defaultHasherUsingBuiltIn[K, V]()
+
+	switch any(*new(K)).(type) {
+	case uint, int, uintptr:
+		return hashUintptr, valEqual, true
+	case uint64, int64:
+		if intSize == 64 {
+			return hashUint64, valEqual, true
+		}
+
+		return hashUint64On32Bit, valEqual, true
+	case uint32, int32:
+		return hashUint32, valEqual, true
+	case uint16, int16:
+		return hashUint16, valEqual, true
+	case uint8, int8:
+		return hashUint8, valEqual, true
+	case string:
+		return hashString, valEqual, false
+	case []byte:
+		return hashString, valEqual, false
+	default:
+		// for types like integers
+		kType := reflect.TypeFor[K]()
+		if kType == nil {
+			// Handle nil interface types
+			return keyHash, valEqual, false
+		}
+		switch kType.Kind() {
+		case reflect.Uint, reflect.Int, reflect.Uintptr:
+			return hashUintptr, valEqual, true
+		case reflect.Int64, reflect.Uint64:
+			if intSize == 64 {
+				return hashUint64, valEqual, true
+			}
+
+			return hashUint64On32Bit, valEqual, true
+		case reflect.Int32, reflect.Uint32:
+			return hashUint32, valEqual, true
+		case reflect.Int16, reflect.Uint16:
+			return hashUint16, valEqual, true
+		case reflect.Int8, reflect.Uint8:
+			return hashUint8, valEqual, true
+		case reflect.String:
+			return hashString, valEqual, false
+		case reflect.Slice:
+			// Check if it's []byte
+			if kType.Elem().Kind() == reflect.Uint8 {
+				return hashString, valEqual, false
+			}
+			return keyHash, valEqual, false
+		default:
+			return keyHash, valEqual, false
+		}
+	}
+}
+
+//go:nosplit
+func hashUintptr(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return *(*uintptr)(ptr)
+}
+
+//go:nosplit
+func hashUint64On32Bit(ptr unsafe.Pointer, _ uintptr) uintptr {
+	v := *(*uint64)(ptr)
+	return uintptr(v) ^ uintptr(v>>32)
+}
+
+//go:nosplit
+func hashUint64(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return uintptr(*(*uint64)(ptr))
+}
+
+//go:nosplit
+func hashUint32(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return uintptr(*(*uint32)(ptr))
+}
+
+//go:nosplit
+func hashUint16(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return uintptr(*(*uint16)(ptr))
+}
+
+//go:nosplit
+func hashUint8(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return uintptr(*(*uint8)(ptr))
+}
+
+//go:nosplit
+func hashString(ptr unsafe.Pointer, seed uintptr) uintptr {
+	// The algorithm has good cache affinity
+	type stringHeader struct {
+		data unsafe.Pointer
+		len  int
+	}
+	s := (*stringHeader)(ptr)
+	if s.len <= 12 {
+		for i := range s.len {
+			seed = seed*31 + uintptr(*(*uint8)(unsafe.Add(s.data, i)))
+		}
+		return seed
+	}
+	// Fallback to the built-in hash function
+	return builtInStringHasher(ptr, seed)
+}
+
+var builtInStringHasher, _ = defaultHasherUsingBuiltIn[string, struct{}]()
+
+// defaultHasherUsingBuiltIn gets Go's built-in hash and equality functions
+// for the specified types using reflection.
+//
+// This approach provides direct access to the type-specific functions without
+// the overhead of switch statements, resulting in better performance.
+//
+// Notes:
+//   - This implementation relies on Go's internal type representation
+//   - It should be verified for compatibility with each Go version upgrade
+func defaultHasherUsingBuiltIn[K comparable, V any]() (
+	keyHash HashFunc,
+	valEqual EqualFunc,
+) {
+	var m map[K]V
+	mapType := iTypeOf(m).MapType()
+	return mapType.Hasher, mapType.Elem.Equal
+}
+
+type (
+	iTFlag   uint8
+	iKind    uint8
+	iNameOff int32
+)
+
+// TypeOff is the offset to a type from moduledata.types.  See resolveTypeOff in
+// runtime.
+type iTypeOff int32
+
+type iType struct {
+	Size_       uintptr
+	PtrBytes    uintptr // number of (prefix) bytes in the type that can contain pointers
+	Hash        uint32  // hash of type; avoids computation in hash tables
+	TFlag       iTFlag  // extra type information flags
+	Align_      uint8   // alignment of variable with this type
+	FieldAlign_ uint8   // alignment of struct field with this type
+	Kind_       iKind   // enumeration for C
+	// function for comparing objects of this type
+	// (ptr to object A, ptr to object B) -> ==?
+	Equal func(unsafe.Pointer, unsafe.Pointer) bool
+	// GCData stores the GC type data for the garbage collector.
+	// Normally, GCData points to a bitmask that describes the
+	// ptr/nonptr fields of the type. The bitmask will have at
+	// least PtrBytes/ptrSize bits.
+	// If the TFlagGCMaskOnDemand bit is set, GCData is instead a
+	// **byte and the pointer to the bitmask is one dereference away.
+	// The runtime will build the bitmask if needed.
+	// (See runtime/type.go:getGCMask.)
+	// Note: multiple types may have the same value of GCData,
+	// including when TFlagGCMaskOnDemand is set. The types will, of course,
+	// have the same pointer layout (but not necessarily the same size).
+	GCData    *byte
+	Str       iNameOff // string form
+	PtrToThis iTypeOff // type for pointer to this type, may be zero
+}
+
+func (t *iType) MapType() *iMapType {
+	return (*iMapType)(unsafe.Pointer(t))
+}
+
+type iMapType struct {
+	iType
+	Key   *iType
+	Elem  *iType
+	Group *iType // internal type representing a slot group
+	// function for hashing keys (ptr to key, seed) -> hash
+	Hasher func(unsafe.Pointer, uintptr) uintptr
+}
+
+func iTypeOf(a any) *iType {
+	eface := *(*iEmptyInterface)(unsafe.Pointer(&a))
+	// Types are either static (for compiler-created types) or
+	// heap-allocated but always reachable (for reflection-created
+	// types, held in the central map). So there is no need to
+	// escape types. noescape here help avoid unnecessary escape
+	// of v.
+	return (*iType)(noescape(unsafe.Pointer(eface.Type)))
+}
+
+type iEmptyInterface struct {
+	Type *iType
+	Data unsafe.Pointer
+}
+
+// ============================================================================
+// Atomic Utilities
+// ============================================================================
+
+// isTSO_ detects TSO architectures; on TSO, plain reads/writes are safe for
+// pointers and native word-sized integers
+//
+//goland:noinspection GoBoolExpressions
+const isTSO_ = runtime.GOARCH == "amd64" ||
+	runtime.GOARCH == "386" ||
+	runtime.GOARCH == "s390x"
+
+//goland:noinspection GoBoolExpressions
+const noRaceTSO_ = !opt.Race_ && isTSO_
+
+// loadPtr loads a pointer atomically on non-TSO architectures.
+// On TSO architectures, it performs a plain pointer load.
+//
+//nolint:unused
+//go:nosplit
+func loadPtr(addr *unsafe.Pointer) unsafe.Pointer {
+	if noRaceTSO_ {
+		return *addr
+	}
+
+	return atomic.LoadPointer(addr)
+}
+
+// storePtr stores a pointer atomically on non-TSO architectures.
+// On TSO architectures, it performs a plain pointer store.
+//
+//nolint:unused
+//go:nosplit
+func storePtr(addr *unsafe.Pointer, val unsafe.Pointer) {
+	if noRaceTSO_ {
+		*addr = val
+	} else {
+		atomic.StorePointer(addr, val)
+	}
+}
+
+//nolint:unused
+//go:nosplit
+func loadUint64(addr *uint64) uint64 {
+	if noRaceTSO_ && intSize == 64 {
+		return *addr
+	}
+
+	return atomic.LoadUint64(addr)
+}
+
+//nolint:unused
+//go:nosplit
+func storeUint64(addr *uint64, val uint64) {
+	if noRaceTSO_ && intSize == 64 {
+		*addr = val
+	} else {
+		atomic.StoreUint64(addr, val)
+	}
+}
+
+//nolint:unused
+//go:nosplit
+func loadUint32(addr *uint32) uint32 {
+	if noRaceTSO_ {
+		return *addr
+	}
+
+	return atomic.LoadUint32(addr)
+}
+
+//nolint:unused
+//go:nosplit
+func storeUint32(addr *uint32, val uint32) {
+	if noRaceTSO_ {
+		*addr = val
+	} else {
+		atomic.StoreUint32(addr, val)
+	}
+}
+
+//nolint:unused
+//go:nosplit
+func loadUintptr(addr *uintptr) uintptr {
+	if noRaceTSO_ {
+		return *addr
+	}
+
+	return atomic.LoadUintptr(addr)
+}
+
+//nolint:unused
+//go:nosplit
+func storeUintptr(addr *uintptr, val uintptr) {
+	if noRaceTSO_ {
+		*addr = val
+	} else {
+		atomic.StoreUintptr(addr, val)
+	}
+}
+
+// loadUint64Fast performs a non-atomic read, safe only when the caller holds
+// a relevant lock or is within a seqlock read window.
+//
+//nolint:unused
+//go:nosplit
+func loadUint64Fast(addr *uint64) uint64 {
+	if opt.Race_ {
+		return atomic.LoadUint64(addr)
+	}
+
+	return *addr
+}
+
+// storeUint64Fast performs a non-atomic write, safe only for thread-private or
+// not-yet-published memory locations.
+//
+//nolint:unused
+//go:nosplit
+func storeUint64Fast(addr *uint64, val uint64) {
+	if opt.Race_ {
+		atomic.StoreUint64(addr, val)
+	} else {
+		*addr = val
+	}
+}
+
+//nolint:unused
+//go:nosplit
+func loadUint32Fast(addr *uint32) uint32 {
+	if opt.Race_ {
+		return atomic.LoadUint32(addr)
+	}
+
+	return *addr
+}
+
+//nolint:unused
+//go:nosplit
+func storeUint32Fast(addr *uint32, val uint32) {
+	if opt.Race_ {
+		atomic.StoreUint32(addr, val)
+	} else {
+		*addr = val
+	}
+}
+
+//nolint:unused
+//go:nosplit
+func loadUintptrFast(addr *uintptr) uintptr {
+	if opt.Race_ {
+		return atomic.LoadUintptr(addr)
+	}
+
+	return *addr
+}
+
+//nolint:unused
+//go:nosplit
+func storeUintptrFast(addr *uintptr, val uintptr) {
+	if opt.Race_ {
+		atomic.StoreUintptr(addr, val)
+	} else {
+		*addr = val
+	}
+}
+
+// Concurrency variable access rules
+// 1. If a variable has atomic writes outside locks:
+//    - Must use atomic loads AND stores inside locks
+//    - Example:
+//      var value int32
+//      func update() {
+//          atomic.StoreInt32(&value, 1) // external atomic write
+//      }
+//      func lockedOp() {
+//          mu.Lock()
+//          defer mu.Unlock()
+//          v := atomic.LoadInt32(&value) // internal atomic load
+//          atomic.StoreInt32(&value, v+1) // internal atomic store
+//      }
+//
+// 2. If a variable only has atomic reads outside locks:
+//    - Only need atomic stores inside locks (atomic loads not required)
+//    - Example:
+//      func read() int32 {
+//          return atomic.LoadInt32(&value) // external atomic read
+//      }
+//      func lockedOp() {
+//          mu.Lock()
+//          defer mu.Unlock()
+//          // Normal read sufficient (lock guarantees visibility)
+//          v := value
+//          // But writes need atomic store:
+//          atomic.StoreInt32(&value, 42)
+//      }
+//
+// 3. If a variable has no external access:
+//    - No atomic operations needed inside locks
+//    - Normal reads/writes sufficient (lock provides full protection)
+//    - Example:
+//      func lockedOp() {
+//          mu.Lock()
+//          defer mu.Unlock()
+//          value = 42 // normal write
+//          v := value // normal read
+//      }

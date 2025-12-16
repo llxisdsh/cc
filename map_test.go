@@ -1,0 +1,7236 @@
+package cc
+
+import (
+	"fmt"
+	"math"
+	"math/rand/v2"
+	"reflect"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+	"unsafe"
+	"weak"
+)
+
+// ============================================================================
+// Statistics Utilities
+// ============================================================================
+
+// mapStats is Map statistics.
+//
+// Notes:
+//   - map statistics are intended to be used for diagnostic
+//     purposes, not for production code. This means that breaking changes
+//     may be introduced into this struct even between minor releases.
+type mapStats struct {
+	// RootBuckets is the number of root buckets in the hash table.
+	// Each bucket holds a few entries.
+	RootBuckets int
+	// TotalBuckets is the total number of buckets in the hash table,
+	// including root and their chained buckets. Each bucket holds
+	// a few entries.
+	TotalBuckets int
+	// EmptyBuckets is the number of buckets that hold no entries.
+	EmptyBuckets int
+	// Capacity is the Map capacity, i.e., the total number of
+	// entries that all buckets can physically hold. This number
+	// does not consider the load factor.
+	Capacity int
+	// Size is the exact number of entries stored in the map.
+	Size int
+	// Counter is the number of entries stored in the map according
+	// to the internal atomic counter. In the case of concurrent map
+	// modifications, this number may be different from Size.
+	Counter int
+	// CounterLen is the number of internal atomic counter stripes.
+	// This number may grow with the map capacity to improve
+	// multithreaded scalability.
+	CounterLen int
+	// MinEntries is the minimum number of entries per a chain of
+	// buckets, i.e., a root bucket and its chained buckets.
+	MinEntries int
+	// MinEntries is the maximum number of entries per a chain of
+	// buckets, i.e., a root bucket and its chained buckets.
+	MaxEntries int
+	// TotalGrowths is the number of times the hash table grew.
+	TotalGrowths uint32
+	// TotalGrowths is the number of times the hash table shrunk.
+	TotalShrinks uint32
+}
+
+// String returns string representation of map stats.
+func (s *mapStats) String() string {
+	var sb strings.Builder
+	sb.WriteString("mapStats{\n")
+	sb.WriteString(fmt.Sprintf("RootBuckets:  %d\n", s.RootBuckets))
+	sb.WriteString(fmt.Sprintf("TotalBuckets: %d\n", s.TotalBuckets))
+	sb.WriteString(fmt.Sprintf("EmptyBuckets: %d\n", s.EmptyBuckets))
+	sb.WriteString(fmt.Sprintf("Capacity:     %d\n", s.Capacity))
+	sb.WriteString(fmt.Sprintf("Size:         %d\n", s.Size))
+	sb.WriteString(fmt.Sprintf("Counter:      %d\n", s.Counter))
+	sb.WriteString(fmt.Sprintf("CounterLen:   %d\n", s.CounterLen))
+	sb.WriteString(fmt.Sprintf("MinEntries:   %d\n", s.MinEntries))
+	sb.WriteString(fmt.Sprintf("MaxEntries:   %d\n", s.MaxEntries))
+	sb.WriteString(fmt.Sprintf("TotalGrowths: %d\n", s.TotalGrowths))
+	sb.WriteString(fmt.Sprintf("TotalShrinks: %d\n", s.TotalShrinks))
+	sb.WriteString("}\n")
+	return sb.String()
+}
+
+// stats returns statistics for the Map. Just like other map
+// methods, this one is thread-safe. Yet it's an O(N) operation,
+// so it should be used only for diagnostics or debugging purposes.
+func (m *Map[K, V]) stats() *mapStats {
+	stats := &mapStats{
+		TotalGrowths: atomic.LoadUint32(&m.growths),
+		TotalShrinks: atomic.LoadUint32(&m.shrinks),
+		MinEntries:   math.MaxInt,
+	}
+	table := (*mapTable)(loadPtr(&m.table))
+	if table == nil {
+		return stats
+	}
+	stats.RootBuckets = table.mask + 1
+	stats.Counter = table.SumSize()
+	stats.CounterLen = table.sizeMask + 1
+	for i := 0; i <= table.mask; i++ {
+		entries := 0
+		for b := table.buckets.At(i); b != nil; b = (*bucket)(loadPtr(&b.next)) {
+			stats.TotalBuckets++
+			entriesLocal := 0
+			stats.Capacity += entriesPerBucket
+
+			meta := loadUint64(&b.meta)
+			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+					stats.Size++
+					entriesLocal++
+				}
+			}
+			entries += entriesLocal
+			if entriesLocal == 0 {
+				stats.EmptyBuckets++
+			}
+		}
+
+		if entries < stats.MinEntries {
+			stats.MinEntries = entries
+		}
+		if entries > stats.MaxEntries {
+			stats.MaxEntries = entries
+		}
+	}
+	return stats
+}
+
+// ============================================================================
+// Test Data
+// ============================================================================
+
+var (
+	testDataSmall [8]string
+	testData      [128]string
+	testDataLarge [128 << 10]string
+
+	testDataIntSmall [8]int
+	testDataInt      [128]int
+	testDataIntLarge [128 << 10]int
+)
+
+func init() {
+	for i := range testDataSmall {
+		testDataSmall[i] = fmt.Sprintf("%b", i)
+	}
+	for i := range testData {
+		testData[i] = fmt.Sprintf("%b", i)
+	}
+	for i := range testDataLarge {
+		testDataLarge[i] = fmt.Sprintf("%b", i)
+	}
+
+	for i := range testDataIntSmall {
+		testDataIntSmall[i] = i
+	}
+	for i := range testData {
+		testDataInt[i] = i
+	}
+	for i := range testDataIntLarge {
+		testDataIntLarge[i] = i
+	}
+}
+
+// ============================================================================
+// go1.22
+// ============================================================================
+
+func TestMap_BucketOfStructSize(t *testing.T) {
+	t.Logf("CacheLineSize : %d", cacheLineSize)
+	t.Logf("entriesPerBucket : %d", entriesPerBucket)
+
+	size := unsafe.Sizeof(counterStripe{})
+	t.Log("CounterStripe_ size:", size)
+
+	size = unsafe.Sizeof(bucket{})
+	t.Log("bucket size:", size)
+	if cacheLineSize%size != 0 {
+		t.Logf("bucket doesn't meet CacheLineSize: %d", size)
+	}
+
+	size = unsafe.Sizeof(mapTable{})
+	t.Log("mapTable size:", size)
+	if size != cacheLineSize {
+		t.Logf("mapTable doesn't meet CacheLineSize: %d", size)
+	}
+
+	size = unsafe.Sizeof(rebuildState{})
+	t.Log("rebuildState size:", size)
+	if size != cacheLineSize {
+		t.Logf("rebuildState doesn't meet CacheLineSize: %d", size)
+	}
+
+	size = unsafe.Sizeof(Map[string, int]{})
+	t.Log("Map size:", size)
+	if size != cacheLineSize {
+		t.Logf("Map doesn't meet CacheLineSize: %d", size)
+	}
+
+	structType := reflect.TypeFor[bucket]()
+	t.Logf("Struct bucket: %s", structType.Name())
+	for i := range structType.NumField() {
+		field := structType.Field(i)
+		fieldName := field.Name
+		fieldType := field.Type
+		fieldOffset := field.Offset
+		fieldSize := fieldType.Size()
+
+		t.Logf("Field: %-10s Type: %-10s Offset: %d Size: %d bytes\n",
+			fieldName, fieldType, fieldOffset, fieldSize)
+	}
+
+	structType = reflect.TypeFor[mapTable]()
+	t.Logf("Struct mapTable: %s", structType.Name())
+	for i := range structType.NumField() {
+		field := structType.Field(i)
+		fieldName := field.Name
+		fieldType := field.Type
+		fieldOffset := field.Offset
+		fieldSize := fieldType.Size()
+
+		t.Logf("Field: %-10s Type: %-10s Offset: %d Size: %d bytes\n",
+			fieldName, fieldType, fieldOffset, fieldSize)
+	}
+
+	structType = reflect.TypeFor[Map[string, int]]()
+	t.Logf("Struct Map: %s", structType.Name())
+	for i := range structType.NumField() {
+		field := structType.Field(i)
+		fieldName := field.Name
+		fieldType := field.Type
+		fieldOffset := field.Offset
+		fieldSize := fieldType.Size()
+
+		t.Logf("Field: %-10s Type: %-10s Offset: %d Size: %d bytes\n",
+			fieldName, fieldType, fieldOffset, fieldSize)
+	}
+}
+
+func TestMap_InterfaceKey(t *testing.T) {
+	type X interface {
+		Hello()
+	}
+
+	m := NewMap[X, int]()
+
+	m.Store(nil, 1)
+	if v, ok := m.Load(nil); !ok || v != 1 {
+		t.Fatalf("Load(1) = %v, %v; want 1, true", v, ok)
+	}
+}
+
+func TestMap_Compute_Basic(t *testing.T) {
+	m := NewMap[string, int]()
+
+	ret, loaded := m.Compute("k1", func(e *Entry[string, int]) {
+		e.Update(5)
+	})
+	if loaded || ret != 5 {
+		t.Fatalf("Compute insert ret=%d ok=%v", ret, loaded)
+	}
+	if ret, loaded = m.Load("k1"); !loaded || ret != 5 {
+		t.Fatalf("Load after Compute insert v=%d ok=%v", ret, loaded)
+	}
+
+	m.Store("k2", 1)
+	ret, loaded = m.Compute("k2", func(e *Entry[string, int]) {
+		e.Update(e.Value() + 1)
+	})
+	if !loaded || ret != 2 {
+		t.Fatalf("Compute update ret=%d ok=%v", ret, loaded)
+	}
+	if ret, loaded = m.Load("k2"); !loaded || ret != 2 {
+		t.Fatalf("Load after Compute update v=%d ok=%v", ret, loaded)
+	}
+
+	m.Store("k3", 10)
+	ret, loaded = m.Compute("k3", func(e *Entry[string, int]) {
+		e.Delete()
+	})
+	if !loaded || ret != 0 {
+		t.Fatalf("Compute delete ret=%d ok=%v", ret, loaded)
+	}
+	if _, loaded = m.Load("k3"); loaded {
+		t.Fatalf("Load after Compute delete should be missing")
+	}
+
+	m.Store("k4", 7)
+	ret, loaded = m.Compute("k4", func(e *Entry[string, int]) {
+	})
+	if !loaded || ret != 7 {
+		t.Fatalf("Compute cancel ret=%d ok=%v", ret, loaded)
+	}
+	if v, loaded := m.Load("k4"); !loaded || v != 7 {
+		t.Fatalf("Load after Compute cancel v=%d ok=%v", v, loaded)
+	}
+}
+
+func TestMap_ComputeRange_UpdateDeleteCancel(t *testing.T) {
+	m := NewMap[string, int]()
+	m.Store("a", 1)
+	m.Store("b", 2)
+	m.Store("c", 3)
+
+	m.ComputeRange(func(e *Entry[string, int]) bool {
+		if e.Key() == "c" {
+			e.Delete()
+			return true
+		}
+		if e.Key() == "b" {
+			return true
+		}
+		e.Update(e.Value() * 2)
+		return true
+	})
+
+	if v, ok := m.Load("a"); !ok || v != 2 {
+		t.Fatalf("a=%d ok=%v", v, ok)
+	}
+	if v, ok := m.Load("b"); !ok || v != 2 {
+		t.Fatalf("b=%d ok=%v", v, ok)
+	}
+	if _, ok := m.Load("c"); ok {
+		t.Fatalf("c should be deleted")
+	}
+}
+
+// TestMapStoreLoadLatency tests the latency between Store and Load operations
+func TestMapStoreLoadLatency(t *testing.T) {
+	const (
+		iterations   = 100000 // Number of samples
+		warmupRounds = 1000   // Warmup iterations
+	)
+
+	// Define percentiles to report
+	reportPercentiles := []float64{50, 90, 99, 99.9, 99.99, 100}
+
+	m := NewMap[string, int64]()
+
+	// Channels for synchronization
+	var wg sync.WaitGroup
+	startCh := make(chan struct{})
+	readyCh := make(chan struct{}, 1) // Buffered to prevent blocking
+	doneCh := make(chan struct{})
+
+	// Record latency data
+	latencies := make([]time.Duration, 0, iterations)
+	var successCount, failureCount int64
+
+	// Reader goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		// Wait for start signal
+		<-startCh
+
+		var lastValue int64
+		for {
+			select {
+			case <-doneCh:
+				return
+			case <-readyCh:
+				// Record start time
+				startTime := time.Now()
+				success := false
+
+				// Try to read until success or timeout
+				timeout := time.After(10 * time.Millisecond)
+				for !success {
+					select {
+					case <-timeout:
+						// Timeout, record failure
+						atomic.AddInt64(&failureCount, 1)
+						success = true // Exit loop
+					default:
+						value, ok := m.Load("test-key")
+						if ok && value > lastValue {
+							// Read success and value updated
+							latency := time.Since(startTime)
+							latencies = append(latencies, latency)
+							lastValue = value
+							atomic.AddInt64(&successCount, 1)
+							success = true
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	// Writer goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(doneCh)
+
+		// Send start signal
+		close(startCh)
+
+		// Warmup phase
+		for i := range warmupRounds {
+			m.Store("test-key", int64(i))
+			readyCh <- struct{}{}
+		}
+
+		// Actual test
+		for i := warmupRounds; i < warmupRounds+iterations; i++ {
+			// Write new value
+			m.Store("test-key", int64(i))
+
+			// Notify reader goroutine
+			readyCh <- struct{}{}
+		}
+	}()
+
+	// Wait for test completion
+	wg.Wait()
+
+	// Analyze results
+	if len(latencies) == 0 {
+		t.Fatal("No latency data collected")
+	}
+
+	// Sort latency data for percentile calculation
+	slices.Sort(latencies)
+
+	// Calculate statistics
+	var sum time.Duration
+	for _, latency := range latencies {
+		sum += latency
+	}
+	avgLatency := sum / time.Duration(len(latencies))
+
+	// Calculate standard deviation
+	var variance float64
+	for _, latency := range latencies {
+		diff := float64(latency - avgLatency)
+		variance += diff * diff
+	}
+	variance /= float64(len(latencies))
+	stdDev := time.Duration(math.Sqrt(variance))
+
+	// Output results
+	t.Logf("Store-Load Latency Statistics (samples: %d):", len(latencies))
+	t.Logf("  Success rate: %.2f%% (%d/%d)",
+		float64(successCount)*100/float64(successCount+failureCount),
+		successCount, successCount+failureCount)
+	t.Logf("  Average latency: %v", avgLatency)
+	t.Logf("  Standard deviation: %v", stdDev)
+	t.Logf("  Min latency: %v", latencies[0])
+	t.Logf("  Max latency: %v", latencies[len(latencies)-1])
+
+	// Output percentiles
+	for _, p := range reportPercentiles {
+		idx := int(float64(len(latencies)-1) * p / 100)
+		t.Logf("  %v percentile: %v", p, latencies[idx])
+	}
+
+	// Output latency distribution
+	buckets := []time.Duration{
+		1 * time.Nanosecond,
+		10 * time.Nanosecond,
+		100 * time.Nanosecond,
+		1 * time.Microsecond,
+		10 * time.Microsecond,
+		100 * time.Microsecond,
+		1 * time.Millisecond,
+		10 * time.Millisecond,
+	}
+
+	counts := make([]int, len(buckets)+1)
+	for _, latency := range latencies {
+		i := 0
+		for _, bucket := range buckets {
+			if latency < bucket {
+				break
+			}
+			i++
+		}
+		counts[i]++
+	}
+
+	t.Log("Latency distribution:")
+	for i := range len(buckets) {
+		var rangeStr string
+		if i == 0 {
+			rangeStr = fmt.Sprintf("< %v", buckets[i])
+		} else {
+			rangeStr = fmt.Sprintf("%v - %v", buckets[i-1], buckets[i])
+		}
+		percentage := float64(counts[i]) * 100 / float64(len(latencies))
+		t.Logf("  %s: %d (%.2f%%)", rangeStr, counts[i], percentage)
+	}
+
+	if counts[len(counts)-1] > 0 {
+		percentage := float64(
+			counts[len(counts)-1],
+		) * 100 / float64(
+			len(latencies),
+		)
+		t.Logf(
+			"  >= %v: %d (%.2f%%)",
+			buckets[len(buckets)-1],
+			counts[len(counts)-1],
+			percentage,
+		)
+	}
+}
+
+// TestMapStoreLoadMultiThreadLatency tests Store-Load latency in a
+// multithreaded environment
+func TestMapStoreLoadMultiThreadLatency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping multi-thread latency test in short mode")
+	}
+
+	const (
+		iterations   = 10000 // Iterations per writer thread
+		writerCount  = 4     // Number of writer threads
+		readerCount  = 16    // Number of reader threads
+		keyCount     = 100   // Number of keys
+		warmupRounds = 1000  // Warmup iterations
+	)
+
+	// Define percentiles to report
+	percentiles := []float64{50, 90, 99, 99.9, 99.99, 100}
+
+	m := NewMap[int, int64]()
+
+	// Synchronization variables
+	var wg sync.WaitGroup
+	startCh := make(chan struct{})
+	doneCh := make(chan struct{})
+
+	// Record latency data
+	var latencyLock sync.Mutex
+	latencies := make([]time.Duration, 0, writerCount*iterations)
+
+	// Track latest values for each key
+	latestValues := make([]atomic.Int64, keyCount)
+
+	// Start reader threads
+	for r := range readerCount {
+		wg.Add(1)
+		go func(readerID int) {
+			defer wg.Done()
+
+			// Wait for start signal
+			<-startCh
+
+			localLatestValues := make([]int64, keyCount)
+
+			for {
+				select {
+				case <-doneCh:
+					return
+				default:
+					// Select a key based on reader ID
+					keyIdx := readerID % keyCount
+
+					// Read value
+					value, ok := m.Load(keyIdx)
+					if ok && value > localLatestValues[keyIdx] {
+						// Update local record of latest value
+						localLatestValues[keyIdx] = value
+					}
+				}
+			}
+		}(r)
+	}
+
+	// Start writer threads
+	for w := range writerCount {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+
+			// Wait for start signal
+			<-startCh
+
+			// Determine key range for this writer
+			keysPerWriter := keyCount / writerCount
+			startKey := writerID * keysPerWriter
+			endKey := (writerID + 1) * keysPerWriter
+			if writerID == writerCount-1 {
+				endKey = keyCount // Last thread handles remaining keys
+			}
+
+			// Warmup phase
+			for i := range warmupRounds {
+				for key := startKey; key < endKey; key++ {
+					newValue := int64(i + 1)
+					m.Store(key, newValue)
+					latestValues[key].Store(newValue)
+				}
+			}
+
+			// Actual test
+			for range iterations {
+				for key := startKey; key < endKey; key++ {
+					// Write new value
+					startTime := time.Now()
+					newValue := latestValues[key].Load() + 1
+					m.Store(key, newValue)
+
+					// Update latest value record
+					latestValues[key].Store(newValue)
+
+					// Record latency
+					latency := time.Since(startTime)
+					latencyLock.Lock()
+					latencies = append(latencies, latency)
+					latencyLock.Unlock()
+				}
+			}
+		}(w)
+	}
+
+	// Start test
+	close(startCh)
+
+	// Wait for a reasonable time then end test
+	time.Sleep(time.Duration(iterations/100) * time.Millisecond)
+	close(doneCh)
+
+	// Wait for all threads to complete
+	wg.Wait()
+
+	// Analyze results
+	latencyLock.Lock()
+	defer latencyLock.Unlock()
+
+	if len(latencies) == 0 {
+		t.Fatal("No latency data collected")
+	}
+
+	// Sort latency data for percentile calculation
+	slices.Sort(latencies)
+
+	// Calculate statistics
+	var sum time.Duration
+	for _, latency := range latencies {
+		sum += latency
+	}
+	avgLatency := sum / time.Duration(len(latencies))
+
+	// Calculate standard deviation
+	var variance float64
+	for _, latency := range latencies {
+		diff := float64(latency - avgLatency)
+		variance += diff * diff
+	}
+	variance /= float64(len(latencies))
+	stdDev := time.Duration(math.Sqrt(variance))
+
+	// Output results
+	t.Logf(
+		"Multi-thread Store-Load Latency Statistics (samples: %d):",
+		len(latencies),
+	)
+	t.Logf("  Average latency: %v", avgLatency)
+	t.Logf("  Standard deviation: %v", stdDev)
+	t.Logf("  Min latency: %v", latencies[0])
+	t.Logf("  Max latency: %v", latencies[len(latencies)-1])
+
+	// Output percentiles
+	for _, p := range percentiles {
+		idx := int(float64(len(latencies)-1) * p / 100)
+		t.Logf("  %v percentile: %v", p, latencies[idx])
+	}
+}
+
+// TestMapSimpleConcurrentReadWrite test 1 goroutine for store and 1 goroutine
+// for load
+func TestMapSimpleConcurrentReadWrite(t *testing.T) {
+	const iterations = 1000
+
+	m := NewMap[string, int]()
+
+	writeDone := make(chan int)
+	readDone := make(chan struct{})
+
+	var failures int
+
+	// start reader goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := range iterations {
+			// wait for writer to complete and send the written value
+			expectedValue := <-writeDone
+
+			// read and verify value
+			value, ok := m.Load("test-key")
+			if !ok {
+				t.Logf("Iteration %d: key not found", i)
+				failures++
+			} else if value != expectedValue {
+				t.Logf("Iteration %d: read value %d, expected %d", i, value, expectedValue)
+				failures++
+			}
+
+			// notify writer to continue
+			readDone <- struct{}{}
+		}
+	}()
+
+	// start writer goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := range iterations {
+			// write value
+			m.Store("test-key", i)
+
+			// notify reader and pass expected value
+			writeDone <- i
+
+			// wait for reader to complete
+			<-readDone
+		}
+	}()
+
+	// wait for all goroutines to complete
+	wg.Wait()
+
+	if failures > 0 {
+		t.Errorf("Found %d read failures", failures)
+	} else {
+		t.Logf("All %d reads successful", iterations)
+	}
+}
+
+// TestMapMultiKeyConcurrentReadWrite tests concurrent read/write with
+// multiple keys
+func TestMapMultiKeyConcurrentReadWrite(t *testing.T) {
+	const (
+		iterations = 1000
+		keyCount   = 100
+	)
+
+	m := NewMap[int, int]()
+
+	// channels for goroutine communication
+	writeDone := make(chan struct{})
+	readDone := make(chan struct{})
+
+	// track test results
+	var failures int
+
+	// start writer goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := range iterations {
+			// write a batch of key-value pairs
+			for k := range keyCount {
+				m.Store(k, i)
+			}
+
+			// notify reader to start reading
+			writeDone <- struct{}{}
+
+			// wait for reader to complete
+			<-readDone
+		}
+	}()
+
+	// start reader goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := range iterations {
+			// wait for writer to complete
+			<-writeDone
+
+			// read and verify all key-value pairs
+			for k := range keyCount {
+				value, ok := m.Load(k)
+				if !ok {
+					t.Logf("Iteration %d: key %d not found", i, k)
+					failures++
+				} else if value != i {
+					t.Logf("Iteration %d: key %d has value %d, expected %d", i, k, value, i)
+					failures++
+				}
+			}
+
+			// notify writer to continue
+			readDone <- struct{}{}
+		}
+	}()
+
+	// wait for all goroutines to complete
+	wg.Wait()
+
+	if failures > 0 {
+		t.Errorf("Found %d read failures", failures)
+	} else {
+		t.Logf("All %d reads successful", iterations*keyCount)
+	}
+}
+
+// TestMapConcurrentReadWriteStress performs intensive concurrent stress
+// testing
+func TestMapConcurrentReadWriteStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping stress test")
+	}
+
+	// Detect if running with coverage and reduce test intensity
+	var writerCount, readerCount, keyCount, iterations int
+	if testing.CoverMode() != "" {
+		// Reduced parameters for coverage mode to prevent timeout
+		writerCount = 2
+		readerCount = 4
+		keyCount = 100
+		iterations = 1000
+	} else {
+		// Full stress test parameters for normal mode
+		writerCount = 4
+		readerCount = 16
+		keyCount = 1000
+		iterations = 10000
+	}
+
+	m := NewMap[int, int]()
+	var wg sync.WaitGroup
+
+	// start writer goroutines
+	for w := range writerCount {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+
+			for i := range iterations {
+				key := (writerID*iterations + i) % keyCount
+				m.Store(key, writerID*10000+i)
+			}
+		}(w)
+	}
+
+	// start reader goroutines
+	readErrors := make(chan string, readerCount*iterations)
+	for range readerCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for range iterations {
+				for k := range keyCount {
+					_, _ = m.Load(k) // we only care about crashes or deadlocks
+				}
+				// time.Sleep(time.Microsecond) // slightly slow down reading
+			}
+		}()
+	}
+
+	// wait for all goroutines to complete
+	wg.Wait()
+	close(readErrors)
+
+	// check for errors
+	errorCount := 0
+	for err := range readErrors {
+		t.Log(err)
+		errorCount++
+		if errorCount >= 10 {
+			t.Log("Too many errors, stopping display...")
+			break
+		}
+	}
+
+	if errorCount > 0 {
+		t.Errorf("Found %d read errors", errorCount)
+	}
+}
+
+func TestMapCalcLen(t *testing.T) {
+	var tableLen, growTableLen, sizeLen, parallelism, lastTableLen, lastGrowTableLen, lastSizeLen, lastParallelism int
+	cpus := runtime.GOMAXPROCS(0)
+	t.Log("runtime.GOMAXPROCS(0),", cpus)
+	for i := range 1000000 {
+		tableLen = calcTableLen(i)
+		sizeLen = calcSizeLen(i, cpus)
+		// const capFactor = float64(entriesPerBucket) * mapLoadFactor
+		growThreshold := int(
+			float64(tableLen*entriesPerBucket) * loadFactor,
+		)
+		growTableLen = calcTableLen(growThreshold)
+		parallelism = calcParallelism(tableLen, minBucketsPerCPU, cpus)
+		if tableLen != lastTableLen ||
+			growTableLen != lastGrowTableLen ||
+			sizeLen != lastSizeLen ||
+			parallelism != lastParallelism {
+			t.Logf(
+				"capacity: %v, tableLen: %v, growThreshold: %v, growTableLen: %v, counterLen: %v, parallelism: %v",
+				i,
+				tableLen,
+				growThreshold,
+				growTableLen,
+				sizeLen,
+				parallelism,
+			)
+			lastTableLen, lastGrowTableLen, lastSizeLen, lastParallelism = tableLen, growTableLen, sizeLen, parallelism
+		}
+	}
+}
+
+// // NewBadMap creates a new Map for the provided key and value
+// // but with an intentionally bad hash function.
+func NewBadMap[K, V comparable]() *Map[K, V] {
+	// Stub out the good hash function with a terrible one.
+	// Everything should still work as expected.
+	var m Map[K, V]
+
+	m.keyHash = func(pointer unsafe.Pointer, u uintptr) uintptr {
+		return 0
+	}
+
+	return &m
+}
+
+//
+// NewTruncMap creates a new Map for the provided key and value
+// but with an intentionally bad hash function.
+
+func NewTruncMap[K, V comparable]() *Map[K, V] {
+	// Stub out the good hash function with a terrible one.
+	// Everything should still work as expected.
+	var m Map[K, V]
+	hasher, _ := defaultHasherUsingBuiltIn[K, V]()
+	m.keyHash = func(pointer unsafe.Pointer, u uintptr) uintptr {
+		return hasher(pointer, u) & ((uintptr(1) << 4) - 1)
+	}
+	return &m
+}
+
+func TestMap(t *testing.T) {
+	testMap(t, func() *Map[string, int] {
+		return &Map[string, int]{}
+	})
+}
+
+// TestMapWithKeyHasherUnsafe tests the WithKeyHasherUnsafe function
+func TestMapWithKeyHasherUnsafe(t *testing.T) {
+	t.Run("BasicUnsafeHasher", func(t *testing.T) {
+		// Custom unsafe hasher that uses string length as hash
+		unsafeStringHasher := func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			str := *(*string)(ptr)
+			return uintptr(len(str)) ^ seed
+		}
+
+		m := NewMap[string, int](WithKeyHasherUnsafe(unsafeStringHasher))
+
+		// Test basic operations
+		m.Store("a", 1)
+		m.Store("bb", 2)
+		m.Store("ccc", 3)
+
+		if val, ok := m.Load("a"); !ok || val != 1 {
+			t.Errorf("Expected a=1, got %d, exists=%v", val, ok)
+		}
+		if val, ok := m.Load("bb"); !ok || val != 2 {
+			t.Errorf("Expected bb=2, got %d, exists=%v", val, ok)
+		}
+		if val, ok := m.Load("ccc"); !ok || val != 3 {
+			t.Errorf("Expected ccc=3, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("UnsafeHasherWithLinearDistribution", func(t *testing.T) {
+		// Custom unsafe hasher for integers
+		unsafeIntHasher := func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			val := *(*int)(ptr)
+			return uintptr(val*31) ^ seed
+		}
+
+		m := NewMap[int, string](WithKeyHasherUnsafe(unsafeIntHasher, true))
+
+		// Test with sequential keys (good for linear distribution)
+		for i := range 100 {
+			m.Store(i, fmt.Sprintf("value%d", i))
+		}
+
+		// Verify all values
+		for i := range 100 {
+			expected := fmt.Sprintf("value%d", i)
+			if val, ok := m.Load(i); !ok || val != expected {
+				t.Errorf("Expected %d=%s, got %s, exists=%v", i, expected, val, ok)
+			}
+		}
+	})
+
+	t.Run("UnsafeHasherWithShiftDistribution", func(t *testing.T) {
+		// Custom unsafe hasher for strings
+		unsafeStringHasher := func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			str := *(*string)(ptr)
+			hash := seed
+			for _, b := range []byte(str) {
+				hash = hash*33 + uintptr(b)
+			}
+			return hash
+		}
+
+		m := NewMap[string, int](WithKeyHasherUnsafe(unsafeStringHasher))
+
+		// Test with random-like string keys
+		keys := []string{"apple", "banana", "cherry", "date", "elderberry"}
+		for i, key := range keys {
+			m.Store(key, i*10)
+		}
+
+		// Verify all values
+		for i, key := range keys {
+			expected := i * 10
+			if val, ok := m.Load(key); !ok || val != expected {
+				t.Errorf("Expected %s=%d, got %d, exists=%v", key, expected, val, ok)
+			}
+		}
+	})
+
+	t.Run("UnsafeHasherWithCollisions", func(t *testing.T) {
+		// Intentionally bad hasher that causes collisions
+		badHasher := func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			return 42 // Always return the same hash
+		}
+
+		m := NewMap[string, int](WithKeyHasherUnsafe(badHasher))
+
+		// Store multiple values that will all hash to the same value
+		testData := map[string]int{
+			"key1": 100,
+			"key2": 200,
+			"key3": 300,
+			"key4": 400,
+		}
+
+		for key, val := range testData {
+			m.Store(key, val)
+		}
+
+		// Verify all values can still be retrieved correctly
+		for key, expected := range testData {
+			if val, ok := m.Load(key); !ok || val != expected {
+				t.Errorf("Expected %s=%d, got %d, exists=%v", key, expected, val, ok)
+			}
+		}
+	})
+
+	t.Run("UnsafeHasherNilFunction", func(t *testing.T) {
+		// Test with nil hasher (should use default)
+		m := NewMap[string, int](WithKeyHasherUnsafe(nil))
+
+		m.Store("test", 42)
+		if val, ok := m.Load("test"); !ok || val != 42 {
+			t.Errorf("Expected test=42, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("UnsafeHasherStructKeys", func(t *testing.T) {
+		type TestStruct struct {
+			ID   int
+			Name string
+		}
+
+		// Custom unsafe hasher for struct
+		structHasher := func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			s := *(*TestStruct)(ptr)
+			return uintptr(s.ID)*31 + uintptr(len(s.Name)) + seed
+		}
+
+		m := NewMap[TestStruct, string](WithKeyHasherUnsafe(structHasher))
+
+		key1 := TestStruct{ID: 1, Name: "Alice"}
+		key2 := TestStruct{ID: 2, Name: "Bob"}
+
+		m.Store(key1, "value1")
+		m.Store(key2, "value2")
+
+		if val, ok := m.Load(key1); !ok || val != "value1" {
+			t.Errorf("Expected key1=value1, got %s, exists=%v", val, ok)
+		}
+		if val, ok := m.Load(key2); !ok || val != "value2" {
+			t.Errorf("Expected key2=value2, got %s, exists=%v", val, ok)
+		}
+	})
+}
+
+// TestMapWithValueEqualUnsafe tests the WithValueEqualUnsafe function
+func TestMapWithValueEqualUnsafe(t *testing.T) {
+	t.Run("BasicUnsafeValueEqual", func(t *testing.T) {
+		type TestValue struct {
+			ID   int
+			Name string
+		}
+
+		// Custom unsafe equality function that only compares ID
+		unsafeEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			val1 := *(*TestValue)(ptr1)
+			val2 := *(*TestValue)(ptr2)
+			return val1.ID == val2.ID
+		}
+
+		m := NewMap[string, TestValue](WithValueEqualUnsafe(unsafeEqual))
+
+		val1 := TestValue{ID: 1, Name: "Alice"}
+		val2 := TestValue{ID: 1, Name: "Bob"} // Same ID, different name
+		val3 := TestValue{ID: 2, Name: "Charlie"}
+
+		m.Store("key1", val1)
+
+		// CompareAndSwap should succeed because IDs match (1 == 1)
+		if !m.CompareAndSwap("key1", val2, val3) {
+			t.Error("CompareAndSwap should succeed with custom equality (same ID)")
+		}
+
+		// Verify the value was swapped
+		if result, ok := m.Load("key1"); !ok || result.ID != 2 {
+			t.Errorf("Expected ID=2 after swap, got ID=%d, exists=%v", result.ID, ok)
+		}
+	})
+
+	t.Run("UnsafeValueEqualWithCompareAndDelete", func(t *testing.T) {
+		type TestValue struct {
+			Score int
+			Extra string
+		}
+
+		// Custom unsafe equality that only compares Score
+		unsafeEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			val1 := *(*TestValue)(ptr1)
+			val2 := *(*TestValue)(ptr2)
+			return val1.Score == val2.Score
+		}
+
+		m := NewMap[string, TestValue](WithValueEqualUnsafe(unsafeEqual))
+
+		stored := TestValue{Score: 100, Extra: "original"}
+		compare := TestValue{Score: 100, Extra: "different"} // Same score, different extra
+
+		m.Store("test", stored)
+
+		// CompareAndDelete should succeed because scores match
+		if !m.CompareAndDelete("test", compare) {
+			t.Error("CompareAndDelete should succeed with custom equality (same score)")
+		}
+
+		// Verify the key was deleted
+		if _, ok := m.Load("test"); ok {
+			t.Error("Key should be deleted after CompareAndDelete")
+		}
+	})
+
+	t.Run("UnsafeValueEqualSliceComparison", func(t *testing.T) {
+		// Custom unsafe equality for slice comparison
+		unsafeSliceEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			slice1 := *(*[]int)(ptr1)
+			slice2 := *(*[]int)(ptr2)
+
+			if len(slice1) != len(slice2) {
+				return false
+			}
+
+			for i := range slice1 {
+				if slice1[i] != slice2[i] {
+					return false
+				}
+			}
+			return true
+		}
+
+		m := NewMap[string, []int](WithValueEqualUnsafe(unsafeSliceEqual))
+
+		slice1 := []int{1, 2, 3}
+		slice2 := []int{1, 2, 3} // Same content, different slice
+		slice3 := []int{4, 5, 6}
+
+		m.Store("key", slice1)
+
+		// CompareAndSwap should succeed because slice contents are equal
+		if !m.CompareAndSwap("key", slice2, slice3) {
+			t.Error("CompareAndSwap should succeed with custom slice equality")
+		}
+
+		// Verify the value was swapped
+		if result, ok := m.Load("key"); !ok || len(result) != 3 || result[0] != 4 {
+			t.Errorf("Expected [4,5,6] after swap, got %v, exists=%v", result, ok)
+		}
+	})
+
+	t.Run("UnsafeValueEqualFloatTolerance", func(t *testing.T) {
+		// Custom unsafe equality for float comparison with tolerance
+		const tolerance = 0.001
+		unsafeFloatEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			val1 := *(*float64)(ptr1)
+			val2 := *(*float64)(ptr2)
+			diff := val1 - val2
+			if diff < 0 {
+				diff = -diff
+			}
+			return diff < tolerance
+		}
+
+		m := NewMap[string, float64](WithValueEqualUnsafe(unsafeFloatEqual))
+
+		m.Store("pi", 3.14159)
+
+		// These should be considered equal due to tolerance
+		closeValue := 3.14160 // Within tolerance
+		newValue := 2.71828
+
+		if !m.CompareAndSwap("pi", closeValue, newValue) {
+			t.Error("CompareAndSwap should succeed with float tolerance equality")
+		}
+
+		// Verify the value was swapped
+		if result, ok := m.Load("pi"); !ok || result != newValue {
+			t.Errorf("Expected %f after swap, got %f, exists=%v", newValue, result, ok)
+		}
+	})
+
+	t.Run("UnsafeValueEqualNilFunction", func(t *testing.T) {
+		// Test with nil equality function (should use default)
+		m := NewMap[string, int](WithValueEqualUnsafe(nil))
+
+		m.Store("test", 42)
+
+		// Should use default equality
+		if !m.CompareAndSwap("test", 42, 84) {
+			t.Error("CompareAndSwap should succeed with default equality")
+		}
+
+		if val, ok := m.Load("test"); !ok || val != 84 {
+			t.Errorf("Expected test=84, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("UnsafeValueEqualCaseInsensitiveString", func(t *testing.T) {
+		// Custom unsafe equality for case-insensitive string comparison
+		unsafeCaseInsensitiveEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			str1 := *(*string)(ptr1)
+			str2 := *(*string)(ptr2)
+			return strings.EqualFold(str1, str2)
+		}
+
+		m := NewMap[int, string](WithValueEqualUnsafe(unsafeCaseInsensitiveEqual))
+
+		m.Store(1, "Hello")
+
+		// Should match despite different case
+		if !m.CompareAndSwap(1, "HELLO", "World") {
+			t.Error("CompareAndSwap should succeed with case-insensitive equality")
+		}
+
+		if val, ok := m.Load(1); !ok || val != "World" {
+			t.Errorf("Expected 1=World, got %s, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("UnsafeValueEqualComplexStruct", func(t *testing.T) {
+		type ComplexValue struct {
+			Primary   int
+			Secondary string
+			Metadata  map[string]any
+		}
+
+		// Custom unsafe equality that only compares Primary field
+		unsafeComplexEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			val1 := *(*ComplexValue)(ptr1)
+			val2 := *(*ComplexValue)(ptr2)
+			return val1.Primary == val2.Primary
+		}
+
+		m := NewMap[string, ComplexValue](WithValueEqualUnsafe(unsafeComplexEqual))
+
+		val1 := ComplexValue{
+			Primary:   100,
+			Secondary: "original",
+			Metadata:  map[string]any{"key": "value1"},
+		}
+
+		val2 := ComplexValue{
+			Primary:   100, // Same primary
+			Secondary: "different",
+			Metadata:  map[string]any{"key": "value2"},
+		}
+
+		val3 := ComplexValue{
+			Primary:   200,
+			Secondary: "new",
+			Metadata:  map[string]any{"key": "value3"},
+		}
+
+		m.Store("complex", val1)
+
+		// Should succeed because Primary fields match
+		if !m.CompareAndSwap("complex", val2, val3) {
+			t.Error("CompareAndSwap should succeed with custom complex equality")
+		}
+
+		// Verify the value was swapped
+		if result, ok := m.Load("complex"); !ok || result.Primary != 200 {
+			t.Errorf("Expected Primary=200 after swap, got Primary=%d, exists=%v", result.Primary, ok)
+		}
+	})
+}
+
+// TestMapWithBuiltInHasher tests the WithBuiltInHasher function
+func TestMapWithBuiltInHasher(t *testing.T) {
+	t.Run("BasicBuiltInHasher", func(t *testing.T) {
+		// Test with built-in hasher for string keys
+		m := NewMap[string, int](WithBuiltInHasher[string]())
+
+		// Basic operations should work normally
+		m.Store("hello", 100)
+		m.Store("world", 200)
+
+		if val, ok := m.Load("hello"); !ok || val != 100 {
+			t.Errorf("Expected hello=100, got %d, exists=%v", val, ok)
+		}
+
+		if val, ok := m.Load("world"); !ok || val != 200 {
+			t.Errorf("Expected world=200, got %d, exists=%v", val, ok)
+		}
+
+		// Test Range functionality
+		count := 0
+		m.Range(func(key string, value int) bool {
+			count++
+			return true
+		})
+
+		if count != 2 {
+			t.Errorf("Expected 2 items in range, got %d", count)
+		}
+	})
+
+	t.Run("BuiltInHasherWithIntKeys", func(t *testing.T) {
+		// Test with built-in hasher for int keys
+		m := NewMap[int, string](WithBuiltInHasher[int]())
+
+		// Test with various int values
+		testData := map[int]string{
+			0:          "zero",
+			1:          "one",
+			-1:         "negative one",
+			1000000:    "million",
+			-1000000:   "negative million",
+			2147483647: "max int32",
+		}
+
+		// Store all test data
+		for k, v := range testData {
+			m.Store(k, v)
+		}
+
+		// Verify all data can be retrieved
+		for k, expected := range testData {
+			if val, ok := m.Load(k); !ok || val != expected {
+				t.Errorf("Expected %d=%s, got %s, exists=%v", k, expected, val, ok)
+			}
+		}
+
+		// Test deletion
+		m.Delete(0)
+
+		if _, ok := m.Load(0); ok {
+			t.Error("Key 0 should be deleted")
+		}
+	})
+
+	t.Run("BuiltInHasherWithStructKeys", func(t *testing.T) {
+		type TestKey struct {
+			ID   int
+			Name string
+		}
+
+		// Test with built-in hasher for struct keys
+		m := NewMap[TestKey, string](WithBuiltInHasher[TestKey]())
+
+		key1 := TestKey{ID: 1, Name: "Alice"}
+		key2 := TestKey{ID: 2, Name: "Bob"}
+		key3 := TestKey{ID: 1, Name: "Alice"} // Same as key1
+
+		m.Store(key1, "value1")
+		m.Store(key2, "value2")
+
+		// key3 should match key1 (same struct values)
+		if val, ok := m.Load(key3); !ok || val != "value1" {
+			t.Errorf("Expected key3 to match key1, got %s, exists=%v", val, ok)
+		}
+
+		// Test LoadOrStore
+		if val, loaded := m.LoadOrStore(key1, "new_value"); loaded != true || val != "value1" {
+			t.Errorf("LoadOrStore should return existing value, got %s, loaded=%v", val, loaded)
+		}
+
+		newKey := TestKey{ID: 3, Name: "Charlie"}
+		if val, loaded := m.LoadOrStore(newKey, "value3"); loaded != false || val != "value3" {
+			t.Errorf("LoadOrStore should store new value, got %s, loaded=%v", val, loaded)
+		}
+	})
+
+	t.Run("BuiltInHasherWithFloat64Keys", func(t *testing.T) {
+		// Test with built-in hasher for float64 keys
+		m := NewMap[float64, string](WithBuiltInHasher[float64]())
+
+		testFloats := map[float64]string{
+			1.0:     "one",
+			-1.0:    "negative one",
+			3.14159: "pi",
+			2.71828: "e",
+		}
+
+		// Handle 0.0 and -0.0 separately since they're the same key in Go maps
+		m.Store(0.0, "zero")
+		// Handle -0.0 separately to ensure it's not overwritten by 0.0
+		m.Store(math.Copysign(0, -1), "negative zero")
+
+		// Store all test data
+		for k, v := range testFloats {
+			m.Store(k, v)
+		}
+
+		// Verify all data can be retrieved
+		for k, expected := range testFloats {
+			if val, ok := m.Load(k); !ok || val != expected {
+				t.Errorf("Expected %f=%s, got %s, exists=%v", k, expected, val, ok)
+			}
+		}
+
+		// Test that NaN handling works (NaN != NaN)
+		nan1 := math.NaN()
+		nan2 := math.NaN()
+
+		m.Store(nan1, "nan1")
+
+		// Different NaN values should not match
+		if val, ok := m.Load(nan2); ok {
+			t.Errorf("Different NaN values should not match, got %s", val)
+		}
+	})
+
+	t.Run("BuiltInHasherWithStringKeys", func(t *testing.T) {
+		// Test with built-in hasher for string keys with various lengths
+		m := NewMap[string, int](WithBuiltInHasher[string]())
+
+		testStrings := []string{
+			"",                                    // empty string
+			"a",                                   // single char
+			"hello",                               // short string
+			"this is a longer string for testing", // long string
+			"unicode: 你好世界",                       // unicode string
+		}
+
+		// Store test data
+		for i, s := range testStrings {
+			m.Store(s, i)
+		}
+
+		// Verify all data can be retrieved
+		for i, s := range testStrings {
+			if val, ok := m.Load(s); !ok || val != i {
+				t.Errorf("Expected %s=%d, got %d, exists=%v", s, i, val, ok)
+			}
+		}
+	})
+
+	t.Run("BuiltInHasherPerformanceComparison", func(t *testing.T) {
+		// Compare built-in hasher with default hasher performance
+		const numItems = 1000
+
+		// Map with built-in hasher
+		m1 := NewMap[string, int](WithBuiltInHasher[string]())
+
+		// Map with default hasher (no explicit hasher)
+		m2 := NewMap[string, int]()
+
+		// Generate test data
+		keys := make([]string, numItems)
+		for i := range numItems {
+			keys[i] = fmt.Sprintf("key_%d_%s", i, strings.Repeat("x", i%10))
+		}
+
+		// Test both maps with same data
+		for i, key := range keys {
+			m1.Store(key, i)
+			m2.Store(key, i)
+		}
+
+		// Verify both maps have same data
+		for i, key := range keys {
+			val1, ok1 := m1.Load(key)
+			val2, ok2 := m2.Load(key)
+
+			if !ok1 || !ok2 || val1 != val2 || val1 != i {
+				t.Errorf("Mismatch for key %s: m1(%d,%v) vs m2(%d,%v), expected %d",
+					key, val1, ok1, val2, ok2, i)
+			}
+		}
+	})
+
+	t.Run("BuiltInHasherWithComplexKeys", func(t *testing.T) {
+		type ComplexKey struct {
+			ID       int64
+			Category string
+			Active   bool
+			Score    float64
+		}
+
+		// Test with built-in hasher for complex struct keys
+		m := NewMap[ComplexKey, string](WithBuiltInHasher[ComplexKey]())
+
+		key1 := ComplexKey{ID: 12345, Category: "premium", Active: true, Score: 95.5}
+		key2 := ComplexKey{ID: 67890, Category: "basic", Active: false, Score: 72.3}
+		key3 := ComplexKey{ID: 12345, Category: "premium", Active: true, Score: 95.5} // Same as key1
+
+		m.Store(key1, "premium_user")
+		m.Store(key2, "basic_user")
+
+		// key3 should match key1
+		if val, ok := m.Load(key3); !ok || val != "premium_user" {
+			t.Errorf("Expected key3 to match key1, got %s, exists=%v", val, ok)
+		}
+
+		// Test CompareAndSwap
+		if !m.CompareAndSwap(key1, "premium_user", "upgraded_user") {
+			t.Error("CompareAndSwap should succeed")
+		}
+
+		if val, ok := m.Load(key1); !ok || val != "upgraded_user" {
+			t.Errorf("Expected upgraded_user after CompareAndSwap, got %s, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("BuiltInHasherConsistency", func(t *testing.T) {
+		// Test that built-in hasher produces consistent results across multiple maps
+		m1 := NewMap[string, int](WithBuiltInHasher[string]())
+		m2 := NewMap[string, int](WithBuiltInHasher[string]())
+
+		testKeys := []string{"test", "hello", "world", "golang", "mapof"}
+
+		// Store same data in both maps
+		for i, key := range testKeys {
+			m1.Store(key, i)
+			m2.Store(key, i)
+		}
+
+		// Both maps should behave identically
+		for i, key := range testKeys {
+			val1, ok1 := m1.Load(key)
+			val2, ok2 := m2.Load(key)
+
+			if ok1 != ok2 || val1 != val2 || val1 != i {
+				t.Errorf("Inconsistent behavior for key %s: m1(%d,%v) vs m2(%d,%v), expected %d",
+					key, val1, ok1, val2, ok2, i)
+			}
+		}
+
+		// Test deletion consistency
+		for _, key := range testKeys[:2] {
+			m1.Delete(key)
+			m2.Delete(key)
+
+			// Verify both keys are deleted
+			_, ok1 := m1.Load(key)
+			_, ok2 := m2.Load(key)
+
+			if ok1 != ok2 {
+				t.Errorf("Inconsistent deletion for key %s: m1_exists=%v vs m2_exists=%v", key, ok1, ok2)
+			}
+		}
+	})
+}
+
+// Test types for interface testing
+type CustomKey struct {
+	ID   int64
+	Name string
+}
+
+func (c CustomKey) HashFunc(seed uintptr) uintptr {
+	// Simple hash combining ID and name length
+	return uintptr(c.ID)*31 + uintptr(len(c.Name)) + seed
+}
+
+type SequentialKey int64
+
+func (s SequentialKey) HashFunc(seed uintptr) uintptr {
+	return uintptr(s) + seed
+}
+
+func (s SequentialKey) IntKey() bool {
+	return true
+}
+
+type CustomValue struct {
+	Data []int
+	Meta string
+}
+
+func (c CustomValue) EqualFunc(other CustomValue) bool {
+	// Custom equality: only compare Data slice, ignore Meta
+	if len(c.Data) != len(other.Data) {
+		return false
+	}
+	for i, v := range c.Data {
+		if v != other.Data[i] {
+			return false
+		}
+	}
+	return true
+}
+
+type SmartKey struct {
+	ID int64
+}
+
+func (s SmartKey) HashFunc(seed uintptr) uintptr {
+	return uintptr(s.ID) + seed
+}
+
+func (s SmartKey) IntKey() bool {
+	return true
+}
+
+type SmartValue struct {
+	Value   int
+	Ignored string
+}
+
+func (s SmartValue) EqualFunc(other SmartValue) bool {
+	return s.Value == other.Value // ignore Ignored field
+}
+
+type HashKey int
+
+func (h HashKey) HashFunc(seed uintptr) uintptr {
+	return uintptr(h) + seed
+}
+
+type EqualValue struct {
+	Value int
+}
+
+func (e EqualValue) EqualFunc(other EqualValue) bool {
+	return e.Value == other.Value
+}
+
+// TestMap_Interfaces tests the IHashFunc, IIntKey, and IEqualFunc interfaces
+func TestMap_Interfaces(t *testing.T) {
+	t.Run("IHashFunc", func(t *testing.T) {
+		m := NewMap[CustomKey, string]()
+		key1 := CustomKey{ID: 1, Name: "test"}
+		key2 := CustomKey{ID: 2, Name: "hello"}
+
+		m.Store(key1, "value1")
+		m.Store(key2, "value2")
+
+		if val, ok := m.Load(key1); !ok || val != "value1" {
+			t.Errorf("Expected value1, got %s, exists=%v", val, ok)
+		}
+		if val, ok := m.Load(key2); !ok || val != "value2" {
+			t.Errorf("Expected value2, got %s, exists=%v", val, ok)
+		}
+
+		// Test that different keys with same hash don't collide incorrectly
+		key3 := CustomKey{ID: 1, Name: "test"} // same as key1
+		if val, ok := m.Load(key3); !ok || val != "value1" {
+			t.Errorf(
+				"Expected value1 for equivalent key, got %s, exists=%v",
+				val,
+				ok,
+			)
+		}
+	})
+
+	t.Run("IIntKey", func(t *testing.T) {
+		m := NewMap[SequentialKey, string]()
+
+		// Store sequential keys
+		for i := SequentialKey(1); i <= 10; i++ {
+			m.Store(i, fmt.Sprintf("value%d", i))
+		}
+
+		// Verify all values can be retrieved
+		for i := SequentialKey(1); i <= 10; i++ {
+			expected := fmt.Sprintf("value%d", i)
+			if val, ok := m.Load(i); !ok || val != expected {
+				t.Errorf("Expected %s, got %s, exists=%v", expected, val, ok)
+			}
+		}
+
+		// Test size
+		if size := m.Size(); size != 10 {
+			t.Errorf("Expected size 10, got %d", size)
+		}
+	})
+
+	t.Run("IEqualFunc", func(t *testing.T) {
+		m := NewMap[string, CustomValue]()
+
+		val1 := CustomValue{Data: []int{1, 2, 3}, Meta: "meta1"}
+		val2 := CustomValue{
+			Data: []int{1, 2, 3},
+			Meta: "meta2",
+		} // different Meta, same Data
+		val3 := CustomValue{
+			Data: []int{4, 5, 6},
+			Meta: "meta1",
+		} // different Data, same Meta
+
+		m.Store("key1", val1)
+
+		// Test CompareAndSwap with custom equality
+		// Should succeed because val1 and val2 are equal according to custom
+		// logic
+		if !m.CompareAndSwap("key1", val2, val3) {
+			t.Error("CompareAndSwap should have succeeded with custom equality")
+		}
+
+		// Verify the value was swapped
+		if actual, ok := m.Load("key1"); !ok {
+			t.Error("Key should exist after CompareAndSwap")
+		} else if !actual.EqualFunc(val3) {
+			t.Errorf("Expected value to be swapped to val3, got %+v", actual)
+		}
+
+		// Test CompareAndDelete with custom equality
+		val4 := CustomValue{
+			Data: []int{4, 5, 6},
+			Meta: "different_meta",
+		} // same Data as val3
+		if !m.CompareAndDelete("key1", val4) {
+			t.Error(
+				"CompareAndDelete should have succeeded with custom equality",
+			)
+		}
+
+		// Verify the key was deleted
+		if _, ok := m.Load("key1"); ok {
+			t.Error("Key should be deleted after CompareAndDelete")
+		}
+	})
+
+	t.Run("CombinedInterfaces", func(t *testing.T) {
+		m := NewMap[SmartKey, SmartValue]()
+
+		key := SmartKey{ID: 42}
+		val1 := SmartValue{Value: 100, Ignored: "ignore1"}
+		val2 := SmartValue{
+			Value:   100,
+			Ignored: "ignore2",
+		} // same Value, different Ignored
+		val3 := SmartValue{Value: 200, Ignored: "ignore1"} // different Value
+
+		m.Store(key, val1)
+
+		// Test that custom hash and equality work together
+		if actual, ok := m.Load(key); !ok || !actual.EqualFunc(val1) {
+			t.Errorf("Failed to load stored value")
+		}
+
+		// Test CompareAndSwap with custom equality
+		if !m.CompareAndSwap(key, val2, val3) {
+			t.Error("CompareAndSwap should succeed with custom equality")
+		}
+
+		if actual, ok := m.Load(key); !ok || !actual.EqualFunc(val3) {
+			t.Errorf("Value should be swapped to val3")
+		}
+	})
+
+	t.Run("InterfacePriority", func(t *testing.T) {
+		// Test that explicit WithKeyHasher overrides IHashFunc
+
+		// Custom hasher that should take precedence
+		customHasher := func(key HashKey, seed uintptr) uintptr {
+			return uintptr(key)*2 + seed // different from IHashFunc
+		}
+
+		m := NewMap[HashKey, string](WithKeyHasher(customHasher))
+
+		m.Store(HashKey(1), "test")
+		if val, ok := m.Load(HashKey(1)); !ok || val != "test" {
+			t.Errorf("Custom hasher should work, got %s, exists=%v", val, ok)
+		}
+
+		// Test that explicit WithValueEqual overrides IEqualFunc
+
+		// Custom equality that should take precedence
+		customEqual := func(a, b EqualValue) bool {
+			return false // always return false for testing
+		}
+
+		m2 := NewMap[string, EqualValue](WithValueEqual(customEqual))
+		val := EqualValue{Value: 42}
+		m2.Store("key", val)
+
+		// CompareAndSwap should fail because custom equality always returns
+		// false
+		if m2.CompareAndSwap("key", val, EqualValue{Value: 43}) {
+			t.Error(
+				"CompareAndSwap should fail with custom equality that always returns false",
+			)
+		}
+	})
+}
+
+func TestMapBadHash(t *testing.T) {
+	testMap(t, func() *Map[string, int] {
+		return NewBadMap[string, int]()
+	})
+}
+
+func TestMapTruncHash(t *testing.T) {
+	testMap(t, func() *Map[string, int] {
+		// Stub out the good hash function with a different terrible one
+		// (truncated hash). Everything should still work as expected.
+		// This is useful to test independently to catch issues with
+		// near collisions, where only the last few bits of the hash differ.
+		return NewTruncMap[string, int]()
+	})
+}
+
+func testMap(t *testing.T, newMap func() *Map[string, int]) {
+	t.Run("LoadEmpty", func(t *testing.T) {
+		m := newMap()
+
+		for _, s := range testData {
+			expectMissingMap(t, s, 0)(m.Load(s))
+		}
+	})
+	t.Run("LoadOrStore", func(t *testing.T) {
+		m := newMap()
+
+		for i, s := range testData {
+			expectMissingMap(t, s, 0)(m.Load(s))
+			expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+			expectPresentMap(t, s, i)(m.Load(s))
+			expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+		}
+		for i, s := range testData {
+			expectPresentMap(t, s, i)(m.Load(s))
+			expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+		}
+	})
+	t.Run("All", func(t *testing.T) {
+		m := newMap()
+
+		testAllMap(
+			t,
+			m,
+			testDataMapMap(testData[:]),
+			func(_ string, _ int) bool {
+				return true
+			},
+		)
+	})
+	t.Run("Clear", func(t *testing.T) {
+		t.Run("Simple", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			m.Clear()
+			for _, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+			}
+		})
+		t.Run("Concurrent", func(t *testing.T) {
+			m := newMap()
+
+			// Load up the map.
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+			}
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					for _, s := range testData {
+						// Try a couple of things to interfere with the clear.
+						expectNotDeletedMap(
+							t,
+							s,
+							math.MaxInt,
+						)(
+							m.CompareAndDelete(s, math.MaxInt),
+						)
+						m.CompareAndSwap(
+							s,
+							i,
+							i+1,
+						) // May succeed or fail; we don't care.
+					}
+				}(i)
+			}
+
+			// Concurrently clear the map.
+			runtime.Gosched()
+			m.Clear()
+
+			// Wait for workers to finish.
+			wg.Wait()
+
+			// It should all be empty now.
+			for _, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+			}
+		})
+	})
+	t.Run("CompareAndDelete", func(t *testing.T) {
+		t.Run("All", func(t *testing.T) {
+			m := newMap()
+
+			for range 3 {
+				for i, s := range testData {
+					expectMissingMap(t, s, 0)(m.Load(s))
+					expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+					expectPresentMap(t, s, i)(m.Load(s))
+					expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+				}
+				for i, s := range testData {
+					expectPresentMap(t, s, i)(m.Load(s))
+					expectNotDeletedMap(
+						t,
+						s,
+						math.MaxInt,
+					)(
+						m.CompareAndDelete(s, math.MaxInt),
+					)
+					expectDeletedMap(t, s, i)(m.CompareAndDelete(s, i))
+					expectNotDeletedMap(t, s, i)(m.CompareAndDelete(s, i))
+					expectMissingMap(t, s, 0)(m.Load(s))
+				}
+				for _, s := range testData {
+					expectMissingMap(t, s, 0)(m.Load(s))
+				}
+			}
+		})
+		t.Run("One", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			expectNotDeletedMap(
+				t,
+				testData[15],
+				math.MaxInt,
+			)(
+				m.CompareAndDelete(testData[15], math.MaxInt),
+			)
+			expectDeletedMap(
+				t,
+				testData[15],
+				15,
+			)(
+				m.CompareAndDelete(testData[15], 15),
+			)
+			expectNotDeletedMap(
+				t,
+				testData[15],
+				15,
+			)(
+				m.CompareAndDelete(testData[15], 15),
+			)
+			for i, s := range testData {
+				if i == 15 {
+					expectMissingMap(t, s, 0)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+		t.Run("Multiple", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			for _, i := range []int{1, 105, 6, 85} {
+				expectNotDeletedMap(
+					t,
+					testData[i],
+					math.MaxInt,
+				)(
+					m.CompareAndDelete(testData[i], math.MaxInt),
+				)
+				expectDeletedMap(
+					t,
+					testData[i],
+					i,
+				)(
+					m.CompareAndDelete(testData[i], i),
+				)
+				expectNotDeletedMap(
+					t,
+					testData[i],
+					i,
+				)(
+					m.CompareAndDelete(testData[i], i),
+				)
+			}
+			for i, s := range testData {
+				if i == 1 || i == 105 || i == 6 || i == 85 {
+					expectMissingMap(t, s, 0)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+		t.Run("Iterate", func(t *testing.T) {
+			m := newMap()
+
+			testAllMap(
+				t,
+				m,
+				testDataMapMap(testData[:]),
+				func(s string, i int) bool {
+					expectDeletedMap(t, s, i)(m.CompareAndDelete(s, i))
+					return true
+				},
+			)
+			for _, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+			}
+		})
+		t.Run("ConcurrentUnsharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					makeKey := func(s string) string {
+						return s + "-" + strconv.Itoa(id)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+						expectStoredMap(t, key, id)(m.LoadOrStore(key, id))
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedMap(t, key, id)(m.LoadOrStore(key, 0))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectDeletedMap(
+							t,
+							key,
+							id,
+						)(
+							m.CompareAndDelete(key, id),
+						)
+						expectMissingMap(t, key, 0)(m.Load(key))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+		t.Run("ConcurrentSharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			// Load up the map.
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+			}
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					for i, s := range testData {
+						expectNotDeletedMap(
+							t,
+							s,
+							math.MaxInt,
+						)(
+							m.CompareAndDelete(s, math.MaxInt),
+						)
+						m.CompareAndDelete(s, i)
+						expectMissingMap(t, s, 0)(m.Load(s))
+					}
+					for _, s := range testData {
+						expectMissingMap(t, s, 0)(m.Load(s))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+	})
+	t.Run("CompareAndSwap", func(t *testing.T) {
+		t.Run("All", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			for j := range 3 {
+				for i, s := range testData {
+					expectPresentMap(t, s, i+j)(m.Load(s))
+					expectNotSwappedMap(
+						t,
+						s,
+						math.MaxInt,
+						i+j+1,
+					)(
+						m.CompareAndSwap(s, math.MaxInt, i+j+1),
+					)
+					expectSwappedMap(
+						t,
+						s,
+						i,
+						i+j+1,
+					)(
+						m.CompareAndSwap(s, i+j, i+j+1),
+					)
+					expectNotSwappedMap(
+						t,
+						s,
+						i+j,
+						i+j+1,
+					)(
+						m.CompareAndSwap(s, i+j, i+j+1),
+					)
+					expectPresentMap(t, s, i+j+1)(m.Load(s))
+				}
+			}
+			for i, s := range testData {
+				expectPresentMap(t, s, i+3)(m.Load(s))
+			}
+		})
+		t.Run("One", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			expectNotSwappedMap(
+				t,
+				testData[15],
+				math.MaxInt,
+				16,
+			)(
+				m.CompareAndSwap(testData[15], math.MaxInt, 16),
+			)
+			expectSwappedMap(
+				t,
+				testData[15],
+				15,
+				16,
+			)(
+				m.CompareAndSwap(testData[15], 15, 16),
+			)
+			expectNotSwappedMap(
+				t,
+				testData[15],
+				15,
+				16,
+			)(
+				m.CompareAndSwap(testData[15], 15, 16),
+			)
+			for i, s := range testData {
+				if i == 15 {
+					expectPresentMap(t, s, 16)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+		t.Run("Multiple", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			for _, i := range []int{1, 105, 6, 85} {
+				expectNotSwappedMap(
+					t,
+					testData[i],
+					math.MaxInt,
+					i+1,
+				)(
+					m.CompareAndSwap(testData[i], math.MaxInt, i+1),
+				)
+				expectSwappedMap(
+					t,
+					testData[i],
+					i,
+					i+1,
+				)(
+					m.CompareAndSwap(testData[i], i, i+1),
+				)
+				expectNotSwappedMap(
+					t,
+					testData[i],
+					i,
+					i+1,
+				)(
+					m.CompareAndSwap(testData[i], i, i+1),
+				)
+			}
+			for i, s := range testData {
+				if i == 1 || i == 105 || i == 6 || i == 85 {
+					expectPresentMap(t, s, i+1)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+
+		t.Run("ConcurrentUnsharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					makeKey := func(s string) string {
+						return s + "-" + strconv.Itoa(id)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+						expectStoredMap(t, key, id)(m.LoadOrStore(key, id))
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedMap(t, key, id)(m.LoadOrStore(key, 0))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectSwappedMap(
+							t,
+							key,
+							id,
+							id+1,
+						)(
+							m.CompareAndSwap(key, id, id+1),
+						)
+						expectPresentMap(t, key, id+1)(m.Load(key))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id+1)(m.Load(key))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+		t.Run("ConcurrentUnsharedKeysWithDelete", func(t *testing.T) {
+			m := newMap()
+
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					makeKey := func(s string) string {
+						return s + "-" + strconv.Itoa(id)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+						expectStoredMap(t, key, id)(m.LoadOrStore(key, id))
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedMap(t, key, id)(m.LoadOrStore(key, 0))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectSwappedMap(
+							t,
+							key,
+							id,
+							id+1,
+						)(
+							m.CompareAndSwap(key, id, id+1),
+						)
+						expectPresentMap(t, key, id+1)(m.Load(key))
+						expectDeletedMap(
+							t,
+							key,
+							id+1,
+						)(
+							m.CompareAndDelete(key, id+1),
+						)
+						expectNotSwappedMap(
+							t,
+							key,
+							id+1,
+							id+2,
+						)(
+							m.CompareAndSwap(key, id+1, id+2),
+						)
+						expectNotDeletedMap(
+							t,
+							key,
+							id+1,
+						)(
+							m.CompareAndDelete(key, id+1),
+						)
+						expectMissingMap(t, key, 0)(m.Load(key))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+		t.Run("ConcurrentSharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			// Load up the map.
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+			}
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					for i, s := range testData {
+						expectNotSwappedMap(
+							t,
+							s,
+							math.MaxInt,
+							i+1,
+						)(
+							m.CompareAndSwap(s, math.MaxInt, i+1),
+						)
+						m.CompareAndSwap(s, i, i+1)
+						expectPresentMap(t, s, i+1)(m.Load(s))
+					}
+					for i, s := range testData {
+						expectPresentMap(t, s, i+1)(m.Load(s))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+	})
+	t.Run("Swap", func(t *testing.T) {
+		t.Run("All", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectNotLoadedFromSwapMap(t, s, i)(m.Swap(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedFromSwapMap(t, s, i, i)(m.Swap(s, i))
+			}
+			for j := range 3 {
+				for i, s := range testData {
+					expectPresentMap(t, s, i+j)(m.Load(s))
+					expectLoadedFromSwapMap(
+						t,
+						s,
+						i+j,
+						i+j+1,
+					)(
+						m.Swap(s, i+j+1),
+					)
+					expectPresentMap(t, s, i+j+1)(m.Load(s))
+				}
+			}
+			for i, s := range testData {
+				expectLoadedFromSwapMap(t, s, i+3, i+3)(m.Swap(s, i+3))
+			}
+		})
+		t.Run("One", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectNotLoadedFromSwapMap(t, s, i)(m.Swap(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedFromSwapMap(t, s, i, i)(m.Swap(s, i))
+			}
+			expectLoadedFromSwapMap(
+				t,
+				testData[15],
+				15,
+				16,
+			)(
+				m.Swap(testData[15], 16),
+			)
+			for i, s := range testData {
+				if i == 15 {
+					expectPresentMap(t, s, 16)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+		t.Run("Multiple", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectNotLoadedFromSwapMap(t, s, i)(m.Swap(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedFromSwapMap(t, s, i, i)(m.Swap(s, i))
+			}
+			for _, i := range []int{1, 105, 6, 85} {
+				expectLoadedFromSwapMap(
+					t,
+					testData[i],
+					i,
+					i+1,
+				)(
+					m.Swap(testData[i], i+1),
+				)
+			}
+			for i, s := range testData {
+				if i == 1 || i == 105 || i == 6 || i == 85 {
+					expectPresentMap(t, s, i+1)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+		t.Run("ConcurrentUnsharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					makeKey := func(s string) string {
+						return s + "-" + strconv.Itoa(id)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+						expectNotLoadedFromSwapMap(
+							t,
+							key,
+							id,
+						)(
+							m.Swap(key, id),
+						)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedFromSwapMap(
+							t,
+							key,
+							id,
+							id,
+						)(
+							m.Swap(key, id),
+						)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedFromSwapMap(
+							t,
+							key,
+							id,
+							id+1,
+						)(
+							m.Swap(key, id+1),
+						)
+						expectPresentMap(t, key, id+1)(m.Load(key))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id+1)(m.Load(key))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+		t.Run("ConcurrentUnsharedKeysWithDelete", func(t *testing.T) {
+			m := newMap()
+
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					makeKey := func(s string) string {
+						return s + "-" + strconv.Itoa(id)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+						expectNotLoadedFromSwapMap(
+							t,
+							key,
+							id,
+						)(
+							m.Swap(key, id),
+						)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedFromSwapMap(
+							t,
+							key,
+							id,
+							id,
+						)(
+							m.Swap(key, id),
+						)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedFromSwapMap(
+							t,
+							key,
+							id,
+							id+1,
+						)(
+							m.Swap(key, id+1),
+						)
+						expectPresentMap(t, key, id+1)(m.Load(key))
+						expectDeletedMap(
+							t,
+							key,
+							id+1,
+						)(
+							m.CompareAndDelete(key, id+1),
+						)
+						expectNotLoadedFromSwapMap(
+							t,
+							key,
+							id+2,
+						)(
+							m.Swap(key, id+2),
+						)
+						expectPresentMap(t, key, id+2)(m.Load(key))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id+2)(m.Load(key))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+		t.Run("ConcurrentSharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			// Load up the map.
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+			}
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					for i, s := range testData {
+						m.Swap(s, i+1)
+						expectPresentMap(t, s, i+1)(m.Load(s))
+					}
+					for i, s := range testData {
+						expectPresentMap(t, s, i+1)(m.Load(s))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+	})
+	t.Run("LoadAndDelete", func(t *testing.T) {
+		t.Run("All", func(t *testing.T) {
+			m := newMap()
+
+			for range 3 {
+				for i, s := range testData {
+					expectMissingMap(t, s, 0)(m.Load(s))
+					expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+					expectPresentMap(t, s, i)(m.Load(s))
+					expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+				}
+				for i, s := range testData {
+					expectPresentMap(t, s, i)(m.Load(s))
+					expectLoadedFromDeleteMap(t, s, i)(m.LoadAndDelete(s))
+					expectMissingMap(t, s, 0)(m.Load(s))
+					expectNotLoadedFromDeleteMap(t, s, 0)(m.LoadAndDelete(s))
+				}
+				for _, s := range testData {
+					expectMissingMap(t, s, 0)(m.Load(s))
+				}
+			}
+		})
+		t.Run("One", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			expectPresentMap(t, testData[15], 15)(m.Load(testData[15]))
+			expectLoadedFromDeleteMap(
+				t,
+				testData[15],
+				15,
+			)(
+				m.LoadAndDelete(testData[15]),
+			)
+			expectMissingMap(t, testData[15], 0)(m.Load(testData[15]))
+			expectNotLoadedFromDeleteMap(
+				t,
+				testData[15],
+				0,
+			)(
+				m.LoadAndDelete(testData[15]),
+			)
+			for i, s := range testData {
+				if i == 15 {
+					expectMissingMap(t, s, 0)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+		t.Run("Multiple", func(t *testing.T) {
+			m := newMap()
+
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+				expectPresentMap(t, s, i)(m.Load(s))
+				expectLoadedMap(t, s, i)(m.LoadOrStore(s, 0))
+			}
+			for _, i := range []int{1, 105, 6, 85} {
+				expectPresentMap(t, testData[i], i)(m.Load(testData[i]))
+				expectLoadedFromDeleteMap(
+					t,
+					testData[i],
+					i,
+				)(
+					m.LoadAndDelete(testData[i]),
+				)
+				expectMissingMap(t, testData[i], 0)(m.Load(testData[i]))
+				expectNotLoadedFromDeleteMap(
+					t,
+					testData[i],
+					0,
+				)(
+					m.LoadAndDelete(testData[i]),
+				)
+			}
+			for i, s := range testData {
+				if i == 1 || i == 105 || i == 6 || i == 85 {
+					expectMissingMap(t, s, 0)(m.Load(s))
+				} else {
+					expectPresentMap(t, s, i)(m.Load(s))
+				}
+			}
+		})
+		t.Run("Iterate", func(t *testing.T) {
+			m := newMap()
+
+			testAllMap(
+				t,
+				m,
+				testDataMapMap(testData[:]),
+				func(s string, i int) bool {
+					expectLoadedFromDeleteMap(t, s, i)(m.LoadAndDelete(s))
+					return true
+				},
+			)
+			for _, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+			}
+		})
+		t.Run("ConcurrentUnsharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					makeKey := func(s string) string {
+						return s + "-" + strconv.Itoa(id)
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+						expectStoredMap(t, key, id)(m.LoadOrStore(key, id))
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedMap(t, key, id)(m.LoadOrStore(key, 0))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectPresentMap(t, key, id)(m.Load(key))
+						expectLoadedFromDeleteMap(
+							t,
+							key,
+							id,
+						)(
+							m.LoadAndDelete(key),
+						)
+						expectMissingMap(t, key, 0)(m.Load(key))
+					}
+					for _, s := range testData {
+						key := makeKey(s)
+						expectMissingMap(t, key, 0)(m.Load(key))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+		t.Run("ConcurrentSharedKeys", func(t *testing.T) {
+			m := newMap()
+
+			// Load up the map.
+			for i, s := range testData {
+				expectMissingMap(t, s, 0)(m.Load(s))
+				expectStoredMap(t, s, i)(m.LoadOrStore(s, i))
+			}
+			gmp := runtime.GOMAXPROCS(-1)
+			var wg sync.WaitGroup
+			for i := range gmp {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+
+					for _, s := range testData {
+						m.LoadAndDelete(s)
+						expectMissingMap(t, s, 0)(m.Load(s))
+					}
+					for _, s := range testData {
+						expectMissingMap(t, s, 0)(m.Load(s))
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+	})
+}
+
+func testAllMap[K, V comparable](
+	t *testing.T,
+	m *Map[K, V],
+	testData map[K]V,
+	yield func(K, V) bool,
+) {
+	for k, v := range testData {
+		expectStoredMap(t, k, v)(m.LoadOrStore(k, v))
+	}
+	visited := make(map[K]int)
+	m.All()(func(key K, got V) bool {
+		want, ok := testData[key]
+		if !ok {
+			t.Errorf("unexpected key %v in map", key)
+			return false
+		}
+		if got != want {
+			t.Errorf("expected key %v to have value %v, got %v", key, want, got)
+			return false
+		}
+		visited[key]++
+		return yield(key, got)
+	})
+	for key, n := range visited {
+		if n > 1 {
+			t.Errorf("visited key %v more than once", key)
+		}
+	}
+}
+
+func expectPresentMap[K, V comparable](
+	t *testing.T,
+	key K,
+	want V,
+) func(got V, ok bool) {
+	t.Helper()
+	return func(got V, ok bool) {
+		t.Helper()
+
+		if !ok {
+			t.Errorf("expected key %v to be present in map", key)
+		}
+		if ok && got != want {
+			t.Errorf("expected key %v to have value %v, got %v", key, want, got)
+		}
+	}
+}
+
+func expectMissingMap[K, V comparable](
+	t *testing.T,
+	key K,
+	want V,
+) func(got V, ok bool) {
+	t.Helper()
+	if want != *new(V) {
+		// This is awkward, but the want argument is necessary to smooth over
+		// type inference.
+		// Just make sure the want argument always looks the same.
+		panic("expectMissingMap must always have a zero value variable")
+	}
+	return func(got V, ok bool) {
+		t.Helper()
+
+		if ok {
+			t.Errorf(
+				"expected key %v to be missing from map, got value %v",
+				key,
+				got,
+			)
+		}
+		if !ok && got != want {
+			t.Errorf(
+				"expected missing key %v to be paired with the zero value; got %v",
+				key,
+				got,
+			)
+		}
+	}
+}
+
+func expectLoadedMap[K, V comparable](
+	t *testing.T,
+	key K,
+	want V,
+) func(got V, loaded bool) {
+	t.Helper()
+	return func(got V, loaded bool) {
+		t.Helper()
+
+		if !loaded {
+			t.Errorf("expected key %v to have been loaded, not stored", key)
+		}
+		if got != want {
+			t.Errorf("expected key %v to have value %v, got %v", key, want, got)
+		}
+	}
+}
+
+func expectStoredMap[K, V comparable](
+	t *testing.T,
+	key K,
+	want V,
+) func(got V, loaded bool) {
+	t.Helper()
+	return func(got V, loaded bool) {
+		t.Helper()
+
+		if loaded {
+			t.Errorf(
+				"expected inserted key %v to have been stored, not loaded",
+				key,
+			)
+		}
+		if got != want {
+			t.Errorf(
+				"expected inserted key %v to have value %v, got %v",
+				key,
+				want,
+				got,
+			)
+		}
+	}
+}
+
+func expectDeletedMap[K, V comparable](
+	t *testing.T,
+	key K,
+	old V,
+) func(deleted bool) {
+	t.Helper()
+	return func(deleted bool) {
+		t.Helper()
+
+		if !deleted {
+			t.Errorf(
+				"expected key %v with value %v to be in map and deleted",
+				key,
+				old,
+			)
+		}
+	}
+}
+
+func expectNotDeletedMap[K, V comparable](
+	t *testing.T,
+	key K,
+	old V,
+) func(deleted bool) {
+	t.Helper()
+	return func(deleted bool) {
+		t.Helper()
+
+		if deleted {
+			t.Errorf(
+				"expected key %v with value %v to not be in map and thus not deleted",
+				key,
+				old,
+			)
+		}
+	}
+}
+
+func expectSwappedMap[K, V comparable](
+	t *testing.T,
+	key K,
+	old, new V,
+) func(swapped bool) {
+	t.Helper()
+	return func(swapped bool) {
+		t.Helper()
+
+		if !swapped {
+			t.Errorf(
+				"expected key %v with value %v to be in map and swapped for %v",
+				key,
+				old,
+				new,
+			)
+		}
+	}
+}
+
+func expectNotSwappedMap[K, V comparable](
+	t *testing.T,
+	key K,
+	old, new V,
+) func(swapped bool) {
+	t.Helper()
+	return func(swapped bool) {
+		t.Helper()
+
+		if swapped {
+			t.Errorf(
+				"expected key %v with value %v to not be in map or not swapped for %v",
+				key,
+				old,
+				new,
+			)
+		}
+	}
+}
+
+func expectLoadedFromSwapMap[K, V comparable](
+	t *testing.T,
+	key K,
+	want, new V,
+) func(got V, loaded bool) {
+	t.Helper()
+	return func(got V, loaded bool) {
+		t.Helper()
+
+		if !loaded {
+			t.Errorf(
+				"expected key %v to be in map and for %v to have been swapped for %v",
+				key,
+				want,
+				new,
+			)
+		} else if want != got {
+			t.Errorf("key %v had its value %v swapped for %v, but expected it to have value %v", key, got, new, want)
+		}
+	}
+}
+
+func expectNotLoadedFromSwapMap[K, V comparable](
+	t *testing.T,
+	key K,
+	_ V,
+) func(old V, loaded bool) {
+	t.Helper()
+	return func(old V, loaded bool) {
+		t.Helper()
+
+		if loaded {
+			t.Errorf(
+				"expected key %v to not be in map, but found value %v for it",
+				key,
+				old,
+			)
+		}
+	}
+}
+
+func expectLoadedFromDeleteMap[K, V comparable](
+	t *testing.T,
+	key K,
+	want V,
+) func(got V, loaded bool) {
+	t.Helper()
+	return func(got V, loaded bool) {
+		t.Helper()
+
+		if !loaded {
+			t.Errorf("expected key %v to be in map to be deleted", key)
+		} else if want != got {
+			t.Errorf("key %v was deleted with value %v, but expected it to have value %v", key, got, want)
+		}
+	}
+}
+
+func expectNotLoadedFromDeleteMap[K, V comparable](
+	t *testing.T,
+	key K,
+	_ V,
+) func(old V, loaded bool) {
+	t.Helper()
+	return func(old V, loaded bool) {
+		t.Helper()
+
+		if loaded {
+			t.Errorf(
+				"expected key %v to not be in map, but found value %v for it",
+				key,
+				old,
+			)
+		}
+	}
+}
+
+func testDataMapMap(data []string) map[string]int {
+	m := make(map[string]int)
+	for i, s := range data {
+		m[s] = i
+	}
+	return m
+}
+
+// ------------------------------------------------------
+
+type point struct {
+	x int32
+	y int32
+}
+
+func TestMap_MissingEntry(t *testing.T) {
+	m := NewMap[string, string]()
+	v, ok := m.Load("foo")
+	if ok {
+		t.Fatalf("value was not expected: %v", v)
+	}
+	if deleted, loaded := m.LoadAndDelete("foo"); loaded {
+		t.Fatalf("value was not expected %v", deleted)
+	}
+	if actual, loaded := m.LoadOrStore("foo", "bar"); loaded {
+		t.Fatalf("value was not expected %v", actual)
+	}
+}
+
+func TestMap_EmptyStringKey(t *testing.T) {
+	m := NewMap[string, string]()
+	m.Store("", "foobar")
+	v, ok := m.Load("")
+	if !ok {
+		t.Fatal("value was expected")
+	}
+	if v != "foobar" {
+		t.Fatalf("value does not match: %v", v)
+	}
+}
+
+func TestMapStore_NilValue(t *testing.T) {
+	m := NewMap[string, *struct{}]()
+	m.Store("foo", nil)
+	v, ok := m.Load("foo")
+	if !ok {
+		t.Fatal("nil value was expected")
+	}
+	if v != nil {
+		t.Fatalf("value was not nil: %v", v)
+	}
+}
+
+func TestMapLoadOrStore_NilValue(t *testing.T) {
+	m := NewMap[string, *struct{}]()
+	m.LoadOrStore("foo", nil)
+	v, loaded := m.LoadOrStore("foo", nil)
+	if !loaded {
+		t.Fatal("nil value was expected")
+	}
+	if v != nil {
+		t.Fatalf("value was not nil: %v", v)
+	}
+}
+
+func TestMapLoadOrStore_NonNilValue(t *testing.T) {
+	type foo struct{}
+	m := NewMap[string, *foo]()
+	newv := &foo{}
+	v, loaded := m.LoadOrStore("foo", newv)
+	if loaded {
+		t.Fatal("no value was expected")
+	}
+	if v != newv {
+		t.Fatalf("value does not match: %v", v)
+	}
+	newv2 := &foo{}
+	v, loaded = m.LoadOrStore("foo", newv2)
+	if !loaded {
+		t.Fatal("value was expected")
+	}
+	if v != newv {
+		t.Fatalf("value does not match: %v", v)
+	}
+}
+
+func TestMapRange(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[string, int]()
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	iters := 0
+	met := make(map[string]int)
+	m.Range(func(key string, value int) bool {
+		if key != strconv.Itoa(value) {
+			t.Fatalf(
+				"got unexpected key/value for iteration %d: %v/%v",
+				iters,
+				key,
+				value,
+			)
+			return false
+		}
+		met[key] += 1
+		iters++
+		return true
+	})
+	if iters != numEntries {
+		t.Fatalf("got unexpected number of iterations: %d", iters)
+	}
+	for i := range numEntries {
+		if c := met[strconv.Itoa(i)]; c != 1 {
+			t.Fatalf("range did not iterate correctly over %d: %d", i, c)
+		}
+	}
+}
+
+func TestMapRange_FalseReturned(t *testing.T) {
+	m := NewMap[string, int]()
+	for i := range 100 {
+		m.Store(strconv.Itoa(i), i)
+	}
+	iters := 0
+	m.Range(func(key string, value int) bool {
+		iters++
+		return iters != 13
+	})
+	if iters != 13 {
+		t.Fatalf("got unexpected number of iterations: %d", iters)
+	}
+}
+
+func TestMapRange_NestedDelete(t *testing.T) {
+	const numEntries = 256
+	m := NewMap[string, int]()
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	m.Range(func(key string, value int) bool {
+		m.Delete(key)
+		return true
+	})
+	for i := range numEntries {
+		if _, ok := m.Load(strconv.Itoa(i)); ok {
+			t.Fatalf("value found for %d", i)
+		}
+	}
+}
+
+func TestMapStringStore(t *testing.T) {
+	const numEntries = 128
+	m := NewMap[string, int]()
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	for i := range numEntries {
+		v, ok := m.Load(strconv.Itoa(i))
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+}
+
+func TestMapIntStore(t *testing.T) {
+	const numEntries = 128
+	m := NewMap[int, int]()
+	for i := range numEntries {
+		m.Store(i, i)
+	}
+	for i := range numEntries {
+		v, ok := m.Load(i)
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+}
+
+func TestMapStore_StructKeys_IntValues(t *testing.T) {
+	const numEntries = 128
+	m := NewMap[point, int]()
+	for i := range numEntries {
+		m.Store(point{int32(i), -int32(i)}, i)
+	}
+	for i := range numEntries {
+		v, ok := m.Load(point{int32(i), -int32(i)})
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+}
+
+func TestMapStore_StructKeys_StructValues(t *testing.T) {
+	const numEntries = 128
+	m := NewMap[point, point]()
+	for i := range numEntries {
+		m.Store(point{int32(i), -int32(i)}, point{-int32(i), int32(i)})
+	}
+	for i := range numEntries {
+		v, ok := m.Load(point{int32(i), -int32(i)})
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v.x != -int32(i) {
+			t.Fatalf("x value does not match for %d: %v", i, v)
+		}
+		if v.y != int32(i) {
+			t.Fatalf("y value does not match for %d: %v", i, v)
+		}
+	}
+}
+
+func TestMapWithHasher(t *testing.T) {
+	const numEntries = 10000
+	m := NewMap[int, int](WithKeyHasher(murmur3Finalizer))
+	for i := range numEntries {
+		m.Store(i, i)
+	}
+	for i := range numEntries {
+		v, ok := m.Load(i)
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+}
+
+func murmur3Finalizer(i int, _ uintptr) uintptr {
+	if intSize == 64 {
+		h := uint32(i >> 32)
+		h = (h ^ (h >> 16)) * 0x85ebca6b
+		h = (h ^ (h >> 13)) * 0xc2b2ae35
+		h = h ^ (h >> 16)
+		l := uint32(i)
+		l = (l ^ (l >> 16)) * 0x85ebca6b
+		l = (l ^ (l >> 13)) * 0xc2b2ae35
+		l = l ^ (l >> 16)
+		return uintptr(h)<<32 | uintptr(l)
+	} else {
+		h := uintptr(i)
+		h = (h ^ (h >> 16)) * 0x85ebca6b
+		h = (h ^ (h >> 13)) * 0xc2b2ae35
+		return h ^ (h >> 16)
+	}
+
+	// h := uintptr(i)
+	// h = (h ^ (h >> 33)) * 0xff51afd7ed558ccd
+	// h = (h ^ (h >> 33)) * 0xc4ceb9fe1a85ec53
+	// return h ^ (h >> 33)
+}
+
+func TestMapWithHasher_HashCodeCollisions(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[int, int](WithKeyHasher(
+		func(i int, _ uintptr) uintptr {
+			// We intentionally use an awful hash function here to make sure
+			// that the map copes with key collisions.
+			return 42
+		}),
+		WithCapacity(numEntries),
+	)
+	for i := range numEntries {
+		m.Store(i, i)
+	}
+	for i := range numEntries {
+		v, ok := m.Load(i)
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+}
+
+func TestMapLoadOrStore(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[string, int]()
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	for i := range numEntries {
+		if _, loaded := m.LoadOrStore(strconv.Itoa(i), i); !loaded {
+			t.Fatalf("value not found for %d", i)
+		}
+	}
+}
+
+func TestMapStringStoreThenDelete(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[string, int]()
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	for i := range numEntries {
+		m.Delete(strconv.Itoa(i))
+		if _, ok := m.Load(strconv.Itoa(i)); ok {
+			t.Fatalf("value was not expected for %d", i)
+		}
+	}
+}
+
+func TestMapIntStoreThenDelete(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[int32, int32]()
+	for i := range numEntries {
+		m.Store(int32(i), int32(i))
+	}
+	for i := range numEntries {
+		m.Delete(int32(i))
+		if _, ok := m.Load(int32(i)); ok {
+			t.Fatalf("value was not expected for %d", i)
+		}
+	}
+}
+
+func TestMapStructStoreThenDelete(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[point, string]()
+	for i := range numEntries {
+		m.Store(point{int32(i), 42}, strconv.Itoa(i))
+	}
+	for i := range numEntries {
+		m.Delete(point{int32(i), 42})
+		if _, ok := m.Load(point{int32(i), 42}); ok {
+			t.Fatalf("value was not expected for %d", i)
+		}
+	}
+}
+
+func TestMapStringStoreThenLoadAndDelete(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[string, int]()
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	for i := range numEntries {
+		if v, loaded := m.LoadAndDelete(strconv.Itoa(i)); !loaded || v != i {
+			t.Fatalf("value was not found or different for %d: %v", i, v)
+		}
+		if _, ok := m.Load(strconv.Itoa(i)); ok {
+			t.Fatalf("value was not expected for %d", i)
+		}
+	}
+}
+
+func TestMapIntStoreThenLoadAndDelete(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[int, int]()
+	for i := range numEntries {
+		m.Store(i, i)
+	}
+	for i := range numEntries {
+		if _, loaded := m.LoadAndDelete(i); !loaded {
+			t.Fatalf("value was not found for %d", i)
+		}
+		if _, ok := m.Load(i); ok {
+			t.Fatalf("value was not expected for %d", i)
+		}
+	}
+}
+
+func TestMapStructStoreThenLoadAndDelete(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[point, int]()
+	for i := range numEntries {
+		m.Store(point{42, int32(i)}, i)
+	}
+	for i := range numEntries {
+		if _, loaded := m.LoadAndDelete(point{42, int32(i)}); !loaded {
+			t.Fatalf("value was not found for %d", i)
+		}
+		if _, ok := m.Load(point{42, int32(i)}); ok {
+			t.Fatalf("value was not expected for %d", i)
+		}
+	}
+}
+
+func TestMapStoreThenParallelDelete_DoesNotShrinkBelowMinLen(
+	t *testing.T,
+) {
+	const numEntries = 1000
+	m := NewMap[int, int](WithAutoShrink())
+	for i := range numEntries {
+		m.Store(i, i)
+	}
+
+	cdone := make(chan bool)
+	go func() {
+		for i := range numEntries {
+			m.Delete(i)
+		}
+		cdone <- true
+	}()
+	<-cdone
+	m.Shrink()
+	stats := m.stats()
+	if stats.RootBuckets != minTableLen {
+		t.Fatalf(
+			"table length was different from the minimum: %d",
+			stats.RootBuckets,
+		)
+	}
+}
+
+func sizeBasedOnTypedRange(m *Map[string, int]) int {
+	size := 0
+	m.Range(func(key string, value int) bool {
+		size++
+		return true
+	})
+	return size
+}
+
+func TestMapSize(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[string, int]()
+	size := m.Size()
+	if size != 0 {
+		t.Fatalf("zero size expected: %d", size)
+	}
+	expectedSize := 0
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+		expectedSize++
+		size := m.Size()
+		if size != expectedSize {
+			t.Fatalf("size of %d was expected, got: %d", expectedSize, size)
+		}
+		rsize := sizeBasedOnTypedRange(m)
+		if size != rsize {
+			t.Fatalf(
+				"size does not match number of entries in Range: %v, %v",
+				size,
+				rsize,
+			)
+		}
+	}
+	for i := range numEntries {
+		m.Delete(strconv.Itoa(i))
+		expectedSize--
+		size := m.Size()
+		if size != expectedSize {
+			t.Fatalf("size of %d was expected, got: %d", expectedSize, size)
+		}
+		rsize := sizeBasedOnTypedRange(m)
+		if size != rsize {
+			t.Fatalf(
+				"size does not match number of entries in Range: %v, %v",
+				size,
+				rsize,
+			)
+		}
+	}
+}
+
+func TestMapClear(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[string, int]()
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	size := m.Size()
+	if size != numEntries {
+		t.Fatalf("size of %d was expected, got: %d", numEntries, size)
+	}
+	m.Clear()
+	size = m.Size()
+	if size != 0 {
+		t.Fatalf("zero size was expected, got: %d", size)
+	}
+	rsize := sizeBasedOnTypedRange(m)
+	if rsize != 0 {
+		t.Fatalf("zero number of entries in Range was expected, got: %d", rsize)
+	}
+}
+
+func TestNewMapPresized(t *testing.T) {
+	var capacity, expectedCap int
+	capacity, expectedCap = NewMap[string, string]().stats().
+		Capacity, defaultMinMapTableCap
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(0),
+	).stats().
+		Capacity, defaultMinMapTableCap
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(0),
+	).stats().
+		Capacity, defaultMinMapTableCap
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(-100),
+	).stats().
+		Capacity, defaultMinMapTableCap
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(-100),
+	).stats().
+		Capacity, defaultMinMapTableCap
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(500),
+	).stats().
+		Capacity, calcTableLen(
+		500,
+	)*entriesPerBucket
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(500),
+	).stats().
+		Capacity, calcTableLen(
+		500,
+	)*entriesPerBucket
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(1_000_000),
+	).stats().
+		Capacity, calcTableLen(
+		1_000_000,
+	)*entriesPerBucket
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(1_000_000),
+	).stats().
+		Capacity, calcTableLen(
+		1_000_000,
+	)*entriesPerBucket
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(100),
+	).stats().
+		Capacity, calcTableLen(
+		100,
+	)*entriesPerBucket
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+	capacity, expectedCap = NewMap[string, string](
+		WithCapacity(100),
+	).stats().
+		Capacity, calcTableLen(
+		100,
+	)*entriesPerBucket
+	if capacity != expectedCap {
+		t.Fatalf("capacity was different from %d: %d", expectedCap, capacity)
+	}
+}
+
+func TestNewMapPresized_DoesNotShrinkBelowMinLen(t *testing.T) {
+	const minLen = 1024
+	const numEntries = int(minLen*float64(entriesPerBucket)*loadFactor) - entriesPerBucket
+	m := NewMap[int, int](WithCapacity(numEntries), WithAutoShrink())
+	for i := range 2 * numEntries {
+		m.Store(i, i)
+	}
+
+	stats := m.stats()
+	if stats.RootBuckets < minLen {
+		t.Fatalf("table did not grow: %d", stats.RootBuckets)
+	}
+
+	for i := range 2 * numEntries {
+		m.Delete(i)
+	}
+
+	m.Shrink()
+
+	stats = m.stats()
+	if stats.RootBuckets != minLen {
+		t.Fatalf("table length was different from the minimum: %v", stats)
+	}
+}
+
+func TestNewMapGrowOnly_OnlyShrinksOnClear(t *testing.T) {
+	const minLen = 128
+	const numEntries = minLen * entriesPerBucket
+	m := NewMap[int, int](WithCapacity(numEntries))
+
+	stats := m.stats()
+	initialTableLen := stats.RootBuckets
+
+	for i := range 2 * numEntries {
+		m.Store(i, i)
+	}
+	stats = m.stats()
+	maxTableLen := stats.RootBuckets
+	if maxTableLen <= minLen {
+		t.Fatalf("table did not grow: %d", maxTableLen)
+	}
+
+	for i := range numEntries {
+		m.Delete(i)
+	}
+	stats = m.stats()
+	if stats.RootBuckets != maxTableLen {
+		t.Fatalf(
+			"table length was different from the expected: %d",
+			stats.RootBuckets,
+		)
+	}
+
+	m.Clear()
+	stats = m.stats()
+	if stats.RootBuckets != initialTableLen {
+		t.Fatalf(
+			"table length was different from the initial: %d",
+			stats.RootBuckets,
+		)
+	}
+}
+
+func TestMapResize(t *testing.T) {
+	const numEntries = 100_000
+	m := NewMap[string, int](WithAutoShrink())
+
+	for i := range numEntries {
+		m.Store(strconv.Itoa(i), i)
+	}
+	stats := m.stats()
+	if stats.Size != numEntries {
+		t.Fatalf("size was too small: %d", stats.Size)
+	}
+	// fastStringHasher has a certain collision rate, which may slightly
+	// increase the required capacity.
+	expectedCapacity := 2 * (calcTableLen(numEntries) * entriesPerBucket) // + (numEntries/entriesPerBucket + 1)
+	if stats.Capacity > expectedCapacity {
+		t.Fatalf(
+			"capacity was too large: %d, expected: %d",
+			stats.Capacity,
+			expectedCapacity,
+		)
+	}
+	if stats.RootBuckets <= minTableLen {
+		t.Fatalf("table was too small: %d", stats.RootBuckets)
+	}
+	if stats.TotalGrowths == 0 {
+		t.Fatalf("non-zero total growths expected: %d", stats.TotalGrowths)
+	}
+	if stats.TotalShrinks > 0 {
+		t.Fatalf("zero total shrinks expected: %d", stats.TotalShrinks)
+	}
+	// This is useful when debugging table resize and occupancy.
+	// Use -v flag to see the output.
+	t.Log(stats.String())
+
+	for i := range numEntries {
+		m.Delete(strconv.Itoa(i))
+	}
+	m.Shrink()
+
+	stats = m.stats()
+	if stats.Size > 0 {
+		t.Fatalf("zero size was expected: %d", stats.Size)
+	}
+	// TODO: Asynchronous shrinking requires a delay period
+	expectedCapacity = stats.RootBuckets * entriesPerBucket
+	if stats.Capacity != expectedCapacity {
+		t.Logf(
+			"capacity was too large: %d, expected: %d",
+			stats.Capacity,
+			expectedCapacity,
+		)
+	}
+	if stats.RootBuckets != minTableLen {
+		t.Logf("table was too large: %d", stats.RootBuckets)
+	}
+	if stats.TotalShrinks == 0 {
+		t.Fatalf("non-zero total shrinks expected: %d", stats.TotalShrinks)
+	}
+	t.Log(stats.String())
+}
+
+func TestMapResize_CounterLenLimit(t *testing.T) {
+	const numEntries = 1_000_000
+	m := NewMap[string, string]()
+
+	for i := range numEntries {
+		m.Store("foo"+strconv.Itoa(i), "bar"+strconv.Itoa(i))
+	}
+	stats := m.stats()
+	if stats.Size != numEntries {
+		t.Fatalf("size was too small: %d", stats.Size)
+	}
+	maxCounterLen := runtime.GOMAXPROCS(0) * 2
+	if stats.CounterLen > maxCounterLen {
+		t.Fatalf("number of counter stripes was too large: %d, expected: %d",
+			stats.CounterLen, maxCounterLen)
+	}
+}
+
+func parallelSeqTypedResizer(
+	m *Map[int, int],
+	numEntries int,
+	positive bool,
+	cdone chan bool,
+) {
+	for i := range numEntries {
+		if positive {
+			m.Store(i, i)
+		} else {
+			m.Store(-i, -i)
+		}
+	}
+	cdone <- true
+}
+
+func TestMapParallelResize_GrowOnly(t *testing.T) {
+	const numEntries = 100_000
+	m := NewMap[int, int]()
+	cdone := make(chan bool)
+	go parallelSeqTypedResizer(m, numEntries, true, cdone)
+	go parallelSeqTypedResizer(m, numEntries, false, cdone)
+	// Wait for the goroutines to finish.
+	<-cdone
+	<-cdone
+	// Verify map contents.
+	for i := -numEntries + 1; i < numEntries; i++ {
+		v, ok := m.Load(i)
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+	if s := m.Size(); s != 2*numEntries-1 {
+		t.Fatalf("unexpected size: %v", s)
+	}
+}
+
+func parallelRandTypedResizer(
+	_ *testing.T,
+	m *Map[string, int],
+	numIters, numEntries int,
+	cdone chan bool,
+) {
+	// r := rand1.New(rand1.NewSource(time.Now().UnixNano()))
+	for range numIters {
+		coin := rand.Int64N(2)
+		for j := range numEntries {
+			if coin == 1 {
+				m.Store(strconv.Itoa(j), j)
+			} else {
+				m.Delete(strconv.Itoa(j))
+			}
+		}
+	}
+	cdone <- true
+}
+
+func TestMapParallelResize(t *testing.T) {
+	const numIters = 1_000
+	const numEntries = 2 * entriesPerBucket * minTableLen
+	m := NewMap[string, int]()
+	cdone := make(chan bool)
+	go parallelRandTypedResizer(t, m, numIters, numEntries, cdone)
+	go parallelRandTypedResizer(t, m, numIters, numEntries, cdone)
+	// Wait for the goroutines to finish.
+	<-cdone
+	<-cdone
+	// Verify map contents.
+	for i := range numEntries {
+		v, ok := m.Load(strconv.Itoa(i))
+		if !ok {
+			// The entry may be deleted and that's ok.
+			continue
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+	s := m.Size()
+	if s > numEntries {
+		t.Fatalf("unexpected size: %v", s)
+	}
+	rs := sizeBasedOnTypedRange(m)
+	if s != rs {
+		t.Fatalf(
+			"size does not match number of entries in Range: %v, %v",
+			s,
+			rs,
+		)
+	}
+}
+
+func parallelRandTypedClearer(
+	_ *testing.T,
+	m *Map[string, int],
+	numIters, numEntries int,
+	cdone chan bool,
+) {
+	// r := rand1.New(rand1.NewSource(time.Now().UnixNano()))
+	for range numIters {
+		coin := rand.Int64N(2)
+		for j := range numEntries {
+			if coin == 1 {
+				m.Store(strconv.Itoa(j), j)
+			} else {
+				m.Clear()
+			}
+		}
+	}
+	cdone <- true
+}
+
+func TestMapParallelClear(t *testing.T) {
+	const numIters = 100
+	const numEntries = 1_000
+	m := NewMap[string, int]()
+	cdone := make(chan bool)
+	go parallelRandTypedClearer(t, m, numIters, numEntries, cdone)
+	go parallelRandTypedClearer(t, m, numIters, numEntries, cdone)
+	// Wait for the goroutines to finish.
+	<-cdone
+	<-cdone
+	// Verify map size.
+	s := m.Size()
+	if s > numEntries {
+		t.Fatalf("unexpected size: %v", s)
+	}
+	rs := sizeBasedOnTypedRange(m)
+	if s != rs {
+		t.Fatalf(
+			"size does not match number of entries in Range: %v, %v",
+			s,
+			rs,
+		)
+	}
+}
+
+func parallelSeqTypedStorer(
+	t *testing.T,
+	m *Map[string, int],
+	storeEach, numIters, numEntries int,
+	cdone chan bool,
+) {
+	for range numIters {
+		for j := range numEntries {
+			if storeEach == 0 || j%storeEach == 0 {
+				m.Store(strconv.Itoa(j), j)
+				// Due to atomic snapshots we must see a "<j>"/j pair.
+				v, ok := m.Load(strconv.Itoa(j))
+				if !ok {
+					t.Errorf("value was not found for %d", j)
+					break
+				}
+				if v != j {
+					t.Errorf("value was not expected for %d: %d", j, v)
+					break
+				}
+			}
+		}
+	}
+	cdone <- true
+}
+
+func TestMapParallelStores(t *testing.T) {
+	const numStorers = 4
+	const numIters = 10_000
+	const numEntries = 100
+	m := NewMap[string, int]()
+	cdone := make(chan bool)
+	for i := range numStorers {
+		go parallelSeqTypedStorer(t, m, i, numIters, numEntries, cdone)
+	}
+	// Wait for the goroutines to finish.
+	for range numStorers {
+		<-cdone
+	}
+	// Verify map contents.
+	for i := range numEntries {
+		v, ok := m.Load(strconv.Itoa(i))
+		if !ok {
+			t.Fatalf("value not found for %d", i)
+		}
+		if v != i {
+			t.Fatalf("values do not match for %d: %v", i, v)
+		}
+	}
+}
+
+func parallelRandTypedStorer(
+	t *testing.T,
+	m *Map[string, int],
+	numIters, numEntries int,
+	cdone chan bool,
+) {
+	// r := rand1.New(rand1.NewSource(time.Now().UnixNano()))
+	for range numIters {
+		j := rand.IntN(numEntries)
+		if v, loaded := m.LoadOrStore(strconv.Itoa(j), j); loaded {
+			if v != j {
+				t.Errorf("value was not expected for %d: %d", j, v)
+			}
+		}
+	}
+	cdone <- true
+}
+
+func parallelRandTypedDeleter(
+	t *testing.T,
+	m *Map[string, int],
+	numIters, numEntries int,
+	cdone chan bool,
+) {
+	// r := rand1.New(rand1.NewSource(time.Now().UnixNano()))
+	for range numIters {
+		j := rand.IntN(numEntries)
+		if v, loaded := m.LoadAndDelete(strconv.Itoa(j)); loaded {
+			if v != j {
+				t.Errorf("value was not expected for %d: %d", j, v)
+			}
+		}
+	}
+	cdone <- true
+}
+
+func parallelTypedLoader(
+	t *testing.T,
+	m *Map[string, int],
+	numIters, numEntries int,
+	cdone chan bool,
+) {
+	for range numIters {
+		for j := range numEntries {
+			// Due to atomic snapshots we must either see no entry, or a "<j>"/j
+			// pair.
+			if v, ok := m.Load(strconv.Itoa(j)); ok {
+				if v != j {
+					t.Errorf("value was not expected for %d: %d", j, v)
+				}
+			}
+		}
+	}
+	cdone <- true
+}
+
+func TestMapAtomicSnapshot(t *testing.T) {
+	const numIters = 100_000
+	const numEntries = 100
+	m := NewMap[string, int]()
+	cdone := make(chan bool)
+	// Update or delete random entry in parallel with loads.
+	go parallelRandTypedStorer(t, m, numIters, numEntries, cdone)
+	go parallelRandTypedDeleter(t, m, numIters, numEntries, cdone)
+	go parallelTypedLoader(t, m, numIters, numEntries, cdone)
+	// Wait for the goroutines to finish.
+	for range 3 {
+		<-cdone
+	}
+}
+
+func TestMapParallelStoresAndDeletes(t *testing.T) {
+	const numWorkers = 2
+	const numIters = 100_000
+	const numEntries = 1000
+	m := NewMap[string, int]()
+	cdone := make(chan bool)
+	// Update random entry in parallel with deletes.
+	for range numWorkers {
+		go parallelRandTypedStorer(t, m, numIters, numEntries, cdone)
+		go parallelRandTypedDeleter(t, m, numIters, numEntries, cdone)
+	}
+	// Wait for the goroutines to finish.
+	for range 2 * numWorkers {
+		<-cdone
+	}
+}
+
+func parallelTypedRangeStorer(
+	m *Map[int, int],
+	numEntries int,
+	stopFlag *int64,
+	cdone chan bool,
+) {
+	for {
+		for i := range numEntries {
+			m.Store(i, i)
+		}
+		if atomic.LoadInt64(stopFlag) != 0 {
+			break
+		}
+	}
+	cdone <- true
+}
+
+func parallelTypedRangeDeleter(
+	m *Map[int, int],
+	numEntries int,
+	stopFlag *int64,
+	cdone chan bool,
+) {
+	for {
+		for i := range numEntries {
+			m.Delete(i)
+		}
+		if atomic.LoadInt64(stopFlag) != 0 {
+			break
+		}
+	}
+	cdone <- true
+}
+
+func TestMapParallelRange(t *testing.T) {
+	const numEntries = 10_000
+	m := NewMap[int, int](WithCapacity(numEntries))
+	for i := range numEntries {
+		m.Store(i, i)
+	}
+	// Start goroutines that would be storing and deleting items in parallel.
+	cdone := make(chan bool)
+	stopFlag := int64(0)
+	go parallelTypedRangeStorer(m, numEntries, &stopFlag, cdone)
+	go parallelTypedRangeDeleter(m, numEntries, &stopFlag, cdone)
+	// Iterate the map and verify that no duplicate keys were met.
+	met := make(map[int]int)
+	m.Range(func(key int, value int) bool {
+		if key != value {
+			t.Fatalf("got unexpected value for key %d: %d", key, value)
+			return false
+		}
+		met[key] += 1
+		return true
+	})
+	if len(met) == 0 {
+		t.Fatal("no entries were met when iterating")
+	}
+	for k, c := range met {
+		if c != 1 {
+			t.Fatalf("met key %d multiple times: %d", k, c)
+		}
+	}
+	// Make sure that both goroutines finish.
+	atomic.StoreInt64(&stopFlag, 1)
+	<-cdone
+	<-cdone
+}
+
+func parallelTypedShrinker(
+	t *testing.T,
+	m *Map[uint64, *point],
+	numIters, numEntries int,
+	stopFlag *int64,
+	cdone chan bool,
+) {
+	for range numIters {
+		for j := range numEntries {
+			if p, loaded := m.LoadOrStore(uint64(j), &point{int32(j), int32(j)}); loaded {
+				t.Errorf("value was present for %d: %v", j, p)
+			}
+		}
+		for j := range numEntries {
+			m.Delete(uint64(j))
+		}
+	}
+	atomic.StoreInt64(stopFlag, 1)
+	cdone <- true
+}
+
+func parallelTypedUpdater(
+	t *testing.T,
+	m *Map[uint64, *point],
+	idx int,
+	stopFlag *int64,
+	cdone chan bool,
+) {
+	for atomic.LoadInt64(stopFlag) != 1 {
+		sleepUs := rand.IntN(10)
+		if p, loaded := m.LoadOrStore(uint64(idx), &point{int32(idx), int32(idx)}); loaded {
+			t.Errorf("value was present for %d: %v", idx, p)
+		}
+		time.Sleep(time.Duration(sleepUs) * time.Microsecond)
+		if _, ok := m.Load(uint64(idx)); !ok {
+			t.Errorf("value was not found for %d", idx)
+		}
+		m.Delete(uint64(idx))
+	}
+	cdone <- true
+}
+
+func TestMapDoesNotLoseEntriesOnResize(t *testing.T) {
+	const numIters = 10_000
+	const numEntries = 128
+	m := NewMap[uint64, *point]()
+	cdone := make(chan bool)
+	stopFlag := int64(0)
+	go parallelTypedShrinker(t, m, numIters, numEntries, &stopFlag, cdone)
+	go parallelTypedUpdater(t, m, numEntries, &stopFlag, cdone)
+	// Wait for the goroutines to finish.
+	<-cdone
+	<-cdone
+	// Verify map contents.
+	if s := m.Size(); s != 0 {
+		t.Fatalf("map is not empty: %d", s)
+	}
+}
+
+func TestMapStats(t *testing.T) {
+	m := NewMap[int, int]()
+
+	stats := m.stats()
+	if stats.RootBuckets != minTableLen {
+		t.Fatalf("unexpected number of root buckets: %s", stats.String())
+	}
+	if stats.TotalBuckets != stats.RootBuckets {
+		t.Fatalf("unexpected number of total buckets: %s", stats.String())
+	}
+	if stats.EmptyBuckets != stats.RootBuckets {
+		t.Fatalf("unexpected number of empty buckets: %s", stats.String())
+	}
+	if stats.Capacity != entriesPerBucket*minTableLen {
+		t.Fatalf("unexpected capacity: %s", stats.String())
+	}
+	if stats.Size != 0 {
+		t.Fatalf("unexpected size: %s", stats.String())
+	}
+	if stats.Counter != 0 {
+		t.Fatalf("unexpected counter: %s", stats.String())
+	}
+	if stats.CounterLen != 1 {
+		t.Fatalf("unexpected counter length: %s", stats.String())
+	}
+
+	for i := range 200 {
+		m.Store(i, i)
+	}
+
+	stats = m.stats()
+	rootBuckes := calcTableLen(200)
+	if stats.RootBuckets > rootBuckes {
+		t.Fatalf("unexpected number of root buckets: %d, %s", rootBuckes, stats.String())
+	}
+	if stats.TotalBuckets < stats.RootBuckets {
+		t.Fatalf("unexpected number of total buckets: %s", stats.String())
+	}
+	if stats.EmptyBuckets >= stats.RootBuckets {
+		t.Fatalf("unexpected number of empty buckets: %s", stats.String())
+	}
+	if stats.Capacity != entriesPerBucket*stats.TotalBuckets {
+		t.Fatalf("unexpected capacity: %s", stats.String())
+	}
+	if stats.Size != 200 {
+		t.Fatalf("unexpected size: %s", stats.String())
+	}
+	if stats.Counter != 200 {
+		t.Fatalf("unexpected counter: %s", stats.String())
+	}
+	if stats.CounterLen != 1 {
+		t.Fatalf("unexpected counter length: %s", stats.String())
+	}
+}
+
+func TestToPlainMap(t *testing.T) {
+	const numEntries = 1000
+	m := NewMap[int, int]()
+	for i := range numEntries {
+		m.Store(i, i)
+	}
+	pm := m.ToMap()
+	if len(pm) != numEntries {
+		t.Fatalf("got unexpected size of nil map copy: %d", len(pm))
+	}
+	for i := range numEntries {
+		if v := pm[i]; v != i {
+			t.Fatalf("unexpected value for key %d: %d", i, v)
+		}
+	}
+}
+
+func BenchmarkMap_NoWarmUp(b *testing.B) {
+	for _, bc := range benchmarkCases {
+		if bc.readPercentage == 100 {
+			// This benchmark doesn't make sense without a warm-up.
+			continue
+		}
+		b.Run(bc.name, func(b *testing.B) {
+			m := NewMap[string, int]()
+			benchmarkMapStringKeys(b, func(k string) (int, bool) {
+				return m.Load(k)
+			}, func(k string, v int) {
+				m.Store(k, v)
+			}, func(k string) {
+				m.Delete(k)
+			}, bc.readPercentage)
+		})
+	}
+}
+
+func BenchmarkMap_WarmUp(b *testing.B) {
+	for _, bc := range benchmarkCases {
+		b.Run(bc.name, func(b *testing.B) {
+			m := NewMap[string, int](WithCapacity(benchmarkNumEntries))
+			for i := range benchmarkNumEntries {
+				m.Store(benchmarkKeyPrefix+strconv.Itoa(i), i)
+			}
+			b.ResetTimer()
+			benchmarkMapStringKeys(b, func(k string) (int, bool) {
+				return m.Load(k)
+			}, func(k string, v int) {
+				m.Store(k, v)
+			}, func(k string) {
+				m.Delete(k)
+			}, bc.readPercentage)
+		})
+	}
+}
+
+func benchmarkMapStringKeys(
+	b *testing.B,
+	loadFn func(k string) (int, bool),
+	storeFn func(k string, v int),
+	deleteFn func(k string),
+	readPercentage int,
+) {
+	runParallel(b, func(pb *testing.PB) {
+		// convert percent to permille to support 99% case
+		storeThreshold := 10 * readPercentage
+		deleteThreshold := 10*readPercentage + ((1000 - 10*readPercentage) / 2)
+		for pb.Next() {
+			op := rand.IntN(1000)
+			i := rand.IntN(benchmarkNumEntries)
+			if op >= deleteThreshold {
+				deleteFn(benchmarkKeys[i])
+			} else if op >= storeThreshold {
+				storeFn(benchmarkKeys[i], i)
+			} else {
+				loadFn(benchmarkKeys[i])
+			}
+		}
+	})
+}
+
+func BenchmarkMapInt_NoWarmUp(b *testing.B) {
+	for _, bc := range benchmarkCases {
+		if bc.readPercentage == 100 {
+			// This benchmark doesn't make sense without a warm-up.
+			continue
+		}
+		b.Run(bc.name, func(b *testing.B) {
+			m := NewMap[int, int]()
+			benchmarkMapIntKeys(b, func(k int) (int, bool) {
+				return m.Load(k)
+			}, func(k int, v int) {
+				m.Store(k, v)
+			}, func(k int) {
+				m.Delete(k)
+			}, bc.readPercentage)
+		})
+	}
+}
+
+func BenchmarkMapInt_WarmUp(b *testing.B) {
+	for _, bc := range benchmarkCases {
+		b.Run(bc.name, func(b *testing.B) {
+			m := NewMap[int, int](WithCapacity(benchmarkNumEntries))
+			for i := range benchmarkNumEntries {
+				m.Store(i, i)
+			}
+			b.ResetTimer()
+			benchmarkMapIntKeys(b, func(k int) (int, bool) {
+				return m.Load(k)
+			}, func(k int, v int) {
+				m.Store(k, v)
+			}, func(k int) {
+				m.Delete(k)
+			}, bc.readPercentage)
+		})
+	}
+}
+
+func BenchmarkMapInt_Murmur3Finalizer_WarmUp(b *testing.B) {
+	for _, bc := range benchmarkCases {
+		b.Run(bc.name, func(b *testing.B) {
+			m := NewMap[int, int](
+				WithKeyHasher(murmur3Finalizer),
+				WithCapacity(benchmarkNumEntries),
+			)
+			for i := range benchmarkNumEntries {
+				m.Store(i, i)
+			}
+			b.ResetTimer()
+			benchmarkMapIntKeys(b, func(k int) (int, bool) {
+				return m.Load(k)
+			}, func(k int, v int) {
+				m.Store(k, v)
+			}, func(k int) {
+				m.Delete(k)
+			}, bc.readPercentage)
+		})
+	}
+}
+
+func BenchmarkIntMapStandard_NoWarmUp(b *testing.B) {
+	for _, bc := range benchmarkCases {
+		if bc.readPercentage == 100 {
+			// This benchmark doesn't make sense without a warm-up.
+			continue
+		}
+		b.Run(bc.name, func(b *testing.B) {
+			var m sync.Map
+			benchmarkMapIntKeys(b, func(k int) (value int, ok bool) {
+				v, ok := m.Load(k)
+				if ok {
+					return v.(int), ok
+				} else {
+					return 0, false
+				}
+			}, func(k int, v int) {
+				m.Store(k, v)
+			}, func(k int) {
+				m.Delete(k)
+			}, bc.readPercentage)
+		})
+	}
+}
+
+// This is a nice scenario for sync.Map since a lot of updates
+// will hit the readOnly part of the map.
+func BenchmarkIntMapStandard_WarmUp(b *testing.B) {
+	for _, bc := range benchmarkCases {
+		b.Run(bc.name, func(b *testing.B) {
+			var m sync.Map
+			for i := range benchmarkNumEntries {
+				m.Store(i, i)
+			}
+			b.ResetTimer()
+			benchmarkMapIntKeys(b, func(k int) (value int, ok bool) {
+				v, ok := m.Load(k)
+				if ok {
+					return v.(int), ok
+				} else {
+					return 0, false
+				}
+			}, func(k int, v int) {
+				m.Store(k, v)
+			}, func(k int) {
+				m.Delete(k)
+			}, bc.readPercentage)
+		})
+	}
+}
+
+func benchmarkMapIntKeys(
+	b *testing.B,
+	loadFn func(k int) (int, bool),
+	storeFn func(k int, v int),
+	deleteFn func(k int),
+	readPercentage int,
+) {
+	runParallel(b, func(pb *testing.PB) {
+		// convert percent to permille to support 99% case
+		storeThreshold := 10 * readPercentage
+		deleteThreshold := 10*readPercentage + ((1000 - 10*readPercentage) / 2)
+		for pb.Next() {
+			op := rand.IntN(1000)
+			i := rand.IntN(benchmarkNumEntries)
+			if op >= deleteThreshold {
+				deleteFn(i)
+			} else if op >= storeThreshold {
+				storeFn(i, i)
+			} else {
+				loadFn(i)
+			}
+		}
+	})
+}
+
+func BenchmarkMapRange(b *testing.B) {
+	m := NewMap[string, int](WithCapacity(benchmarkNumEntries))
+	for i := range benchmarkNumEntries {
+		m.Store(benchmarkKeys[i], i)
+	}
+	b.ResetTimer()
+	runParallel(b, func(pb *testing.PB) {
+		foo := 0
+		for pb.Next() {
+			m.Range(func(key string, value int) bool {
+				foo++
+				return true
+			})
+			_ = foo
+		}
+	})
+}
+
+func runParallel(b *testing.B, benchFn func(pb *testing.PB)) {
+	b.ResetTimer()
+	start := time.Now()
+	b.RunParallel(benchFn)
+	opsPerSec := float64(b.N) / time.Since(start).Seconds()
+	b.ReportMetric(opsPerSec, "ops/s")
+}
+
+const (
+	// number of entries to use in benchmarks
+	benchmarkNumEntries = 1_000
+	// key prefix used in benchmarks
+	benchmarkKeyPrefix = "what_a_looooooooooooooooooooooong_key_prefix_"
+
+	defaultMinMapTableCap = minTableLen * entriesPerBucket
+)
+
+var benchmarkKeys []string
+
+func init() {
+	benchmarkKeys = make([]string, benchmarkNumEntries)
+	for i := range benchmarkNumEntries {
+		benchmarkKeys[i] = benchmarkKeyPrefix + strconv.Itoa(i)
+	}
+}
+
+var benchmarkCases = []struct {
+	name           string
+	readPercentage int
+}{
+	{"reads=100%", 100}, // 100% loads,    0% stores,    0% deletes
+	{"reads=99%", 99},   //  99% loads,  0.5% stores,  0.5% deletes
+	{"reads=90%", 90},   //  90% loads,    5% stores,    5% deletes
+	{"reads=75%", 75},   //  75% loads, 12.5% stores, 12.5% deletes
+}
+
+// ----------------------------------------------------------------
+
+// TestMapClone tests the Clone function of Map
+func TestMapClone(t *testing.T) {
+	// Test with empty map
+	t.Run("EmptyMap", func(t *testing.T) {
+		m := NewMap[string, int]()
+		var clone Map[string, int]
+		m.CloneTo(&clone)
+		if clone.Size() != 0 {
+			t.Fatalf(
+				"expected cloned empty map size to be 0, got: %d",
+				clone.Size(),
+			)
+		}
+	})
+
+	// Test with populated map
+	t.Run("PopulatedMap", func(t *testing.T) {
+		const numEntries = 1000
+		m := NewMap[string, int]()
+		for i := range numEntries {
+			m.Store(strconv.Itoa(i), i)
+		}
+		var clone Map[string, int]
+		m.CloneTo(&clone)
+
+		// Verify size
+		if clone.Size() != numEntries {
+			t.Fatalf(
+				"expected cloned map size to be %d, got: %d",
+				numEntries,
+				clone.Size(),
+			)
+		}
+
+		// Verify all entries were copied correctly
+		for i := range numEntries {
+			key := strconv.Itoa(i)
+			val, ok := clone.Load(key)
+			if !ok {
+				t.Fatalf("key %s missing in cloned map", key)
+			}
+			if val != i {
+				t.Fatalf("expected value %d for key %s, got: %d", i, key, val)
+			}
+		}
+
+		// Verify independence - modifying original should not affect clone
+		m.Store("new", 9999)
+		if _, ok := clone.Load("new"); ok {
+			t.Fatalf("clone should not be affected by changes to original map")
+		}
+
+		// Verify independence - modifying clone should not affect original
+		clone.Store("clone-only", 8888)
+		if _, ok := m.Load("clone-only"); ok {
+			t.Fatalf("original should not be affected by changes to cloned map")
+		}
+	})
+}
+
+// TestMapRangeProcessEntry tests the computeRangeEntry_ function of Map
+func TestMapRangeProcessEntry(t *testing.T) {
+	// Test with empty map
+	t.Run("EmptyMap", func(t *testing.T) {
+		m := NewMap[string, int]()
+		processCount := 0
+
+		m.computeRangeEntry_(
+			func(loaded *entry_[string, int]) (*entry_[string, int], bool) {
+				processCount++
+				return loaded, true // No modification
+			},
+		)
+
+		if processCount != 0 {
+			t.Fatalf(
+				"expected process count to be 0 for empty map, got: %d",
+				processCount,
+			)
+		}
+	})
+
+	// Test updating values
+	t.Run("UpdateValues", func(t *testing.T) {
+		m := NewMap[string, int]()
+		// Pre-populate the map
+		for i := range 10 {
+			m.Store(strconv.Itoa(i), i)
+		}
+
+		processCount := 0
+		m.computeRangeEntry_(
+			func(loaded *entry_[string, int]) (*entry_[string, int], bool) {
+				processCount++
+				// Double all values
+				return &entry_[string, int]{
+					Key:   loaded.Key,
+					Value: loaded.Value * 2,
+				}, true
+			},
+		)
+
+		if processCount != 10 {
+			t.Fatalf("expected process count to be 10, got: %d", processCount)
+		}
+
+		// Verify all values are doubled
+		for i := range 10 {
+			key := strconv.Itoa(i)
+			expectPresentMap(t, key, i*2)(m.Load(key))
+		}
+	})
+
+	// Test deleting entries
+	t.Run("DeleteEntries", func(t *testing.T) {
+		m := NewMap[string, int]()
+		// Pre-populate the map
+		for i := range 10 {
+			m.Store(strconv.Itoa(i), i)
+		}
+
+		originalSize := m.Size()
+		if originalSize != 10 {
+			t.Fatalf("expected original size to be 10, got: %d", originalSize)
+		}
+
+		// Delete even-numbered entries
+		m.computeRangeEntry_(
+			func(loaded *entry_[string, int]) (*entry_[string, int], bool) {
+				if loaded.Value%2 == 0 {
+					return nil, true // Delete entry
+				}
+				return loaded, true // Keep entry
+			},
+		)
+
+		// Verify only odd-numbered entries remain
+		expectedSize := 5
+		if m.Size() != expectedSize {
+			t.Fatalf(
+				"expected size to be %d after deletion, got: %d",
+				expectedSize,
+				m.Size(),
+			)
+		}
+
+		for i := range 10 {
+			key := strconv.Itoa(i)
+			if i%2 == 0 {
+				// Even numbers should be deleted
+				expectMissingMap(t, key, 0)(m.Load(key))
+			} else {
+				// Odd numbers should remain
+				expectPresentMap(t, key, i)(m.Load(key))
+			}
+		}
+	})
+
+	// Test mixed operations (update some, delete some, keep some)
+	t.Run("MixedOperations", func(t *testing.T) {
+		m := NewMap[string, int]()
+		// Pre-populate the map
+		for i := range 15 {
+			m.Store(strconv.Itoa(i), i)
+		}
+
+		m.computeRangeEntry_(
+			func(loaded *entry_[string, int]) (*entry_[string, int], bool) {
+				value := loaded.Value
+				switch {
+				case value%3 == 0:
+					// Divisible by 3: delete
+					return nil, true // Delete entry
+				case value%3 == 1:
+					// Remainder 1: multiply by 10
+					return &entry_[string, int]{
+						Key:   loaded.Key,
+						Value: value * 10,
+					}, true
+				default:
+					// Remainder 2: keep unchanged
+					return loaded, true
+				}
+			},
+		)
+
+		// Verify results
+		for i := range 15 {
+			key := strconv.Itoa(i)
+			switch {
+			case i%3 == 0:
+				// Should be deleted
+				expectMissingMap(t, key, 0)(m.Load(key))
+			case i%3 == 1:
+				// Should be multiplied by 10
+				expectPresentMap(t, key, i*10)(m.Load(key))
+			default:
+				// Should remain unchanged
+				expectPresentMap(t, key, i)(m.Load(key))
+			}
+		}
+	})
+
+	// Test concurrent safety (basic test)
+	t.Run("ConcurrentSafety", func(t *testing.T) {
+		m := NewMap[string, int]()
+		// Pre-populate the map
+		for i := range 100 {
+			m.Store(strconv.Itoa(i), i)
+		}
+
+		// This should not panic or cause data races
+		m.computeRangeEntry_(
+			func(loaded *entry_[string, int]) (*entry_[string, int], bool) {
+				// Just return the same entry
+				return loaded, true
+			},
+		)
+
+		// Verify map is still intact
+		if m.Size() != 100 {
+			t.Fatalf("expected size to remain 100, got: %d", m.Size())
+		}
+	})
+}
+
+// TestMapLoadAndUpdate tests the LoadAndUpdate function of Map
+func TestMapLoadAndUpdate(t *testing.T) {
+	// Test with non-existent key
+	t.Run("NonExistentKey", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		previous, loaded := m.LoadAndUpdate("nonexistent", 42)
+
+		if loaded {
+			t.Fatalf("expected loaded to be false for non-existent key")
+		}
+		if previous != 0 {
+			t.Fatalf(
+				"expected previous value to be zero for non-existent key, got: %d",
+				previous,
+			)
+		}
+
+		// Key should still not exist in the map
+		expectMissingMap(t, "nonexistent", 0)(m.Load("nonexistent"))
+	})
+
+	// Test with existing key
+	t.Run("ExistingKey", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("existing", 100)
+
+		previous, loaded := m.LoadAndUpdate("existing", 200)
+
+		if !loaded {
+			t.Fatalf("expected loaded to be true for existing key")
+		}
+		if previous != 100 {
+			t.Fatalf("expected previous value to be 100, got: %d", previous)
+		}
+
+		// Key should now have the new value
+		expectPresentMap(t, "existing", 200)(m.Load("existing"))
+	})
+
+	// Test updating with same value
+	t.Run("SameValue", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("key", 42)
+
+		previous, loaded := m.LoadAndUpdate("key", 42)
+
+		if !loaded {
+			t.Fatalf("expected loaded to be true for existing key")
+		}
+		if previous != 42 {
+			t.Fatalf("expected previous value to be 42, got: %d", previous)
+		}
+
+		// Value should remain the same
+		expectPresentMap(t, "key", 42)(m.Load("key"))
+	})
+
+	// Test multiple updates on same key
+	t.Run("MultipleUpdates", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("counter", 0)
+
+		// Perform multiple updates
+		for i := 1; i <= 5; i++ {
+			previous, loaded := m.LoadAndUpdate("counter", i*10)
+
+			if !loaded {
+				t.Fatalf("expected loaded to be true for iteration %d", i)
+			}
+			expectedPrevious := (i - 1) * 10
+			if previous != expectedPrevious {
+				t.Fatalf(
+					"expected previous value to be %d for iteration %d, got: %d",
+					expectedPrevious,
+					i,
+					previous,
+				)
+			}
+		}
+
+		// Final value should be 50
+		expectPresentMap(t, "counter", 50)(m.Load("counter"))
+	})
+
+	// Test with different key types
+	t.Run("IntegerKeys", func(t *testing.T) {
+		m := NewMap[int, string]()
+		m.Store(1, "one")
+		m.Store(2, "two")
+
+		// Update existing key
+		previous, loaded := m.LoadAndUpdate(1, "ONE")
+		if !loaded || previous != "one" {
+			t.Fatalf(
+				"expected loaded=true and previous='one', got loaded=%v, previous='%s'",
+				loaded,
+				previous,
+			)
+		}
+
+		// Try non-existent key
+		previous, loaded = m.LoadAndUpdate(3, "three")
+		if loaded || previous != "" {
+			t.Fatalf(
+				"expected loaded=false and previous='', got loaded=%v, previous='%s'",
+				loaded,
+				previous,
+			)
+		}
+
+		// Verify final state
+		expectPresentMap(t, 1, "ONE")(m.Load(1))
+		expectPresentMap(t, 2, "two")(m.Load(2))
+		expectMissingMap(t, 3, "")(m.Load(3))
+	})
+
+	// Test concurrent updates
+	t.Run("ConcurrentUpdates", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("shared", 0)
+
+		const numGoroutines = 10
+		const updatesPerGoroutine = 100
+
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+
+		for i := range numGoroutines {
+			go func(goroutineID int) {
+				defer wg.Done()
+				for j := range updatesPerGoroutine {
+					// Each goroutine tries to update with its own value
+					newValue := goroutineID*1000 + j
+					m.LoadAndUpdate("shared", newValue)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+
+		// The key should still exist and have some value
+		value, ok := m.Load("shared")
+		if !ok {
+			t.Fatalf("expected 'shared' key to exist after concurrent updates")
+		}
+		t.Logf("Final value after concurrent updates: %d", value)
+	})
+
+	// Test with zero values
+	t.Run("ZeroValues", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("zero", 0)
+
+		previous, loaded := m.LoadAndUpdate("zero", 42)
+
+		if !loaded {
+			t.Fatalf(
+				"expected loaded to be true for existing key with zero value",
+			)
+		}
+		if previous != 0 {
+			t.Fatalf("expected previous value to be 0, got: %d", previous)
+		}
+
+		expectPresentMap(t, "zero", 42)(m.Load("zero"))
+	})
+}
+
+func TestMapGrow_Basic(t *testing.T) {
+	m := NewMap[string, int]()
+
+	initialStats := m.stats()
+	initialCapacity := initialStats.Capacity
+	initialBuckets := initialStats.RootBuckets
+
+	m.Grow(1000)
+
+	afterGrowStats := m.stats()
+	if afterGrowStats.Capacity <= initialCapacity {
+		t.Fatalf("Grow should increase capacity: initial=%d, after=%d",
+			initialCapacity, afterGrowStats.Capacity)
+	}
+	if afterGrowStats.RootBuckets <= initialBuckets {
+		t.Fatalf("Grow should increase buckets: initial=%d, after=%d",
+			initialBuckets, afterGrowStats.RootBuckets)
+	}
+	if afterGrowStats.TotalGrowths == 0 {
+		t.Fatal("TotalGrowths should be incremented")
+	}
+
+	m.Store("test", 42)
+	if val, ok := m.Load("test"); !ok || val != 42 {
+		t.Fatal("Map should work normally after Grow")
+	}
+}
+
+func TestMapGrow_ZeroAndNegative(t *testing.T) {
+	m := NewMap[string, int]()
+	initialStats := m.stats()
+
+	m.Grow(0)
+	afterZeroStats := m.stats()
+	if afterZeroStats.Capacity != initialStats.Capacity {
+		t.Fatal("Grow(0) should not change capacity")
+	}
+	if afterZeroStats.TotalGrowths != initialStats.TotalGrowths {
+		t.Fatal("Grow(0) should not increment TotalGrowths")
+	}
+
+	m.Grow(-100)
+	afterNegativeStats := m.stats()
+	if afterNegativeStats.Capacity != initialStats.Capacity {
+		t.Fatal("Grow(-100) should not change capacity")
+	}
+	if afterNegativeStats.TotalGrowths != initialStats.TotalGrowths {
+		t.Fatal("Grow(-100) should not increment TotalGrowths")
+	}
+}
+
+func TestMapGrow_UninitializedMap(t *testing.T) {
+	var m Map[string, int]
+
+	m.Grow(200)
+
+	stats := m.stats()
+	t.Log(stats)
+	if stats.Capacity == 0 {
+		t.Fatal("Map should be initialized after Grow")
+	}
+	if stats.TotalGrowths == 0 {
+		t.Fatal("TotalGrowths should be incremented")
+	}
+
+	m.Store("test", 42)
+	if val, ok := m.Load("test"); !ok || val != 42 {
+		t.Fatal("Map should work normally after Grow on uninitialized map")
+	}
+}
+
+func TestMapShrink_Basic(t *testing.T) {
+	m := NewMap[string, int]()
+
+	for i := range 10000 {
+		m.Store(strconv.Itoa(i), i)
+	}
+
+	afterStoreStats := m.stats()
+	initialCapacity := afterStoreStats.Capacity
+	initialBuckets := afterStoreStats.RootBuckets
+
+	for i := range 9000 {
+		m.Delete(strconv.Itoa(i))
+	}
+
+	m.Shrink()
+
+	afterShrinkStats := m.stats()
+	if afterShrinkStats.Capacity >= initialCapacity {
+		t.Fatalf("Shrink should decrease capacity: initial=%d, after=%d",
+			initialCapacity, afterShrinkStats.Capacity)
+	}
+	if afterShrinkStats.RootBuckets >= initialBuckets {
+		t.Fatalf("Shrink should decrease buckets: initial=%d, after=%d",
+			initialBuckets, afterShrinkStats.RootBuckets)
+	}
+	if afterShrinkStats.TotalShrinks == 0 {
+		t.Fatal("TotalShrinks should be incremented")
+	}
+
+	for i := 9000; i < 10000; i++ {
+		if val, ok := m.Load(strconv.Itoa(i)); !ok || val != i {
+			t.Fatalf("Data should be preserved after Shrink: key=%d", i)
+		}
+	}
+}
+
+func TestMapShrink_MinLen(t *testing.T) {
+	m := NewMap[string, int](WithCapacity(1000))
+	initialStats := m.stats()
+	minBuckets := initialStats.RootBuckets
+
+	for i := range 10 {
+		m.Store(strconv.Itoa(i), i)
+	}
+
+	m.Shrink()
+
+	afterShrinkStats := m.stats()
+	if afterShrinkStats.RootBuckets < minBuckets {
+		t.Fatalf("Shrink should not go below minLen: min=%d, after=%d",
+			minBuckets, afterShrinkStats.RootBuckets)
+	}
+}
+
+func TestMapShrink_UninitializedMap(t *testing.T) {
+	var m Map[string, int]
+
+	m.Shrink()
+
+	stats := m.stats()
+	if stats.Capacity != 0 {
+		t.Fatal("Shrink on uninitialized map should not initialize it")
+	}
+}
+
+func TestMapGrowShrink_Concurrent(t *testing.T) {
+	m := NewMap[int, int]()
+	const numGoroutines = 10
+	const numOperations = 100
+	const sizeAdd = 200
+
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines * 3) // grow, shrink, data operations
+
+	for range numGoroutines {
+		go func() {
+			defer wg.Done()
+			for range numOperations {
+				m.Grow(sizeAdd)
+				runtime.Gosched()
+			}
+		}()
+	}
+
+	for range numGoroutines {
+		go func() {
+			defer wg.Done()
+			for range numOperations {
+				m.Shrink()
+				runtime.Gosched()
+			}
+		}()
+	}
+
+	for i := range numGoroutines {
+		go func(base int) {
+			defer wg.Done()
+			for j := range numOperations {
+				key := base*numOperations + j
+				m.Store(key, key)
+				if val, ok := m.Load(key); !ok || val != key {
+					t.Errorf(
+						"Data corruption during concurrent resize: key=%d",
+						key,
+					)
+				}
+				m.Delete(key)
+				runtime.Gosched()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	stats := m.stats()
+	if stats.TotalGrowths == 0 {
+		t.Fatal("Should have some growths")
+	}
+	t.Logf("Final stats: %s", stats.String())
+}
+
+func TestMapGrow_Performance(t *testing.T) {
+	const numEntries = 100000
+
+	m1 := NewMap[int, int]()
+	start1 := time.Now()
+	for i := range numEntries {
+		m1.Store(i, i)
+	}
+	duration1 := time.Since(start1)
+
+	m2 := NewMap[int, int]()
+	m2.Grow(numEntries)
+	start2 := time.Now()
+	for i := range numEntries {
+		m2.Store(i, i)
+	}
+	duration2 := time.Since(start2)
+
+	if duration2 > duration1*2 {
+		t.Logf(
+			"Pre-allocation might be slower than expected: without=%v, with=%v",
+			duration1,
+			duration2,
+		)
+	}
+
+	stats1 := m1.stats()
+	stats2 := m2.stats()
+
+	if stats2.TotalGrowths > stats1.TotalGrowths {
+		t.Fatalf(
+			"Pre-allocated map should have fewer growths: pre=%d, normal=%d",
+			stats2.TotalGrowths,
+			stats1.TotalGrowths,
+		)
+	}
+
+	t.Logf(
+		"Without pre-allocation: %v, growths=%d",
+		duration1,
+		stats1.TotalGrowths,
+	)
+	t.Logf(
+		"With pre-allocation: %v, growths=%d",
+		duration2,
+		stats2.TotalGrowths,
+	)
+}
+
+func TestMapShrink_AutomaticVsManual(t *testing.T) {
+	const numEntries = 10000
+
+	m1 := NewMap[string, int]()
+	for i := range numEntries {
+		m1.Store(strconv.Itoa(i), i)
+	}
+	for i := range numEntries - 100 {
+		m1.Delete(strconv.Itoa(i))
+	}
+	stats1 := m1.stats()
+
+	m2 := NewMap[string, int]()
+	for i := range numEntries {
+		m2.Store(strconv.Itoa(i), i)
+	}
+	for i := range numEntries - 100 {
+		m2.Delete(strconv.Itoa(i))
+	}
+	m2.Shrink()
+	stats2 := m2.stats()
+
+	if stats2.TotalShrinks == 0 {
+		t.Fatal("Manual shrink should increment TotalShrinks")
+	}
+
+	t.Logf("Automatic shrink stats: %s", stats1.String())
+	t.Logf("Manual shrink stats: %s", stats2.String())
+}
+
+func TestMapGrowShrink_DataIntegrity(t *testing.T) {
+	m := NewMap[string, string]()
+	const numEntries = 1000
+
+	testData := make(map[string]string)
+	for i := range numEntries {
+		key := "key_" + strconv.Itoa(i)
+		value := "value_" + strconv.Itoa(i)
+		testData[key] = value
+		m.Store(key, value)
+	}
+
+	for cycle := range 5 {
+		m.Grow(numEntries * 2)
+
+		for key, expectedValue := range testData {
+			if actualValue, ok := m.Load(key); !ok ||
+				actualValue != expectedValue {
+				t.Fatalf(
+					"Data corruption after Grow cycle %d: key=%s, expected=%s, actual=%s, ok=%v",
+					cycle,
+					key,
+					expectedValue,
+					actualValue,
+					ok,
+				)
+			}
+		}
+
+		m.Shrink()
+
+		for key, expectedValue := range testData {
+			if actualValue, ok := m.Load(key); !ok ||
+				actualValue != expectedValue {
+				t.Fatalf(
+					"Data corruption after Shrink cycle %d: key=%s, expected=%s, actual=%s, ok=%v",
+					cycle,
+					key,
+					expectedValue,
+					actualValue,
+					ok,
+				)
+			}
+		}
+	}
+
+	stats := m.stats()
+	if stats.Size != numEntries {
+		t.Fatalf(
+			"Final size mismatch: expected=%d, actual=%d",
+			numEntries,
+			stats.Size,
+		)
+	}
+}
+
+// TestMapDefaultHasher tests the defaultHasher function with different key
+// types
+func TestMapDefaultHasher(t *testing.T) {
+	t.Run("UintKeys", func(t *testing.T) {
+		m := NewMap[uint, string]()
+		m.Store(uint(123), "value123")
+		m.Store(uint(456), "value456")
+
+		expectPresentMap(t, uint(123), "value123")(m.Load(uint(123)))
+		expectPresentMap(t, uint(456), "value456")(m.Load(uint(456)))
+	})
+
+	t.Run("IntKeys", func(t *testing.T) {
+		m := NewMap[int, string]()
+		m.Store(-123, "negative")
+		m.Store(456, "positive")
+
+		expectPresentMap(t, -123, "negative")(m.Load(-123))
+		expectPresentMap(t, 456, "positive")(m.Load(456))
+	})
+
+	t.Run("UintptrKeys", func(t *testing.T) {
+		m := NewMap[uintptr, string]()
+		m.Store(uintptr(0x1000), "addr1")
+		m.Store(uintptr(0x2000), "addr2")
+
+		expectPresentMap(t, uintptr(0x1000), "addr1")(m.Load(uintptr(0x1000)))
+		expectPresentMap(t, uintptr(0x2000), "addr2")(m.Load(uintptr(0x2000)))
+	})
+
+	t.Run("Uint64Keys", func(t *testing.T) {
+		m := NewMap[uint64, string]()
+		m.Store(uint64(0x123456789ABCDEF0), "large1")
+		m.Store(uint64(0xFEDCBA9876543210), "large2")
+
+		expectPresentMap(
+			t,
+			uint64(0x123456789ABCDEF0),
+			"large1",
+		)(
+			m.Load(uint64(0x123456789ABCDEF0)),
+		)
+		expectPresentMap(
+			t,
+			uint64(0xFEDCBA9876543210),
+			"large2",
+		)(
+			m.Load(uint64(0xFEDCBA9876543210)),
+		)
+	})
+
+	t.Run("Int64Keys", func(t *testing.T) {
+		m := NewMap[int64, string]()
+		m.Store(int64(-9223372036854775808), "min")
+		m.Store(int64(9223372036854775807), "max")
+
+		expectPresentMap(
+			t,
+			int64(-9223372036854775808),
+			"min",
+		)(
+			m.Load(int64(-9223372036854775808)),
+		)
+		expectPresentMap(
+			t,
+			int64(9223372036854775807),
+			"max",
+		)(
+			m.Load(int64(9223372036854775807)),
+		)
+	})
+
+	t.Run("Uint32Keys", func(t *testing.T) {
+		m := NewMap[uint32, string]()
+		m.Store(uint32(0xFFFFFFFF), "max32")
+		m.Store(uint32(0x12345678), "mid32")
+
+		expectPresentMap(
+			t,
+			uint32(0xFFFFFFFF),
+			"max32",
+		)(
+			m.Load(uint32(0xFFFFFFFF)),
+		)
+		expectPresentMap(
+			t,
+			uint32(0x12345678),
+			"mid32",
+		)(
+			m.Load(uint32(0x12345678)),
+		)
+	})
+
+	t.Run("Int32Keys", func(t *testing.T) {
+		m := NewMap[int32, string]()
+		m.Store(int32(-2147483648), "min32")
+		m.Store(int32(2147483647), "max32")
+
+		expectPresentMap(
+			t,
+			int32(-2147483648),
+			"min32",
+		)(
+			m.Load(int32(-2147483648)),
+		)
+		expectPresentMap(
+			t,
+			int32(2147483647),
+			"max32",
+		)(
+			m.Load(int32(2147483647)),
+		)
+	})
+
+	t.Run("Uint16Keys", func(t *testing.T) {
+		m := NewMap[uint16, string]()
+		m.Store(uint16(0xFFFF), "max16")
+		m.Store(uint16(0x1234), "mid16")
+
+		expectPresentMap(t, uint16(0xFFFF), "max16")(m.Load(uint16(0xFFFF)))
+		expectPresentMap(t, uint16(0x1234), "mid16")(m.Load(uint16(0x1234)))
+	})
+
+	t.Run("Int16Keys", func(t *testing.T) {
+		m := NewMap[int16, string]()
+		m.Store(int16(-32768), "min16")
+		m.Store(int16(32767), "max16")
+
+		expectPresentMap(t, int16(-32768), "min16")(m.Load(int16(-32768)))
+		expectPresentMap(t, int16(32767), "max16")(m.Load(int16(32767)))
+	})
+
+	t.Run("Uint8Keys", func(t *testing.T) {
+		m := NewMap[uint8, string]()
+		m.Store(uint8(255), "max8")
+		m.Store(uint8(128), "mid8")
+
+		expectPresentMap(t, uint8(255), "max8")(m.Load(uint8(255)))
+		expectPresentMap(t, uint8(128), "mid8")(m.Load(uint8(128)))
+	})
+
+	t.Run("Int8Keys", func(t *testing.T) {
+		m := NewMap[int8, string]()
+		m.Store(int8(-128), "min8")
+		m.Store(int8(127), "max8")
+
+		expectPresentMap(t, int8(-128), "min8")(m.Load(int8(-128)))
+		expectPresentMap(t, int8(127), "max8")(m.Load(int8(127)))
+	})
+}
+
+// TestMapDefaultHasherComprehensive tests all branches of defaultHasher
+// function
+func TestMapDefaultHasherComprehensive(t *testing.T) {
+	t.Run("Float32Keys", func(t *testing.T) {
+		m := &Map[float32, string]{}
+		keys := []float32{1.1, 2.2, 3.3, 0.0, -1.1}
+		for i, key := range keys {
+			m.Store(key, fmt.Sprintf("value%d", i))
+		}
+		for i, key := range keys {
+			if val, found := m.Load(key); !found ||
+				val != fmt.Sprintf("value%d", i) {
+				t.Fatalf(
+					"Expected to find key %v with value value%d, got found=%v, val=%s",
+					key,
+					i,
+					found,
+					val,
+				)
+			}
+		}
+	})
+
+	t.Run("Float64Keys", func(t *testing.T) {
+		m := &Map[float64, string]{}
+		keys := []float64{1.123456789, 2.987654321, 0.0, -3.141592653}
+		for i, key := range keys {
+			m.Store(key, fmt.Sprintf("val%d", i))
+		}
+		for i, key := range keys {
+			if val, found := m.Load(key); !found ||
+				val != fmt.Sprintf("val%d", i) {
+				t.Fatalf(
+					"Expected to find key %v with value val%d, got found=%v, val=%s",
+					key,
+					i,
+					found,
+					val,
+				)
+			}
+		}
+	})
+
+	t.Run("BoolKeys", func(t *testing.T) {
+		m := &Map[bool, int]{}
+		m.Store(true, 1)
+		m.Store(false, 0)
+
+		if val, found := m.Load(true); !found || val != 1 {
+			t.Fatalf("Expected true->1, got found=%v, val=%d", found, val)
+		}
+		if val, found := m.Load(false); !found || val != 0 {
+			t.Fatalf("Expected false->0, got found=%v, val=%d", found, val)
+		}
+	})
+
+	t.Run("ComplexKeys", func(t *testing.T) {
+		m := &Map[complex64, string]{}
+		keys := []complex64{1 + 2i, 3 + 4i, 0 + 0i, -1 - 2i}
+		for i, key := range keys {
+			m.Store(key, fmt.Sprintf("complex%d", i))
+		}
+		for i, key := range keys {
+			if val, found := m.Load(key); !found ||
+				val != fmt.Sprintf("complex%d", i) {
+				t.Fatalf(
+					"Expected to find key %v with value complex%d, got found=%v, val=%s",
+					key,
+					i,
+					found,
+					val,
+				)
+			}
+		}
+	})
+
+	t.Run("Complex128Keys", func(t *testing.T) {
+		m := &Map[complex128, string]{}
+		keys := []complex128{1.1 + 2.2i, 3.3 + 4.4i, 0 + 0i}
+		for i, key := range keys {
+			m.Store(key, fmt.Sprintf("c128_%d", i))
+		}
+		for i, key := range keys {
+			if val, found := m.Load(key); !found ||
+				val != fmt.Sprintf("c128_%d", i) {
+				t.Fatalf(
+					"Expected to find key %v with value c128_%d, got found=%v, val=%s",
+					key,
+					i,
+					found,
+					val,
+				)
+			}
+		}
+	})
+
+	t.Run("ArrayKeys", func(t *testing.T) {
+		m := &Map[[3]int, string]{}
+		keys := [][3]int{{1, 2, 3}, {4, 5, 6}, {0, 0, 0}}
+		for i, key := range keys {
+			m.Store(key, fmt.Sprintf("array%d", i))
+		}
+		for i, key := range keys {
+			if val, found := m.Load(key); !found ||
+				val != fmt.Sprintf("array%d", i) {
+				t.Fatalf(
+					"Expected to find key %v with value array%d, got found=%v, val=%s",
+					key,
+					i,
+					found,
+					val,
+				)
+			}
+		}
+	})
+
+	t.Run("StructKeys", func(t *testing.T) {
+		type TestStruct struct {
+			A int
+			B string
+		}
+		m := &Map[TestStruct, int]{}
+		keys := []TestStruct{{1, "a"}, {2, "b"}, {0, ""}}
+		for i, key := range keys {
+			m.Store(key, i*100)
+		}
+		for i, key := range keys {
+			if val, found := m.Load(key); !found || val != i*100 {
+				t.Fatalf(
+					"Expected to find key %v with value %d, got found=%v, val=%d",
+					key,
+					i*100,
+					found,
+					val,
+				)
+			}
+		}
+	})
+
+	t.Run("IntegerTypesEdgeCases", func(t *testing.T) {
+		// Test edge values for different integer types
+		m8 := &Map[int8, string]{}
+		m8.Store(127, "max_int8")
+		m8.Store(-128, "min_int8")
+		m8.Store(0, "zero_int8")
+
+		m16 := &Map[int16, string]{}
+		m16.Store(32767, "max_int16")
+		m16.Store(-32768, "min_int16")
+
+		m32 := &Map[int32, string]{}
+		m32.Store(2147483647, "max_int32")
+		m32.Store(-2147483648, "min_int32")
+
+		// Verify all values
+		if val, found := m8.Load(127); !found || val != "max_int8" {
+			t.Fatalf("Expected max_int8, got found=%v, val=%s", found, val)
+		}
+		if val, found := m16.Load(32767); !found || val != "max_int16" {
+			t.Fatalf("Expected max_int16, got found=%v, val=%s", found, val)
+		}
+		if val, found := m32.Load(2147483647); !found || val != "max_int32" {
+			t.Fatalf("Expected max_int32, got found=%v, val=%s", found, val)
+		}
+	})
+
+	t.Run("UnsignedTypesEdgeCases", func(t *testing.T) {
+		mu8 := &Map[uint8, string]{}
+		mu8.Store(255, "max_uint8")
+		mu8.Store(0, "zero_uint8")
+
+		mu16 := &Map[uint16, string]{}
+		mu16.Store(65535, "max_uint16")
+
+		mu32 := &Map[uint32, string]{}
+		mu32.Store(4294967295, "max_uint32")
+
+		// Verify values
+		if val, found := mu8.Load(255); !found || val != "max_uint8" {
+			t.Fatalf("Expected max_uint8, got found=%v, val=%s", found, val)
+		}
+		if val, found := mu16.Load(65535); !found || val != "max_uint16" {
+			t.Fatalf("Expected max_uint16, got found=%v, val=%s", found, val)
+		}
+		if val, found := mu32.Load(4294967295); !found || val != "max_uint32" {
+			t.Fatalf("Expected max_uint32, got found=%v, val=%s", found, val)
+		}
+	})
+}
+
+func TestMapEdgeCases(t *testing.T) {
+	t.Run("ZeroValues", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("", 0)     // empty string key, zero value
+		m.Store("zero", 0) // zero value
+
+		expectPresentMap(t, "", 0)(m.Load(""))
+		expectPresentMap(t, "zero", 0)(m.Load("zero"))
+	})
+
+	t.Run("LargeKeys", func(t *testing.T) {
+		m := NewMap[string, int]()
+		largeKey := strings.Repeat("x", 1000)
+		m.Store(largeKey, 42)
+
+		expectPresentMap(t, largeKey, 42)(m.Load(largeKey))
+	})
+
+	t.Run("ManyOperations", func(t *testing.T) {
+		m := NewMap[int, int]()
+
+		// Store many values
+		for i := range 1000 {
+			m.Store(i, i*2)
+		}
+
+		// Verify all values
+		for i := range 1000 {
+			expectPresentMap(t, i, i*2)(m.Load(i))
+		}
+
+		// Delete half
+		for i := range 500 {
+			m.Delete(i)
+		}
+
+		// Verify deletions
+		for i := range 500 {
+			expectMissingMap(t, i, 0)(m.Load(i))
+		}
+
+		// Verify remaining
+		for i := 500; i < 1000; i++ {
+			expectPresentMap(t, i, i*2)(m.Load(i))
+		}
+	})
+
+	t.Run("StoreOverwrite", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("key", 1)
+		m.Store("key", 2) // overwrite
+		m.Store("key", 3) // overwrite again
+
+		expectPresentMap(t, "key", 3)(m.Load("key"))
+	})
+}
+
+func TestMapCompareAndSwap(t *testing.T) { // Test with comparable values
+	t.Run("ComparableValues", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("key1", 100)
+
+		// Successful swap
+		if !m.CompareAndSwap("key1", 100, 200) {
+			t.Fatal("CompareAndSwap should succeed when old value matches")
+		}
+		expectPresentMap(t, "key1", 200)(m.Load("key1"))
+
+		// Failed swap - wrong old value
+		if m.CompareAndSwap("key1", 100, 300) {
+			t.Fatal("CompareAndSwap should fail when old value doesn't match")
+		}
+		expectPresentMap(t, "key1", 200)(m.Load("key1"))
+
+		// Failed swap - non-existent key
+		if m.CompareAndSwap("nonexistent", 100, 300) {
+			t.Fatal("CompareAndSwap should fail for non-existent key")
+		}
+
+		// Swap with same value (should succeed)
+		if !m.CompareAndSwap("key1", 200, 200) {
+			t.Fatal("CompareAndSwap should succeed when swapping to same value")
+		}
+		expectPresentMap(t, "key1", 200)(m.Load("key1"))
+	})
+
+	// Test with non-comparable values (should panic)
+	t.Run("NonComparableValues", func(t *testing.T) {
+		var m Map[string, []int] // slice is not comparable
+		m.Store("key1", []int{1, 2, 3})
+
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("CompareAndSwap should panic for non-comparable values")
+			} else if !strings.Contains(fmt.Sprint(r), "not of comparable type") {
+				t.Fatalf("Unexpected panic message: %v", r)
+			}
+		}()
+
+		m.CompareAndSwap("key1", []int{1, 2, 3}, []int{4, 5, 6})
+	})
+
+	// Test on empty map
+	t.Run("EmptyMap", func(t *testing.T) {
+		m := NewMap[string, int]()
+		if m.CompareAndSwap("key1", 100, 200) {
+			t.Fatal("CompareAndSwap should fail on empty map")
+		}
+	})
+}
+
+// TestMapCompareAndDelete tests the CompareAndDelete function
+func TestMapCompareAndDelete(t *testing.T) {
+	// Test with comparable values
+	t.Run("ComparableValues", func(t *testing.T) {
+		m := NewMap[string, int]()
+		m.Store("key1", 100)
+		m.Store("key2", 200)
+
+		// Successful delete
+		if !m.CompareAndDelete("key1", 100) {
+			t.Fatal("CompareAndDelete should succeed when value matches")
+		}
+		expectMissingMap(t, "key1", 0)(m.Load("key1"))
+
+		// Failed delete - wrong value
+		if m.CompareAndDelete("key2", 100) {
+			t.Fatal("CompareAndDelete should fail when value doesn't match")
+		}
+		expectPresentMap(t, "key2", 200)(m.Load("key2"))
+
+		// Failed delete - non-existent key
+		if m.CompareAndDelete("nonexistent", 100) {
+			t.Fatal("CompareAndDelete should fail for non-existent key")
+		}
+	})
+
+	// Test with non-comparable values (should panic)
+	t.Run("NonComparableValues", func(t *testing.T) {
+		var m Map[string, []int] // slice is not comparable
+		m.Store("key1", []int{1, 2, 3})
+
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal(
+					"CompareAndDelete should panic for non-comparable values",
+				)
+			} else if !strings.Contains(fmt.Sprint(r), "not of comparable type") {
+				t.Fatalf("Unexpected panic message: %v", r)
+			}
+		}()
+
+		m.CompareAndDelete("key1", []int{1, 2, 3})
+	})
+
+	// Test on empty map
+	t.Run("EmptyMap", func(t *testing.T) {
+		m := NewMap[string, int]()
+		if m.CompareAndDelete("key1", 100) {
+			t.Fatal("CompareAndDelete should fail on empty map")
+		}
+	})
+}
+
+// TestMap_InitWithOptions tests the withOptions function
+func TestMap_InitWithOptions(t *testing.T) {
+	t.Run("BasicInitialization", func(t *testing.T) {
+		var m Map[string, int]
+		m.withOptions()
+
+		// Test basic operations
+		m.Store("key1", 100)
+		if val, ok := m.Load("key1"); !ok || val != 100 {
+			t.Errorf("Expected key1=100, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("WithCapacity", func(t *testing.T) {
+		var m Map[string, int]
+		m.withOptions(WithCapacity(1000))
+
+		// Verify the map works correctly
+		for i := range 100 {
+			key := fmt.Sprintf("key%d", i)
+			m.Store(key, i)
+		}
+
+		if m.Size() != 100 {
+			t.Errorf("Expected size 100, got %d", m.Size())
+		}
+	})
+
+	t.Run("WithAutoShrink", func(t *testing.T) {
+		var m Map[string, int]
+		m.withOptions(WithAutoShrink())
+
+		// Add and remove items to test shrinking
+		for i := range 100 {
+			key := fmt.Sprintf("key%d", i)
+			m.Store(key, i)
+		}
+
+		// Remove most items
+		for i := range 90 {
+			key := fmt.Sprintf("key%d", i)
+			m.Delete(key)
+		}
+
+		if m.Size() != 10 {
+			t.Errorf("Expected size 10, got %d", m.Size())
+		}
+	})
+
+	t.Run("WithKeyHasher", func(t *testing.T) {
+		var m Map[string, int]
+
+		// Custom hash function only
+		customHash := func(key string, seed uintptr) uintptr {
+			return uintptr(len(key))
+		}
+
+		m.withOptions(WithKeyHasher(customHash))
+
+		// Test operations
+		m.Store("hello", 123)
+		if val, ok := m.Load("hello"); !ok || val != 123 {
+			t.Errorf("Expected hello=123, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("WithValueEqual", func(t *testing.T) {
+		var m Map[string, int]
+
+		// Custom equality function only
+		customEqual := func(val1, val2 int) bool {
+			return val1 == val2
+		}
+
+		m.withOptions(WithValueEqual(customEqual))
+
+		// Test CompareAndSwap with custom equality
+		m.Store("key", 100)
+		if !m.CompareAndSwap("key", 100, 200) {
+			t.Error("CompareAndSwap should have succeeded")
+		}
+
+		if val, ok := m.Load("key"); !ok || val != 200 {
+			t.Errorf("Expected key=200, got %d, exists=%v", val, ok)
+		}
+	})
+	t.Run("MultipleOptions", func(t *testing.T) {
+		var m Map[string, int]
+
+		customHash := func(key string, seed uintptr) uintptr {
+			return uintptr(len(key))
+		}
+
+		m.withOptions(
+			WithCapacity(500),
+			WithAutoShrink(),
+			WithKeyHasher(customHash),
+		)
+
+		// Test that all options work together
+		for i := range 50 {
+			key := fmt.Sprintf("key%d", i)
+			m.Store(key, i)
+		}
+
+		if m.Size() != 50 {
+			t.Errorf("Expected size 50, got %d", m.Size())
+		}
+	})
+}
+
+// TestMap_init tests the init function
+func TestMap_init(t *testing.T) {
+	t.Run("BasicConfig", func(t *testing.T) {
+		var m Map[string, int]
+		config := &MapConfig{
+			capacity:   100,
+			autoShrink: false,
+		}
+
+		m.init(config)
+
+		// Test basic operations
+		m.Store("key1", 100)
+		if val, ok := m.Load("key1"); !ok || val != 100 {
+			t.Errorf("Expected key1=100, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("ConfigWithCustomHasher", func(t *testing.T) {
+		var m Map[string, int]
+
+		// Create custom hash and equal functions
+		customHash := func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			key := *(*string)(ptr)
+			return uintptr(len(key))
+		}
+
+		customEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			val1 := *(*int)(ptr1)
+			val2 := *(*int)(ptr2)
+			return val1 == val2
+		}
+
+		config := &MapConfig{
+			keyHash:    customHash,
+			valEqual:   customEqual,
+			capacity:   200,
+			autoShrink: true,
+		}
+
+		m.init(config)
+
+		// Test operations
+		m.Store("test", 42)
+		if val, ok := m.Load("test"); !ok || val != 42 {
+			t.Errorf("Expected test=42, got %d, exists=%v", val, ok)
+		}
+
+		// Test CompareAndSwap with custom equality
+		if !m.CompareAndSwap("test", 42, 84) {
+			t.Error("CompareAndSwap should have succeeded")
+		}
+
+		if val, ok := m.Load("test"); !ok || val != 84 {
+			t.Errorf("Expected test=84, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("ConfigReuse", func(t *testing.T) {
+		// Test that the same config can be used for multiple maps
+		config := &MapConfig{
+			capacity:   50,
+			autoShrink: true,
+		}
+
+		var m1, m2 Map[string, int]
+		m1.init(config)
+		m2.init(config)
+
+		// Test that both maps work independently
+		m1.Store("key1", 100)
+		m2.Store("key2", 200)
+
+		if val, ok := m1.Load("key1"); !ok || val != 100 {
+			t.Errorf("m1: Expected key1=100, got %d, exists=%v", val, ok)
+		}
+
+		if val, ok := m2.Load("key2"); !ok || val != 200 {
+			t.Errorf("m2: Expected key2=200, got %d, exists=%v", val, ok)
+		}
+
+		// Verify they don't interfere with each other
+		if _, ok := m1.Load("key2"); ok {
+			t.Error("m1 should not contain key2")
+		}
+
+		if _, ok := m2.Load("key1"); ok {
+			t.Error("m2 should not contain key1")
+		}
+	})
+
+	t.Run("EmptyConfig", func(t *testing.T) {
+		var m Map[string, int]
+		config := &MapConfig{} // Empty config, should use defaults
+
+		m.init(config)
+
+		// Test basic operations with default settings
+		m.Store("default", 999)
+		if val, ok := m.Load("default"); !ok || val != 999 {
+			t.Errorf("Expected default=999, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("ConfigWithOnlyKeyHash", func(t *testing.T) {
+		var m Map[string, int]
+
+		customHash := func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			key := *(*string)(ptr)
+			return uintptr(len(key)) * 31 // Simple hash
+		}
+
+		config := &MapConfig{
+			keyHash: customHash,
+			// ValEqual is nil, should use default
+			capacity: 100,
+		}
+
+		m.init(config)
+
+		// Test operations
+		m.Store("hash", 123)
+		if val, ok := m.Load("hash"); !ok || val != 123 {
+			t.Errorf("Expected hash=123, got %d, exists=%v", val, ok)
+		}
+	})
+
+	t.Run("ConfigWithOnlyValEqual", func(t *testing.T) {
+		var m Map[string, int]
+
+		customEqual := func(ptr1, ptr2 unsafe.Pointer) bool {
+			val1 := *(*int)(ptr1)
+			val2 := *(*int)(ptr2)
+			return val1 == val2
+		}
+
+		config := &MapConfig{
+			// KeyHash is nil, should use default
+			valEqual: customEqual,
+			capacity: 100,
+		}
+
+		m.init(config)
+
+		// Test operations
+		m.Store("equal", 456)
+		if val, ok := m.Load("equal"); !ok || val != 456 {
+			t.Errorf("Expected equal=456, got %d, exists=%v", val, ok)
+		}
+
+		// Test CompareAndSwap with custom equality
+		if !m.CompareAndSwap("equal", 456, 789) {
+			t.Error("CompareAndSwap should have succeeded")
+		}
+	})
+}
+
+func TestMap_HashUint64On32Bit(t *testing.T) {
+	val := uint64(0x123456789ABCDEF0)
+	hash := hashUint64On32Bit(unsafe.Pointer(&val), 0)
+	// The function XORs the lower 32 bits with the upper 32 bits
+	expected := uint32(0x9ABCDEF0) ^ uint32(0x12345678)
+	if uint32(hash) != expected {
+		t.Errorf("Expected hash %x, got %x", expected, hash)
+	}
+}
+
+func TestMap_UnlockWithMeta(t *testing.T) {
+	t.Run("Map", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		// Get a bucket to test UnlockWithMeta
+		key := "test"
+		hash := m.keyHash(unsafe.Pointer(&key), m.seed)
+		table := (*mapTable)(atomic.LoadPointer(&m.table))
+		bucketIdx := int(hash) & table.mask
+		bucket := table.buckets.At(bucketIdx)
+
+		// Lock the bucket first
+		bucket.Lock()
+
+		// Test UnlockWithMeta with different meta values
+		testMetas := []uint64{
+			0,
+			0x123456789ABCDEF0,
+			^uint64(0), // max uint64
+		}
+
+		for _, meta := range testMetas {
+			bucket.UnlockWithMeta(meta)
+			// Verify the meta was set correctly (without lock bits)
+			storedMeta := atomic.LoadUint64(&bucket.meta)
+			expectedMeta := meta &^ opLockMask
+			if storedMeta != expectedMeta {
+				t.Errorf("UnlockWithMeta(%x): stored meta = %x, want %x", meta, storedMeta, expectedMeta)
+			}
+
+			// Lock again for next iteration
+			if meta != testMetas[len(testMetas)-1] {
+				bucket.Lock()
+			}
+		}
+	})
+}
+
+func TestMap_EmbeddedHash(t *testing.T) {
+	// These functions are no-ops when cc_embedded_hash build tag is not set
+	// But we still need to call them to get coverage
+
+	t.Run("Entry_", func(t *testing.T) {
+		var entry entry_[string, int]
+
+		// Test getHash - should return 0
+		hash := entry.GetHash()
+		if hash != 0 {
+			t.Errorf("Entry_.getHash() = %d, want 0", hash)
+		}
+
+		// Test setHash - should be a no-op
+		entry.SetHash(0x12345678)
+		// Verify it's still 0 since setHash is a no-op
+		hash = entry.GetHash()
+		//goland:noinspection ALL
+		if unsafe.Sizeof(entry.EmbeddedHash) != 0 {
+			if hash != 0x12345678 {
+				t.Errorf("After setHash, Entry_.getHash() = %d, want 0x12345678", hash)
+			}
+		} else {
+			if hash != 0 {
+				t.Errorf("After setHash, Entry_.getHash() = %d, want 0", hash)
+			}
+		}
+	})
+}
+
+// TestDefaultHasherEdgeCases tests edge cases for defaultHasher to improve coverage
+func TestMap_DefaultHasherEdgeCases(t *testing.T) {
+	keyHash, _, _ := defaultHasher[string, int]()
+
+	// Test with empty string
+	emptyStr := ""
+	result1 := keyHash(unsafe.Pointer(&emptyStr), 0)
+	if result1 == 0 {
+		t.Logf("Hash for empty string: %x", result1)
+	}
+
+	// Test with different seeds
+	testStr := "test"
+	result2 := keyHash(unsafe.Pointer(&testStr), 12345)
+	result3 := keyHash(unsafe.Pointer(&testStr), 67890)
+	if result2 == result3 {
+		t.Errorf("Expected different hashes for different seeds")
+	}
+}
+
+func TestMap_IsZero(t *testing.T) {
+	t.Run("IsZero", func(t *testing.T) {
+		m := NewMap[string, int]()
+		if m.Size() != 0 {
+			t.Errorf("New map should be zero")
+		}
+
+		m.Store("key", 1)
+		if m.Size() == 0 {
+			t.Errorf("Map with elements should not be zero")
+		}
+	})
+}
+
+func TestMap_GCAndWeakReferences(t *testing.T) {
+	// Force garbage collection to test weak reference cleanup paths
+	runtime.GC()
+	runtime.GC() // Call twice to ensure cleanup
+
+	// Test with maps that might trigger resize operations
+	m := NewMap[int, string]()
+
+	// Add many elements to trigger resize
+	for i := range 1000 {
+		m.Store(i, "value")
+	}
+
+	// Force GC again
+	runtime.GC()
+
+	// Verify map still works
+	if val, ok := m.Load(500); !ok || val != "value" {
+		t.Errorf("Map should still work after GC")
+	}
+}
+
+// TestMap_LoadAndDelete tests the LoadAndDelete method comprehensively
+func TestMap_LoadAndDelete(t *testing.T) {
+	t.Run("LoadAndDelete_ExistingKey", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		// Store a value
+		m.Store("key1", 100)
+
+		// LoadAndDelete should return the value and true
+		value, loaded := m.LoadAndDelete("key1")
+		if !loaded || value != 100 {
+			t.Errorf("LoadAndDelete(key1) = (%v, %v), want (100, true)", value, loaded)
+		}
+
+		// Key should no longer exist
+		if _, ok := m.Load("key1"); ok {
+			t.Error("Key should be deleted after LoadAndDelete")
+		}
+	})
+
+	t.Run("LoadAndDelete_NonExistentKey", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		// LoadAndDelete on non-existent key should return zero value and false
+		value, loaded := m.LoadAndDelete("nonexistent")
+		if loaded || value != 0 {
+			t.Errorf("LoadAndDelete(nonexistent) = (%v, %v), want (0, false)", value, loaded)
+		}
+	})
+
+	t.Run("LoadAndDelete_MultipleKeys", func(t *testing.T) {
+		m := NewMap[int, string]()
+
+		// Store multiple values
+		for i := range 10 {
+			m.Store(i, fmt.Sprintf("value_%d", i))
+		}
+
+		// Delete even keys using LoadAndDelete
+		for i := 0; i < 10; i += 2 {
+			expected := fmt.Sprintf("value_%d", i)
+			value, loaded := m.LoadAndDelete(i)
+			if !loaded || value != expected {
+				t.Errorf("LoadAndDelete(%d) = (%v, %v), want (%s, true)", i, value, loaded, expected)
+			}
+		}
+
+		// Verify even keys are deleted and odd keys remain
+		for i := range 10 {
+			value, ok := m.Load(i)
+			if i%2 == 0 {
+				// Even keys should be deleted
+				if ok {
+					t.Errorf("Key %d should be deleted, but found value %v", i, value)
+				}
+			} else {
+				// Odd keys should remain
+				expected := fmt.Sprintf("value_%d", i)
+				if !ok || value != expected {
+					t.Errorf("Key %d: expected (%s, true), got (%v, %v)", i, expected, value, ok)
+				}
+			}
+		}
+	})
+
+	t.Run("LoadAndDelete_Concurrent", func(t *testing.T) {
+		m := NewMap[int, int]()
+		const numKeys = 1000
+
+		// Store initial values
+		for i := range numKeys {
+			m.Store(i, i*10)
+		}
+
+		var wg sync.WaitGroup
+		deletedKeys := make(map[int]bool)
+		var mu sync.Mutex
+
+		// Concurrent LoadAndDelete operations
+		numWorkers := 10
+		keysPerWorker := numKeys / numWorkers
+
+		for w := range numWorkers {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				start := workerID * keysPerWorker
+				end := start + keysPerWorker
+
+				for i := start; i < end; i++ {
+					value, loaded := m.LoadAndDelete(i)
+					if loaded {
+						expectedValue := i * 10
+						if value != expectedValue {
+							t.Errorf("Worker %d: LoadAndDelete(%d) = %v, want %v", workerID, i, value, expectedValue)
+						}
+
+						mu.Lock()
+						deletedKeys[i] = true
+						mu.Unlock()
+					}
+				}
+			}(w)
+		}
+
+		wg.Wait()
+
+		// Verify all keys were deleted exactly once
+		mu.Lock()
+		if len(deletedKeys) != numKeys {
+			t.Errorf("Expected %d keys to be deleted, got %d", numKeys, len(deletedKeys))
+		}
+		mu.Unlock()
+
+		// Verify map is empty
+		if size := m.Size(); size != 0 {
+			t.Errorf("Expected map size 0 after all deletions, got %d", size)
+		}
+	})
+}
+
+// TestMap_LoadOrStoreFn tests the LoadOrStoreFn method comprehensively
+func TestMap_LoadOrStoreFn(t *testing.T) {
+	t.Run("LoadOrStoreFn_NewKey", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		called := false
+		value, loaded := m.LoadOrStoreFn("key1", func() int {
+			called = true
+			return 42
+		})
+
+		if loaded {
+			t.Error("LoadOrStoreFn should return loaded=false for new key")
+		}
+		if value != 42 {
+			t.Errorf("LoadOrStoreFn returned value %v, want 42", value)
+		}
+		if !called {
+			t.Error("Function should be called for new key")
+		}
+
+		// Verify value was stored
+		if storedValue, ok := m.Load("key1"); !ok || storedValue != 42 {
+			t.Errorf("Stored value = (%v, %v), want (42, true)", storedValue, ok)
+		}
+	})
+
+	t.Run("LoadOrStoreFn_ExistingKey", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		// Store initial value
+		m.Store("key1", 100)
+
+		called := false
+		value, loaded := m.LoadOrStoreFn("key1", func() int {
+			called = true
+			return 200
+		})
+
+		if !loaded {
+			t.Error("LoadOrStoreFn should return loaded=true for existing key")
+		}
+		if value != 100 {
+			t.Errorf("LoadOrStoreFn returned value %v, want 100", value)
+		}
+		if called {
+			t.Error("Function should not be called for existing key")
+		}
+
+		// Verify original value is unchanged
+		if storedValue, ok := m.Load("key1"); !ok || storedValue != 100 {
+			t.Errorf("Stored value = (%v, %v), want (100, true)", storedValue, ok)
+		}
+	})
+
+	t.Run("LoadOrStoreFn_FunctionPanic", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Expected panic from function, but didn't get one")
+			}
+		}()
+
+		m.LoadOrStoreFn("key1", func() int {
+			panic("test panic")
+		})
+	})
+
+	t.Run("LoadOrStoreFn_ZeroValue", func(t *testing.T) {
+		m := NewMap[string, int]()
+
+		// Test storing zero value
+		value, loaded := m.LoadOrStoreFn("key1", func() int {
+			return 0
+		})
+
+		if loaded {
+			t.Error("LoadOrStoreFn should return loaded=false for new key")
+		}
+		if value != 0 {
+			t.Errorf("LoadOrStoreFn returned value %v, want 0", value)
+		}
+
+		// Verify zero value was stored
+		if storedValue, ok := m.Load("key1"); !ok || storedValue != 0 {
+			t.Errorf("Stored value = (%v, %v), want (0, true)", storedValue, ok)
+		}
+	})
+
+	t.Run("LoadOrStoreFn_Concurrent", func(t *testing.T) {
+		m := NewMap[int, int]()
+		const numKeys = 100
+		const numWorkers = 10
+
+		var wg sync.WaitGroup
+		callCounts := make([]int32, numKeys)
+
+		// Concurrent LoadOrStoreFn operations on the same keys
+		for w := range numWorkers {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+
+				for i := range numKeys {
+					m.LoadOrStoreFn(i, func() int {
+						atomic.AddInt32(&callCounts[i], 1)
+						return i * 100
+					})
+				}
+			}(w)
+		}
+
+		wg.Wait()
+
+		// Verify each function was called exactly once per key
+		for i := range numKeys {
+			count := atomic.LoadInt32(&callCounts[i])
+			if count != 1 {
+				t.Errorf("Key %d: function called %d times, want 1", i, count)
+			}
+
+			// Verify correct value was stored
+			if value, ok := m.Load(i); !ok || value != i*100 {
+				t.Errorf("Key %d: stored value = (%v, %v), want (%d, true)", i, value, ok, i*100)
+			}
+		}
+	})
+
+	t.Run("LoadOrStoreFn_PointerTypes", func(t *testing.T) {
+		m := NewMap[string, *string]()
+
+		// Test with pointer types
+		value, loaded := m.LoadOrStoreFn("key1", func() *string {
+			s := "hello"
+			return &s
+		})
+
+		if loaded {
+			t.Error("LoadOrStoreFn should return loaded=false for new key")
+		}
+		if value == nil || *value != "hello" {
+			t.Errorf("LoadOrStoreFn returned unexpected value: %v", value)
+		}
+
+		// Test loading existing pointer
+		value2, loaded2 := m.LoadOrStoreFn("key1", func() *string {
+			s := "world"
+			return &s
+		})
+
+		if !loaded2 {
+			t.Error("LoadOrStoreFn should return loaded=true for existing key")
+		}
+		if value2 != value {
+			t.Error("LoadOrStoreFn should return same pointer for existing key")
+		}
+	})
+
+	t.Run("LoadOrStoreFn_ComplexTypes", func(t *testing.T) {
+		type ComplexValue struct {
+			ID   int
+			Name string
+			Data []int
+		}
+
+		m := NewMap[int, ComplexValue]()
+
+		expected := ComplexValue{
+			ID:   1,
+			Name: "test",
+			Data: []int{1, 2, 3},
+		}
+
+		value, loaded := m.LoadOrStoreFn(1, func() ComplexValue {
+			return expected
+		})
+
+		if loaded {
+			t.Error("LoadOrStoreFn should return loaded=false for new key")
+		}
+		if !reflect.DeepEqual(value, expected) {
+			t.Errorf("LoadOrStoreFn returned %+v, want %+v", value, expected)
+		}
+	})
+}
+
+// TestMap_RangeProcess_BlockWriters_Strict tests ComputeRange with
+// blockWritersOpt=true under heavy concurrent load to ensure writers are
+// properly blocked and no torn reads occur.
+func TestMap_RangeProcess_BlockWriters_Strict(t *testing.T) {
+	type testValue struct {
+		X, Y    uint64 // Invariant: Y == ^X
+		Counter uint32
+	}
+
+	var m Map[int, testValue]
+	const N = 512
+
+	// Initialize with values maintaining invariant
+	for i := range N {
+		val := testValue{
+			X:       uint64(i * 123456789),
+			Y:       ^uint64(i * 123456789),
+			Counter: 0,
+		}
+		m.Store(i, val)
+	}
+
+	var (
+		wg               sync.WaitGroup
+		stop             = make(chan struct{})
+		tornReads        atomic.Uint64
+		blockedWrites    atomic.Uint64
+		rangeProcessRuns atomic.Uint64
+	)
+
+	// ComputeRange goroutine with blockWritersOpt=true
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				m.computeRangeEntry_(func(loaded *entry_[int, testValue]) (*entry_[int, testValue], bool) {
+					k, v := loaded.Key, loaded.Value
+					// Verify invariant during processing
+					if v.Y != ^v.X {
+						tornReads.Add(1)
+						t.Errorf("Torn read detected in ComputeRange: key=%d, X=%x, Y=%x", k, v.X, v.Y)
+					}
+					// Update counter while maintaining invariant
+					newV := testValue{
+						X:       v.X,
+						Y:       v.Y,
+						Counter: v.Counter + 1,
+					}
+					return &entry_[int, testValue]{Value: newV}, true
+				}, true) // policyOpt = BlockWriters
+				rangeProcessRuns.Add(1)
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Concurrent writers that should be blocked during ComputeRange
+	writerN := 4
+	for i := range writerN {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					key := rand.IntN(N)
+					startTime := time.Now()
+					m.Compute(key, func(e *Entry[int, testValue]) {
+						if !e.Loaded() {
+							return
+						}
+						// Check if we were blocked for a significant time
+						if time.Since(startTime) > 10*time.Millisecond {
+							blockedWrites.Add(1)
+						}
+						// Maintain invariant while updating
+
+						e.Update(testValue{
+							X:       e.Value().X + uint64(writerID),
+							Y:       ^(e.Value().X + uint64(writerID)),
+							Counter: e.Value().Counter,
+						})
+					})
+					runtime.Gosched()
+				}
+			}
+		}(i)
+	}
+
+	// Concurrent readers to detect torn reads
+	readerN := 6
+	for range readerN {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					key := rand.IntN(N)
+					if val, ok := m.Load(key); ok {
+						if val.Y != ^val.X {
+							tornReads.Add(1)
+							t.Errorf("Torn read detected in Load: key=%d, X=%x, Y=%x", key, val.X, val.Y)
+						}
+					}
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+
+	// Run test for a reasonable duration
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// Verify no torn reads occurred
+	if torn := tornReads.Load(); torn > 0 {
+		t.Fatalf("Detected %d torn reads during test", torn)
+	}
+
+	// Verify ComputeRange ran multiple times
+	if runs := rangeProcessRuns.Load(); runs == 0 {
+		t.Fatal("ComputeRange should have run at least once")
+	}
+
+	t.Logf("Test completed: ComputeRange runs=%d, blocked writes=%d",
+		rangeProcessRuns.Load(), blockedWrites.Load())
+}
+
+// TestMap_RangeProcess_AllowWriters_Concurrent tests ComputeRange with
+// blockWritersOpt=false to verify concurrent writers are allowed and data
+// consistency is maintained.
+func TestMap_RangeProcess_AllowWriters_Concurrent(t *testing.T) {
+	type testValue struct {
+		A, B uint64 // Invariant: B == ^A
+		Seq  uint32
+	}
+
+	var m Map[int, testValue]
+	const N = 256
+
+	// Initialize map
+	for i := range N {
+		val := testValue{
+			A:   uint64(i * 987654321),
+			B:   ^uint64(i * 987654321),
+			Seq: 0,
+		}
+		m.Store(i, val)
+	}
+
+	var (
+		wg               sync.WaitGroup
+		stop             = make(chan struct{})
+		tornReads        atomic.Uint64
+		concurrentWrites atomic.Uint64
+		rangeProcessRuns atomic.Uint64
+	)
+
+	// ComputeRange with blockWritersOpt=false (allow concurrent writes)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				m.computeRangeEntry_(func(loaded *entry_[int, testValue]) (*entry_[int, testValue], bool) {
+					k, v := loaded.Key, loaded.Value
+					// Verify invariant
+					if v.B != ^v.A {
+						tornReads.Add(1)
+						t.Errorf("Torn read in ComputeRange: key=%d, A=%x, B=%x", k, v.A, v.B)
+					}
+					// Increment sequence while maintaining invariant
+					newV := testValue{
+						A:   v.A,
+						B:   v.B,
+						Seq: v.Seq + 1,
+					}
+					return &entry_[int, testValue]{Value: newV}, true
+				}, false) // policyOpt = AllowWriters
+				rangeProcessRuns.Add(1)
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Concurrent writers (should NOT be blocked)
+	writerN := 6
+	for i := range writerN {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					key := rand.IntN(N)
+					m.Compute(key, func(e *Entry[int, testValue]) {
+						if !e.Loaded() {
+							return
+						}
+						concurrentWrites.Add(1)
+						// Update while maintaining invariant
+						newA := e.Value().A + uint64(writerID*1000)
+						e.Update(testValue{
+							A:   newA,
+							B:   ^newA,
+							Seq: e.Value().Seq,
+						})
+					})
+					runtime.Gosched()
+				}
+			}
+		}(i)
+	}
+
+	// Concurrent readers
+	readerN := 4
+	for range readerN {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					key := rand.IntN(N)
+					if val, ok := m.Load(key); ok {
+						if val.B != ^val.A {
+							tornReads.Add(1)
+							t.Errorf("Torn read in Load: key=%d, A=%x, B=%x", key, val.A, val.B)
+						}
+					}
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// Verify no torn reads
+	if torn := tornReads.Load(); torn > 0 {
+		t.Fatalf("Detected %d torn reads during test", torn)
+	}
+
+	// Verify concurrent writes occurred (writers were not blocked)
+	if writes := concurrentWrites.Load(); writes == 0 {
+		t.Fatal("Expected concurrent writes to occur when blockWritersOpt=false")
+	}
+
+	t.Logf("Test completed: ComputeRange runs=%d, concurrent writes=%d",
+		rangeProcessRuns.Load(), concurrentWrites.Load())
+}
+
+// TestMap_RangeProcess_TornReadDetection_Stress performs intensive
+// stress testing to detect any torn reads during ComputeRange operations.
+func TestMap_RangeProcess_TornReadDetection_Stress(t *testing.T) {
+	type complexValue struct {
+		ID       uint64
+		Checksum uint64 // Should equal ^ID
+		Data     [4]uint64
+		Tail     uint64 // Should equal ID
+	}
+
+	var m Map[int, complexValue]
+	const N = 1024
+
+	// Initialize with complex values maintaining multiple invariants
+	for i := range N {
+		id := uint64(i) * 0x123456789ABCDEF
+		val := complexValue{
+			ID:       id,
+			Checksum: ^id,
+			Data:     [4]uint64{id, id + 1, id + 2, id + 3},
+			Tail:     id,
+		}
+		m.Store(i, val)
+	}
+
+	var (
+		wg               sync.WaitGroup
+		stop             = make(chan struct{})
+		tornReads        atomic.Uint64
+		validationErrors atomic.Uint64
+	)
+
+	// Validation function to check all invariants
+	validateValue := func(k int, v complexValue, context string) {
+		if v.Checksum != ^v.ID {
+			tornReads.Add(1)
+			t.Errorf("Torn read in %s: key=%d, ID=%x, Checksum=%x", context, k, v.ID, v.Checksum)
+		}
+		if v.Tail != v.ID {
+			tornReads.Add(1)
+			t.Errorf("Torn read in %s: key=%d, ID=%x, Tail=%x", context, k, v.ID, v.Tail)
+		}
+		for i, d := range v.Data {
+			if d != v.ID+uint64(i) {
+				validationErrors.Add(1)
+				t.Errorf("Data corruption in %s: key=%d, Data[%d]=%x, expected=%x",
+					context, k, i, d, v.ID+uint64(i))
+			}
+		}
+	}
+
+	// ComputeRange with blockWritersOpt=true for maximum stress
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				m.computeRangeEntry_(func(loaded *entry_[int, complexValue]) (*entry_[int, complexValue], bool) {
+					k, v := loaded.Key, loaded.Value
+					validateValue(k, v, "ComputeRange")
+
+					// Modify while maintaining invariants
+					newID := v.ID + 0x1000
+					newV := complexValue{
+						ID:       newID,
+						Checksum: ^newID,
+						Data:     [4]uint64{newID, newID + 1, newID + 2, newID + 3},
+						Tail:     newID,
+					}
+					return &entry_[int, complexValue]{Value: newV}, true
+				}, true) // policyOpt = BlockWriters
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Heavy concurrent readers using different access patterns
+	readerN := 8
+	for r := range readerN {
+		wg.Add(1)
+		go func(readerID int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					switch readerID % 3 {
+					case 0:
+						// Sequential access
+						for i := range N {
+							select {
+							case <-stop:
+								return
+							default:
+								if val, ok := m.Load(i); ok {
+									validateValue(i, val, "Load-Sequential")
+								}
+							}
+						}
+					case 1:
+						// Random access
+						key := rand.IntN(N)
+						if val, ok := m.Load(key); ok {
+							validateValue(key, val, "Load-Random")
+						}
+					case 2:
+						// Range access
+						m.Range(func(k int, v complexValue) bool {
+							validateValue(k, v, "Range")
+							return true
+						})
+					}
+					runtime.Gosched()
+				}
+			}
+		}(r)
+	}
+
+	// Concurrent writers (should be blocked by ComputeRange)
+	writerN := 2
+	for i := range writerN {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					key := rand.IntN(N)
+					m.Compute(key, func(e *Entry[int, complexValue]) {
+						if !e.Loaded() {
+							return
+						}
+
+						// Create new value maintaining invariants
+						newID := e.Value().ID + uint64(writerID*0x10000)
+						e.Update(complexValue{
+							ID:       newID,
+							Checksum: ^newID,
+							Data:     [4]uint64{newID, newID + 1, newID + 2, newID + 3},
+							Tail:     newID,
+						})
+					})
+					runtime.Gosched()
+				}
+			}
+		}(i)
+	}
+
+	// Run stress test
+	time.Sleep(1 * time.Second)
+	close(stop)
+	wg.Wait()
+
+	// Final validation
+	if torn := tornReads.Load(); torn > 0 {
+		t.Fatalf("Detected %d torn reads during stress test", torn)
+	}
+
+	if errors := validationErrors.Load(); errors > 0 {
+		t.Fatalf("Detected %d validation errors during stress test", errors)
+	}
+}
+
+// TestMap_RangeProcess_WriterBlocking_Verification verifies that when
+// blockWritersOpt=true, writers are actually blocked and cannot proceed
+// during ComputeRange execution.
+func TestMap_RangeProcess_WriterBlocking_Verification(t *testing.T) {
+	var m Map[int, int]
+	const N = 100
+
+	// Initialize map
+	for i := range N {
+		m.Store(i, i)
+	}
+
+	var (
+		wg                  sync.WaitGroup
+		rangeProcessStarted = make(chan struct{})
+		rangeProcessDone    = make(chan struct{})
+		writerAttempted     = make(chan struct{})
+		writerBlocked       atomic.Bool
+		writerCompleted     atomic.Bool
+	)
+
+	// ComputeRange that takes some time and blocks writers
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		close(rangeProcessStarted)
+
+		m.computeRangeEntry_(func(loaded *entry_[int, int]) (*entry_[int, int], bool) {
+			// Simulate some processing time
+			time.Sleep(10 * time.Millisecond)
+			return &entry_[int, int]{Value: loaded.Value + 1}, true
+		}, true) // policyOpt = BlockWriters
+
+		close(rangeProcessDone)
+	}()
+
+	// Writer that should be blocked
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		// Wait for ComputeRange to start
+		<-rangeProcessStarted
+		time.Sleep(1 * time.Millisecond) // Ensure ComputeRange is running
+
+		startTime := time.Now()
+		writerBlocked.Store(true)
+		close(writerAttempted)
+
+		// This should be blocked until ComputeRange completes
+		m.Store(0, 999)
+
+		duration := time.Since(startTime)
+		writerCompleted.Store(true)
+
+		// Verify we were blocked for a reasonable time
+		if duration < 50*time.Millisecond {
+			t.Errorf("Writer was not blocked long enough: %v", duration)
+		}
+	}()
+
+	// Verify writer is blocked while ComputeRange runs
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		<-rangeProcessStarted
+		<-writerAttempted
+
+		// At this point, writer should be blocked
+		if !writerBlocked.Load() {
+			t.Error("Writer should be blocked at this point")
+		}
+
+		if writerCompleted.Load() {
+			t.Error("Writer should not have completed while ComputeRange is running")
+		}
+
+		// Wait for ComputeRange to complete
+		<-rangeProcessDone
+
+		// Give writer a chance to complete
+		time.Sleep(5 * time.Millisecond)
+
+		if !writerCompleted.Load() {
+			t.Error("Writer should have completed after ComputeRange finished")
+		}
+	}()
+
+	wg.Wait()
+
+	// Verify final state
+	if val, ok := m.Load(0); !ok || val != 999 {
+		t.Errorf("Expected final value 999, got %v (ok=%v)", val, ok)
+	}
+}
+
+// ============================================================================
+// go1.23
+// ============================================================================
+
+// TestMap_ComputeAll_UpdateDelete verifies Entries iteration can update and delete entries.
+func TestMap_ComputeAll_UpdateDelete(t *testing.T) {
+	m := NewMap[int, int]()
+	const N = 128
+
+	for i := range N {
+		m.Store(i, i)
+	}
+
+	for it := range m.Entries() {
+		if it.Key()%2 == 0 {
+			it.Update(it.Value() + 1)
+		} else {
+			it.Delete()
+		}
+	}
+
+	for i := range N {
+		if i%2 == 0 {
+			v, ok := m.Load(i)
+			if !ok || v != i+1 {
+				t.Fatalf("even key %d: want %d, ok=true; got %v, ok=%v", i, i+1, v, ok)
+			}
+		} else {
+			if _, ok := m.Load(i); ok {
+				t.Fatalf("odd key %d: expected deleted", i)
+			}
+		}
+	}
+}
+
+// TestMap_ComputeAll_EarlyStop verifies breaking the range stops iteration and only a subset is processed.
+func TestMap_ComputeAll_EarlyStop(t *testing.T) {
+	m := NewMap[int, int]()
+	const N = 100
+	for i := range N {
+		m.Store(i, i)
+	}
+
+	processed := 0
+	for it := range m.Entries() {
+		it.Update(it.Value() + 1000)
+		processed++
+		if processed == 10 {
+			break
+		}
+	}
+
+	if processed != 10 {
+		t.Fatalf("processed=%d, want 10", processed)
+	}
+
+	updated := 0
+	for k, v := range m.All() {
+		_ = k
+		if v >= 1000 {
+			updated++
+		}
+	}
+	// 早停时，最后一个回调的修改也会被应用
+	if updated != 10 {
+		t.Fatalf("updated=%d, want 10", updated)
+	}
+}
+
+// ============================================================================
+// go1.24
+// ============================================================================
+
+// TestConcurrentCacheMap tests Map in a scenario where it is used as
+// the basis of a memory-efficient concurrent cache. We're specifically
+// looking to make sure that CompareAndSwap and CompareAndDelete are
+// atomic with respect to one another. When competing for the same
+// key-value pair, they must not both succeed.
+//
+// This test is a regression test for issue #70970.
+func TestConcurrentCacheMap(t *testing.T) {
+	type dummy [32]byte
+
+	var m Map[int, weak.Pointer[dummy]]
+
+	type cleanupArg struct {
+		key   int
+		value weak.Pointer[dummy]
+	}
+	cleanup := func(arg cleanupArg) {
+		m.CompareAndDelete(arg.key, arg.value)
+	}
+	get := func(m *Map[int, weak.Pointer[dummy]], key int) *dummy {
+		nv := new(dummy)
+		nw := weak.Make(nv)
+		for {
+			w, loaded := m.LoadOrStore(key, nw)
+			if !loaded {
+				runtime.AddCleanup(nv, cleanup, cleanupArg{key, nw})
+				return nv
+			}
+			if v := w.Value(); v != nil {
+				return v
+			}
+
+			// Weak pointer was reclaimed, try to replace it with nw.
+			if m.CompareAndSwap(key, w, nw) {
+				runtime.AddCleanup(nv, cleanup, cleanupArg{key, nw})
+				return nv
+			}
+		}
+	}
+
+	// Adjust parameters based on coverage mode to prevent timeouts
+	var N, P int
+	if testing.CoverMode() != "" {
+		// Reduced parameters for coverage mode
+		N = 1_000 // 1,000 goroutines instead of 100,000
+		P = 100   // 100 keys instead of 5,000
+	} else {
+		// Full stress test parameters for normal mode
+		N = 100_000
+		P = 5_000
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := range N {
+		go func() {
+			defer wg.Done()
+			a := get(&m, i%P)
+			b := get(&m, i%P)
+			if a != b {
+				t.Errorf(
+					"consecutive cache reads returned different values: a != b (%p vs %p)\n",
+					a,
+					b,
+				)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// ============================================================================
+// Benchmark
+// ============================================================================
+
+func BenchmarkMapLoadSmall(b *testing.B) {
+	benchmarkMapLoad(b, testDataSmall[:])
+}
+
+func BenchmarkMapLoad(b *testing.B) {
+	benchmarkMapLoad(b, testData[:])
+}
+
+func BenchmarkMapLoadLarge(b *testing.B) {
+	benchmarkMapLoad(b, testDataLarge[:])
+}
+
+func benchmarkMapLoad(b *testing.B, data []string) {
+	b.ReportAllocs()
+	var m Map[string, int]
+	for i := range data {
+		m.LoadOrStore(data[i], i)
+	}
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_, _ = m.Load(data[i])
+			i++
+			if i >= len(data) {
+				i = 0
+			}
+		}
+	})
+}
+
+func BenchmarkMapLoadOrStore(b *testing.B) {
+	benchmarkMapLoadOrStore(b, testData[:])
+}
+
+func BenchmarkMapLoadOrStoreLarge(b *testing.B) {
+	benchmarkMapLoadOrStore(b, testDataLarge[:])
+}
+
+func benchmarkMapLoadOrStore(b *testing.B, data []string) {
+	b.ReportAllocs()
+	var m Map[string, int]
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_, _ = m.LoadOrStore(data[i], i)
+			i++
+			if i >= len(data) {
+				i = 0
+			}
+		}
+	})
+}
+
+func BenchmarkMapLoadOrStoreInt(b *testing.B) {
+	benchmarkMapLoadOrStoreInt(b, testDataInt[:])
+}
+
+func BenchmarkMapLoadOrStoreIntLarge(b *testing.B) {
+	benchmarkMapLoadOrStoreInt(b, testDataIntLarge[:])
+}
+
+func benchmarkMapLoadOrStoreInt(b *testing.B, data []int) {
+	b.ReportAllocs()
+	var m Map[int, int]
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_, _ = m.LoadOrStore(data[i], i)
+			i++
+			if i >= len(data) {
+				i = 0
+			}
+		}
+	})
+}
