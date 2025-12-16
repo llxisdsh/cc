@@ -1,0 +1,135 @@
+# This workflow will build a golang project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+
+name: Go
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    name: Build and run tests and collect coverage
+    strategy:
+        fail-fast: false
+        matrix:
+            os: [ macos-latest, ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+            go-version-file: 'go.mod'
+            check-latest: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Build
+        run: |
+          go build -v ./...
+          go build -v -tags synx_cachelinesize_32 ./...
+          go build -v -tags synx_cachelinesize_64 ./...
+          go build -v -tags synx_cachelinesize_128 ./...
+          go build -v -tags synx_cachelinesize_256 ./...
+          go build -v -tags synx_embedded_hash ./...
+          go build -v -tags synx_enable_padding ./...
+          go build -v -tags synx_disable_padding ./...
+          go build -v -race -tags synx_embedded_hash ./...
+
+      - name: Print runner info (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          echo "OS: $(uname -a)"
+          echo "Arch: $(uname -m)"
+          if command -v lscpu >/dev/null 2>&1; then
+            lscpu
+          fi
+          if command -v sysctl >/dev/null 2>&1; then
+            sysctl -n machdep.cpu.brand_string || true
+          fi
+
+      - name: Print runner info (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Write-Host "OS Architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          Write-Host "Process Architecture: $([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          Write-Host "Processor Architecture env: $env:PROCESSOR_ARCHITECTURE"
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table -AutoSize
+          Get-CimInstance Win32_OperatingSystem | Select-Object Version, BuildNumber | Format-Table -AutoSize
+      - name: Run tests
+        run: go test -v ./...
+#        run: go test -v -coverprofile coverage.txt ./...
+
+#      - name: Upload results to Codecov
+#        if: matrix.os == 'ubuntu-latest'
+#        uses: codecov/codecov-action@v5
+#        with:
+#          token: ${{ secrets.CODECOV_TOKEN }}
+#          slug: llxisdsh/pb
+
+  test-arm32:
+    name: Run tests on linux/arm32
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Install QEMU user emulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+
+      - name: Build variants (ARM32)
+        env:
+          GOOS: linux
+          GOARCH: arm
+          GOARM: '7'
+          CGO_ENABLED: '0'
+        run: |
+          echo "Building variants for ARM32"
+          go version
+          go mod download
+          go build -v ./...
+          go build -v -tags synx_cachelinesize_32 ./...
+          go build -v -tags synx_cachelinesize_64 ./...
+          go build -v -tags synx_cachelinesize_128 ./...
+          go build -v -tags synx_cachelinesize_256 ./...
+          go build -v -tags synx_embedded_hash ./...
+          go build -v -tags synx_enable_padding ./...
+          go build -v -tags synx_disable_padding ./...
+
+      - name: Run tests (ARM 32-bit via QEMU)
+        env:
+          GOOS: linux
+          GOARCH: arm
+          GOARM: '7'
+          CGO_ENABLED: '0'
+        run: |
+          go version
+          go mod download
+          go test -v -exec "qemu-arm" ./...
+
+      # - name: Upload results to Codecov (ARM32)
+      #   uses: codecov/codecov-action@v5
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     slug: llxisdsh/pb
+      #     files: coverage_arm32.txt
+          
