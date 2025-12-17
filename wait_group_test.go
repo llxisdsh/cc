@@ -217,25 +217,6 @@ func TestWaitGroupGo(t *testing.T) {
 	}
 }
 
-func TestWaitGroupWaitTimeout(t *testing.T) {
-	wg := &WaitGroup{}
-	wg.Add(1)
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		wg.Done()
-	}()
-
-	// Should time out
-	if wg.WaitTimeout(10 * time.Millisecond) {
-		t.Fatal("WaitTimeout should have timed out")
-	}
-
-	// Should success
-	if !wg.WaitTimeout(100 * time.Millisecond) {
-		t.Fatal("WaitTimeout should have succeeded")
-	}
-}
-
 func TestWaitGroupCount(t *testing.T) {
 	wg := &WaitGroup{}
 	wg.Add(1)

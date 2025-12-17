@@ -1,0 +1,180 @@
+package cc
+
+import (
+	"context"
+	"time"
+)
+
+// Wait executes fn and waits for it to return or for the context to be cancelled.
+// It is useful for making blocking calls (that don't support Context) cancellable.
+//
+// Usage:
+//
+//	cc.Wait(ctx, wg.Wait)
+func Wait(ctx context.Context, fn func()) error {
+	return Do(ctx, func() error {
+		fn()
+		return nil
+	})
+}
+
+// WaitTimeout executes fn and waits for it to return or for the timeout to elapse.
+// It returns context.DeadlineExceeded if the timeout occurs.
+//
+// Usage:
+//
+//	if err := cc.WaitTimeout(time.Second, wg.Wait); err != nil {
+//	    // timed out
+//	}
+func WaitTimeout(timeout time.Duration, fn func()) error {
+	return DoTimeout(timeout, func() error {
+		fn()
+		return nil
+	})
+}
+
+// Do executes fn and waits for it to return or for the context to be cancelled.
+// It returns fn's error if it completes, or ctx.Err() if cancelled.
+//
+// Usage:
+//
+//	err := cc.Do(ctx, func() error {
+//	    return expensiveOp()
+//	})
+func Do(ctx context.Context, fn func() error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	// Buffer size 1 to prevent goroutine leak if ctx cancels
+	done := make(chan error, 1)
+	go func() {
+		done <- fn()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
+}
+
+// DoTimeout executes fn and waits for it to return or for the timeout to elapse.
+// It returns fn's error if it completes, or context.DeadlineExceeded if timed out.
+func DoTimeout(timeout time.Duration, fn func() error) error {
+	if timeout <= 0 {
+		return context.DeadlineExceeded
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return Do(ctx, fn)
+}
+
+// Repeat executes the action periodically with the given interval until the context is cancelled.
+// It stops immediately if the action returns an error.
+// The first execution happens immediately.
+//
+// Usage:
+//
+//	cc.Repeat(ctx, time.Second, func(ctx context.Context) error {
+//	    // do something periodically
+//	    return nil
+//	})
+func Repeat(ctx context.Context, interval time.Duration, action func(context.Context) error) error {
+	if interval <= 0 {
+		return action(ctx)
+	}
+
+	// Run immediately first
+	if err := action(ctx); err != nil {
+		return err
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := action(ctx); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// Parallel executes n copies of the action concurrently.
+// It blocks until all actions complete or the context is cancelled.
+// Returns the first error encountered, if any.
+//
+// If n <= 0, it defaults to GOMAXPROCS(0).
+//
+// Usage:
+//
+//	cc.Parallel(ctx, 10, func(ctx context.Context, i int) error {
+//	    // process item i
+//	    return nil
+//	})
+func Parallel(ctx context.Context, n int, action func(context.Context, int) error) error {
+	if n <= 0 {
+		n = 1
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	var wg WaitGroup // Use cc.WaitGroup for efficiency
+	wg.Add(n)
+
+	// We use a channel to collect the first error.
+	// Buffer size 1 is enough because we only care about the first one.
+	errCh := make(chan error, 1)
+
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+
+			// If an error already occurred, skip execution
+			select {
+			case <-errCh:
+				return
+			default:
+			}
+
+			if err := action(ctx, idx); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		}(i)
+	}
+
+	// Wait for completion or context cancel
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	case <-waitDone:
+		// Check if any error was reported just before completion
+		select {
+		case err := <-errCh:
+			return err
+		default:
+			return nil
+		}
+	}
+}

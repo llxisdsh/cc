@@ -50,9 +50,40 @@ Atomic, low-overhead coordination tools built on runtime semaphores.
 | **`FairSemaphore`**| **FIFO Queue** | Strict FIFO ordering for permit acquisition. | Anti-starvation scenarios. |
 | **`TicketLockGroup`** | **Keyed Lock** | Per-key locking with auto-cleanup. | User/Resource isolation. |
 | **`RWLockGroup`** | **Keyed R/W Lock** | Per-key R/W locking with auto-cleanup. | Config/Data partitioning. |
-| **`WaitGroup`** | **Reusable WG** | Supports `WaitTimeout` & `TryWait`. Reusable immediately. | Batch processing, Time-bounded waits. |
+| **`WaitGroup`** | **Reusable WG** | Supports `TryWait()` & `Waiters()`. Reusable immediately. | Batch processing. |
 
 > **Design Philosophy**: Minimal footprint, direct `runtime_semacquire` integration. Most primitives are zero-alloc on hot paths.
+
+### 🛠️ Concurrency Helpers
+
+Generic helpers to add Timeout and Context cancellation support to any blocking operation, plus tools for periodic and parallel execution.
+
+```go
+// Wait: Add Context cancellation to a blocking function
+err := cc.Wait(ctx, func() {
+    wg.Wait()
+})
+
+// WaitTimeout: Add Timeout to a blocking function
+if err := cc.WaitTimeout(time.Second, wg.Wait); err != nil {
+    // timed out
+}
+
+// Do: Execute a function that returns error, with Context support
+err := cc.Do(ctx, func() error {
+    return complexOp()
+})
+
+// Repeat: Run action periodically until Context cancelled or error
+cc.Repeat(ctx, 5*time.Second, func(ctx context.Context) error {
+    return reloadConfig()
+})
+
+// Parallel: Execute N tasks concurrently (fail-fast on error)
+err := cc.Parallel(ctx, 10, func(ctx context.Context, i int) error {
+    return processItem(i)
+})
+```
 
 ## Quick Start
 
@@ -116,10 +147,11 @@ g.Pulse()  // Wake current waiters only, remain closed
 var r cc.Rally
 r.Meet(3)  // Blocks until 3 goroutines arrive
 
-// WaitGroup: Reusable with Timeout
+// WaitGroup: Reusable
 var wg cc.WaitGroup
 wg.Go(func() { /* work */ })
-wg.WaitTimeout(time.Second) // Returns true if done, false if timed out
+// Add timeout support via cc.WaitTimeout
+err := cc.WaitTimeout(time.Second, wg.Wait)
 ```
 
 #### 2. Advanced Locking

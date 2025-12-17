@@ -2,7 +2,6 @@ package cc
 
 import (
 	"sync/atomic"
-	"time"
 
 	"github.com/llxisdsh/cc/internal/opt"
 )
@@ -139,30 +138,6 @@ func (wg *WaitGroup) Go(f func()) {
 		defer wg.Done()
 		f()
 	}()
-}
-
-// WaitTimeout blocks until the WaitGroup counter is zero or the timeout elapses.
-// It returns true if the counter became zero, or false if the timeout elapsed.
-//
-// Note: This implementation spins up a goroutine to wait for the WaitGroup,
-// which adds some overhead. Use it sparingly.
-func (wg *WaitGroup) WaitTimeout(timeout time.Duration) bool {
-	if wg.Count() == 0 {
-		return true
-	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
-	}
 }
 
 // Count returns the current number of active tasks.
