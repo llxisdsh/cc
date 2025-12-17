@@ -1,8 +1,8 @@
-# cc
+# **C**oncurrent **C**ore
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/llxisdsh/cc.svg)](https://pkg.go.dev/github.com/llxisdsh/cc)
 
-**cc** is a lightweight, high-performance concurrency toolkit for Go, designed for critical paths where latency and allocation matter.
+**Concurrent Core for Go** — a lightweight, high-performance toolkit designed for critical paths where latency and allocation matter.
 
 ## Installation
 
