@@ -56,7 +56,7 @@ func TestRally_Reuse(t *testing.T) {
 
 				// Verify
 				if val := globalCounter.Load(); val != parties {
-					// See note in previous test version about raciness of this check
+					_ = val
 				}
 
 				// Barrier 2: Wait for everyone to check
@@ -69,6 +69,7 @@ func TestRally_Reuse(t *testing.T) {
 				b.Meet(parties)
 
 				if val := globalCounter.Load(); val != 0 {
+					_ = val
 				}
 
 				// Barrier 4: Sync before next cycle

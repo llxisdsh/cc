@@ -100,10 +100,10 @@ func (e *Epoch) WaitAtLeast(target uint32) {
 	if uint32(e.state.Load()) >= target {
 		return
 	}
-	e.waitAtLeastSlow(target)
+	e.slowWaitAtLeast(target)
 }
 
-func (e *Epoch) waitAtLeastSlow(target uint32) {
+func (e *Epoch) slowWaitAtLeast(target uint32) {
 	// 2. Slow path: enqueue
 	e.mu.Lock()
 	// Check again inside lock

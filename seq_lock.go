@@ -327,21 +327,21 @@ func slowSeqLockRead[T any](sl *SeqLock, slot *SeqLockSlot[T]) (v T) {
 
 // SeqLockWrite publishes v guarded by the external SeqLock.
 // Enters odd, copies v, then exits to even to publish a stable snapshot.
-func SeqLockWrite[T any](l *SeqLock, slot *SeqLockSlot[T], v T) {
-	if s1, ok := l.BeginWrite(); ok {
+func SeqLockWrite[T any](sl *SeqLock, slot *SeqLockSlot[T], v T) {
+	if s1, ok := sl.BeginWrite(); ok {
 		slot.WriteUnfenced(v)
-		l.EndWrite(s1)
+		sl.EndWrite(s1)
 		return
 	}
-	slowSeqLockWrite(l, slot, v)
+	slowSeqLockWrite(sl, slot, v)
 }
 
-func slowSeqLockWrite[T any](l *SeqLock, slot *SeqLockSlot[T], v T) {
+func slowSeqLockWrite[T any](sl *SeqLock, slot *SeqLockSlot[T], v T) {
 	var spins int
 	for {
-		if s1, ok := l.BeginWrite(); ok {
+		if s1, ok := sl.BeginWrite(); ok {
 			slot.WriteUnfenced(v)
-			l.EndWrite(s1)
+			sl.EndWrite(s1)
 			return
 		}
 		delay(&spins)
@@ -351,22 +351,22 @@ func slowSeqLockWrite[T any](l *SeqLock, slot *SeqLockSlot[T], v T) {
 // SeqLockRead32 atomically loads a tear-free snapshot using the external SeqLock.
 // Spins until seq is even and unchanged across two reads; copies the value
 // within the stable window.
-func SeqLockRead32[T any](l *SeqLock32, slot *SeqLockSlot[T]) (v T) {
-	if s1, ok := l.BeginRead(); ok {
+func SeqLockRead32[T any](sl *SeqLock32, slot *SeqLockSlot[T]) (v T) {
+	if s1, ok := sl.BeginRead(); ok {
 		v = slot.ReadUnfenced()
-		if ok = l.EndRead(s1); ok {
+		if ok = sl.EndRead(s1); ok {
 			return v
 		}
 	}
-	return slowSeqLockRead32(l, slot)
+	return slowSeqLockRead32(sl, slot)
 }
 
-func slowSeqLockRead32[T any](l *SeqLock32, slot *SeqLockSlot[T]) (v T) {
+func slowSeqLockRead32[T any](sl *SeqLock32, slot *SeqLockSlot[T]) (v T) {
 	var spins int
 	for {
-		if s1, ok := l.BeginRead(); ok {
+		if s1, ok := sl.BeginRead(); ok {
 			v = slot.ReadUnfenced()
-			if ok = l.EndRead(s1); ok {
+			if ok = sl.EndRead(s1); ok {
 				return v
 			}
 			continue
@@ -377,21 +377,21 @@ func slowSeqLockRead32[T any](l *SeqLock32, slot *SeqLockSlot[T]) (v T) {
 
 // SeqLockWrite32 publishes v guarded by the external SeqLock.
 // Enters odd, copies v, then exits to even to publish a stable snapshot.
-func SeqLockWrite32[T any](l *SeqLock32, slot *SeqLockSlot[T], v T) {
-	if s1, ok := l.BeginWrite(); ok {
+func SeqLockWrite32[T any](sl *SeqLock32, slot *SeqLockSlot[T], v T) {
+	if s1, ok := sl.BeginWrite(); ok {
 		slot.WriteUnfenced(v)
-		l.EndWrite(s1)
+		sl.EndWrite(s1)
 		return
 	}
-	slowSeqLockWrite32(l, slot, v)
+	slowSeqLockWrite32(sl, slot, v)
 }
 
-func slowSeqLockWrite32[T any](l *SeqLock32, slot *SeqLockSlot[T], v T) {
+func slowSeqLockWrite32[T any](sl *SeqLock32, slot *SeqLockSlot[T], v T) {
 	var spins int
 	for {
-		if s1, ok := l.BeginWrite(); ok {
+		if s1, ok := sl.BeginWrite(); ok {
 			slot.WriteUnfenced(v)
-			l.EndWrite(s1)
+			sl.EndWrite(s1)
 			return
 		}
 		delay(&spins)
@@ -401,17 +401,17 @@ func slowSeqLockWrite32[T any](l *SeqLock32, slot *SeqLockSlot[T], v T) {
 // SeqLockWriteLocked publishes v assuming an external lock is held.
 //
 //go:nosplit
-func SeqLockWriteLocked[T any](l *SeqLock, slot *SeqLockSlot[T], v T) {
-	l.BeginWriteLocked()
+func SeqLockWriteLocked[T any](sl *SeqLock, slot *SeqLockSlot[T], v T) {
+	sl.BeginWriteLocked()
 	slot.WriteUnfenced(v)
-	l.EndWriteLocked()
+	sl.EndWriteLocked()
 }
 
 // SeqLockWriteLocked32 publishes v assuming an external lock is held.
 //
 //go:nosplit
-func SeqLockWriteLocked32[T any](l *SeqLock32, slot *SeqLockSlot[T], v T) {
-	l.BeginWriteLocked()
+func SeqLockWriteLocked32[T any](sl *SeqLock32, slot *SeqLockSlot[T], v T) {
+	sl.BeginWriteLocked()
 	slot.WriteUnfenced(v)
-	l.EndWriteLocked()
+	sl.EndWriteLocked()
 }

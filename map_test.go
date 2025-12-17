@@ -4702,11 +4702,11 @@ func TestMapRangeProcessEntry(t *testing.T) {
 		m.computeRangeEntry_(
 			func(loaded *entry_[string, int]) (*entry_[string, int], bool) {
 				value := loaded.Value
-				switch {
-				case value%3 == 0:
+				switch value % 3 {
+				case 0:
 					// Divisible by 3: delete
 					return nil, true // Delete entry
-				case value%3 == 1:
+				case 1:
 					// Remainder 1: multiply by 10
 					return &entry_[string, int]{
 						Key:   loaded.Key,
@@ -4722,11 +4722,11 @@ func TestMapRangeProcessEntry(t *testing.T) {
 		// Verify results
 		for i := range 15 {
 			key := strconv.Itoa(i)
-			switch {
-			case i%3 == 0:
+			switch i % 3 {
+			case 0:
 				// Should be deleted
 				expectMissingMap(t, key, 0)(m.Load(key))
-			case i%3 == 1:
+			case 1:
 				// Should be multiplied by 10
 				expectPresentMap(t, key, i*10)(m.Load(key))
 			default:

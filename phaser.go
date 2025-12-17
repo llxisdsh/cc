@@ -75,7 +75,6 @@ func (p *Phaser) Arrive() int {
 		// If explicit phase number matters: Epoch.WaitAtLeast(phase + 1).
 		// We should ensure Epoch value matches Phase.
 		// Assuming we started both at 0.
-
 		p.epoch.Add(1)
 		p.mu.Unlock()
 		return phase + 1

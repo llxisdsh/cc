@@ -38,7 +38,7 @@ func TestEntriesPerBucket_Simulated(t *testing.T) {
 		target := min(c.cl, 32+32*(c.ps>>3))
 		overhead := 8 + c.ps
 		bucket := overhead + got*c.ps
-		if !(bucket <= target && target-bucket < c.ps) {
+		if bucket > target || target-bucket >= c.ps {
 			t.Fatalf("ps=%d cl=%d bucket=%d target=%d", c.ps, c.cl, bucket, target)
 		}
 		if got > 7 {
