@@ -43,6 +43,7 @@ const (
 // If the counter becomes zero, all goroutines blocked on Wait are released.
 // If the counter goes negative, Add panics.
 func (wg *WaitGroup) Add(delta int) {
+	var spins int
 	for {
 		state := wg.state.Load()
 		cnt := int32(state & taskMask)
@@ -89,6 +90,7 @@ func (wg *WaitGroup) Add(delta int) {
 			}
 			return
 		}
+		delay(&spins)
 	}
 }
 
