@@ -50,6 +50,7 @@ Atomic, low-overhead coordination tools built on runtime semaphores.
 | **`FairSemaphore`**| **FIFO Queue** | Strict FIFO ordering for permit acquisition. | Anti-starvation scenarios. |
 | **`TicketLockGroup`** | **Keyed Lock** | Per-key locking with auto-cleanup. | User/Resource isolation. |
 | **`RWLockGroup`** | **Keyed R/W Lock** | Per-key R/W locking with auto-cleanup. | Config/Data partitioning. |
+| **`WaitGroup`** | **Reusable WG** | Supports `WaitTimeout` & `TryWait`. Reusable immediately. | Batch processing, Time-bounded waits. |
 
 > **Design Philosophy**: Minimal footprint, direct `runtime_semacquire` integration. Most primitives are zero-alloc on hot paths.
 
@@ -114,6 +115,11 @@ g.Pulse()  // Wake current waiters only, remain closed
 // Rally: Cyclic barrier for N parties
 var r cc.Rally
 r.Meet(3)  // Blocks until 3 goroutines arrive
+
+// WaitGroup: Reusable with Timeout
+var wg cc.WaitGroup
+wg.Go(func() { /* work */ })
+wg.WaitTimeout(time.Second) // Returns true if done, false if timed out
 ```
 
 #### 2. Advanced Locking
