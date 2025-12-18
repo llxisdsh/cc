@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Concurrent Core - High Performance Go Concurrency Toolkit</title>
+    <meta name="description"
+        content="A lightweight, high-performance toolkit for Go designed for critical paths where latency and allocation matter.">
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800;900&family=Fira+Code:wght@400;500&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <nav id="navbar">
+        <div class="container nav-content">
+            <div class="logo"><span>C</span>oncurrent <span>C</span>ore</div>
+            <div class="nav-links" id="navLinks">
+                <a href="#features" data-i18n="nav.features">Features</a>
+                <a href="#showcase" data-i18n="nav.showcase">Showcase</a>
+                <a href="https://github.com/llxisdsh/cc" target="_blank">GitHub</a>
+                <button class="lang-toggle" onclick="toggleLanguage()">EN / 中文</button>
+            </div>
+            <button class="menu-toggle" id="menuToggle" onclick="toggleMenu()">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </div>
+    </nav>
+
+    <section class="hero container">
+        <h1 class="animate-fade-in" data-i18n="hero.title">Concurrent Core for Go</h1>
+        <p class="animate-fade-in" style="animation-delay: 0.1s;" data-i18n="hero.subtitle">
+            A lightweight, high-performance toolkit designed for critical paths where latency and allocation matter.
+        </p>
+        <div class="hero-actions animate-fade-in" style="animation-delay: 0.2s;">
+            <a href="https://pkg.go.dev/github.com/llxisdsh/cc" class="btn btn-primary" data-i18n="hero.getStarted">Go
+                Reference</a>
+            <a href="https://github.com/llxisdsh/cc" class="btn btn-secondary" data-i18n="hero.github">View on
+                GitHub</a>
+        </div>
+
+        <div class="terminal animate-fade-in" style="animation-delay: 0.3s;">
+            <code>go get github.com/llxisdsh/cc</code>
+        </div>
+    </section>
+
+    <section id="features" class="features container">
+        <div class="section-title">
+            <h2 data-i18n="features.title">Core Components</h2>
+            <p data-i18n="features.subtitle">Engineered for extreme performance and reliability.</p>
+        </div>
+        <div class="grid">
+            <div class="card glass">
+                <div class="card-icon">🚀</div>
+                <h3 data-i18n="features.map.title">Map & FlatMap</h3>
+                <p data-i18n="features.map.desc">State-of-the-art concurrent map implementations. Lock-free reads,
+                    fine-grained write locking, and cache-sensitive storage.</p>
+            </div>
+            <div class="card glass">
+                <div class="card-icon">⚡</div>
+                <h3 data-i18n="features.once.title">OnceGroup</h3>
+                <p data-i18n="features.once.desc">Generic, high-performance duplicate suppression. ~20× faster than
+                    standard singleflight with near-zero allocations.</p>
+            </div>
+            <div class="card glass">
+                <div class="card-icon">🔒</div>
+                <h3 data-i18n="features.locks.title">Advanced Primitives</h3>
+                <p data-i18n="features.locks.desc">Latch, Gate, Rally, Phaser, Epoch, and more. Atomic coordination
+                    tools built directly on runtime semaphores.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="primitives container">
+        <div class="section-title">
+            <h2 data-i18n="primitives.title">Synchronization Gallery</h2>
+            <p data-i18n="primitives.subtitle">A rich set of primitives for every concurrency pattern.</p>
+        </div>
+        <div class="grid gallery-grid">
+            <div class="gallery-item">
+                <h4 data-i18n="primitives.coordination">Coordination</h4>
+                <ul>
+                    <li><strong>Latch</strong> - <span data-i18n="gallery.latch">One-shot signal</span></li>
+                    <li><strong>Gate</strong> - <span data-i18n="gallery.gate">Reusable barrier</span></li>
+                    <li><strong>Rally</strong> - <span data-i18n="gallery.rally">Cyclic barrier</span></li>
+                </ul>
+            </div>
+            <div class="gallery-item">
+                <h4 data-i18n="primitives.locking">Locking</h4>
+                <ul>
+                    <li><strong>TicketLock</strong> - <span data-i18n="gallery.ticket">Fair FIFO lock</span></li>
+                    <li><strong>RWLock</strong> - <span data-i18n="gallery.rw">Writer-preferred</span></li>
+                    <li><strong>BitLock</strong> - <span data-i18n="gallery.bit">Memory efficient</span></li>
+                </ul>
+            </div>
+            <div class="gallery-item">
+                <h4 data-i18n="primitives.advanced">Advanced</h4>
+                <ul>
+                    <li><strong>OnceGroup</strong> - <span data-i18n="gallery.once">Smart singleflight</span></li>
+                    <li><strong>WaitGroup</strong> - <span data-i18n="gallery.wg">Reusable tracker</span></li>
+                    <li><strong>LockGroups</strong> - <span data-i18n="gallery.lg">Dynamic key-locks</span></li>
+                </ul>
+            </div>
+            <div class="gallery-item">
+                <h4 data-i18n="primitives.specialized">Specialized</h4>
+                <ul>
+                    <li><strong>FairSemaphore</strong> - <span data-i18n="gallery.sem">FIFO permits</span></li>
+                    <li><strong>Epoch</strong> - <span data-i18n="gallery.epoch">Version gates</span></li>
+                    <li><strong>SeqLock</strong> - <span data-i18n="gallery.seqlock">Wait-free optimistic-read</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <section id="showcase" class="showcase container">
+        <div class="section-title">
+            <h2 data-i18n="showcase.title">Built for Performance</h2>
+        </div>
+        <div class="code-block glass">
+            <pre><code><span class="token comment">// Efficient Concurrent Map Usage</span>
+<span class="token keyword">var</span> m cc.Map[<span class="token string">string</span>, <span class="token string">int</span>]
+m.Store(<span class="token string">"key"</span>, <span class="token string">42</span>)
+
+<span class="token comment">// Atomic Read-Modify-Write</span>
+m.Compute(<span class="token string">"key"</span>, <span class="token keyword">func</span>(e *cc.Entry[<span class="token string">string</span>, <span class="token string">int</span>]) {
+    <span class="token keyword">if</span> e.Loaded() {
+        e.Update(e.Value() + <span class="token string">1</span>)
+    }
+})</code></pre>
+        </div>
+    </section>
+
+    <section id="performance" class="performance-section container">
+        <div class="section-title">
+            <h2 data-i18n="perf.title">Speed That Matters</h2>
+            <p data-i18n="perf.subtitle">Benchmarks against standard library and popular packages.</p>
+        </div>
+        <div class="chart-container glass">
+            <div class="chart-row">
+                <div class="chart-label">
+                    <span data-i18n="perf.label.throughput">Throughput</span>
+                    <span data-i18n="perf.map.throughput">10x Faster</span>
+                </div>
+                <div class="chart-bar-bg">
+                    <div class="chart-bar cc" style="width: 100%"></div>
+                </div>
+            </div>
+            <div class="chart-row">
+                <div class="chart-label">
+                    <span data-i18n="perf.label.latency">P999 Latency</span>
+                    <span data-i18n="perf.map.latency">1/20 Delay</span>
+                </div>
+                <div class="chart-bar-bg">
+                    <div class="chart-bar cc" style="width: 100%"></div>
+                </div>
+            </div>
+            <div class="chart-row">
+                <div class="chart-label">
+                    <span data-i18n="perf.label.memory">Memory usage</span>
+                    <span data-i18n="perf.map.mem">50% Lower</span>
+                </div>
+                <div class="chart-bar-bg">
+                    <div class="chart-bar cc" style="width: 100%"></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="knowledge" class="knowledge-center container">
+        <div class="section-title">
+            <h2 data-i18n="knowledge.title">Deep Dive Center</h2>
+            <p data-i18n="knowledge.subtitle">Understand the soul of concurrent programming through vivid analogies and
+                rigorous principles.</p>
+        </div>
+
+        <div class="doc-nav" id="doc-nav">
+            <button class="doc-btn active" onclick="showDoc('map')" data-i18n="doc.nav.map">Map & FlatMap</button>
+            <button class="doc-btn" onclick="showDoc('gate')" data-i18n="doc.nav.gate">Gate & Latch</button>
+            <button class="doc-btn" onclick="showDoc('phaser')" data-i18n="doc.nav.phaser">Phaser & Rally</button>
+            <button class="doc-btn" onclick="showDoc('locks')" data-i18n="doc.nav.locks">Basic Locks</button>
+            <button class="doc-btn" onclick="showDoc('advanced')" data-i18n="doc.nav.advanced">Advanced
+                Primitives</button>
+        </div>
+
+        <div id="doc-container">
+            <!-- Content populated by JS -->
+        </div>
+    </section>
+
+    <footer class="container">
+        <p>&copy; 2025 llxisdsh. Apache 2.0 Licensed.</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
