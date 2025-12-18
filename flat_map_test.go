@@ -56,7 +56,7 @@ func TestFlatMap_BasicOperations(t *testing.T) {
 	// Test insert
 	actual, ok := m.Compute(
 		"key1",
-		func(e *Entry[string, int]) {
+		func(e *MapEntry[string, int]) {
 			if e.Loaded() {
 				t.Error("Expected not loaded for new key")
 			}
@@ -75,7 +75,7 @@ func TestFlatMap_BasicOperations(t *testing.T) {
 	// Test update
 	actual, ok = m.Compute(
 		"key1",
-		func(e *Entry[string, int]) {
+		func(e *MapEntry[string, int]) {
 			if !e.Loaded() || e.Value() != 42 {
 				t.Errorf(
 					"Expected loaded=true, old=42, got loaded=%v, old=%v",
@@ -98,7 +98,7 @@ func TestFlatMap_BasicOperations(t *testing.T) {
 	// Test delete
 	_, ok = m.Compute(
 		"key1",
-		func(e *Entry[string, int]) {
+		func(e *MapEntry[string, int]) {
 			if !e.Loaded() || e.Value() != 52 {
 				t.Errorf(
 					"Expected loaded=true, old=52, got loaded=%v, old=%v",
@@ -119,12 +119,12 @@ func TestFlatMap_BasicOperations(t *testing.T) {
 	}
 
 	// Test cancel operation
-	m.Compute("key2", func(e *Entry[string, int]) {
+	m.Compute("key2", func(e *MapEntry[string, int]) {
 		e.Update(100)
 	})
 	actual, ok = m.Compute(
 		"key2",
-		func(e *Entry[string, int]) {
+		func(e *MapEntry[string, int]) {
 		},
 	)
 	if !ok || actual != 100 {
@@ -139,7 +139,7 @@ func TestFlatMap_EdgeCases(t *testing.T) {
 	// Test with empty string key
 	m.Compute(
 		"",
-		func(e *Entry[string, *string]) {
+		func(e *MapEntry[string, *string]) {
 			newV := "empty_key_value"
 			e.Update(&newV)
 		},
@@ -155,7 +155,7 @@ func TestFlatMap_EdgeCases(t *testing.T) {
 	}
 	m.Compute(
 		longKey,
-		func(e *Entry[string, *string]) {
+		func(e *MapEntry[string, *string]) {
 			newV := "long_key_value"
 			e.Update(&newV)
 		},
@@ -182,7 +182,7 @@ func TestFlatMap_MultipleKeys(t *testing.T) {
 	for i := range 100 {
 		m.Compute(
 			i,
-			func(e *Entry[int, *string]) {
+			func(e *MapEntry[int, *string]) {
 				newV := fmt.Sprintf("value_%d", i)
 				e.Update(&newV)
 			},
@@ -207,7 +207,7 @@ func TestFlatMap_MultipleKeys(t *testing.T) {
 	for i := 0; i < 100; i += 2 {
 		m.Compute(
 			i,
-			func(e *Entry[int, *string]) {
+			func(e *MapEntry[int, *string]) {
 				e.Delete()
 			},
 		)
@@ -400,7 +400,7 @@ func TestFlatMap_Concurrent(t *testing.T) {
 				key := goroutineID*numOpsPerGoroutine + i
 				m.Compute(
 					key,
-					func(e *Entry[int, int]) {
+					func(e *MapEntry[int, int]) {
 						e.Update(key * 2)
 					},
 				)
@@ -458,7 +458,7 @@ func TestFlatMap_ConcurrentReadWrite(t *testing.T) {
 
 	// Pre-populate with some data
 	for i := range 1000 {
-		m.Compute(i, func(e *Entry[int, int]) {
+		m.Compute(i, func(e *MapEntry[int, int]) {
 			e.Update(i)
 		})
 	}
@@ -496,7 +496,7 @@ func TestFlatMap_ConcurrentReadWrite(t *testing.T) {
 					key := rand.IntN(1000)
 					m.Compute(
 						key,
-						func(e *Entry[int, int]) {
+						func(e *MapEntry[int, int]) {
 							newV := rand.IntN(10000)
 							e.Update(newV)
 						},
@@ -707,7 +707,7 @@ func TestFlatMap_DoubleBufferConsistency(t *testing.T) {
 
 	// Insert initial data
 	for i := 1; i <= numKeys; i++ {
-		m.Compute(i, func(e *Entry[int, int]) {
+		m.Compute(i, func(e *MapEntry[int, int]) {
 			e.Update(i)
 		})
 	}
@@ -751,7 +751,7 @@ func TestFlatMap_DoubleBufferConsistency(t *testing.T) {
 			for i := 1; i <= numKeys; i++ {
 				m.Compute(
 					i,
-					func(e *Entry[int, int]) {
+					func(e *MapEntry[int, int]) {
 						e.Update(e.Value() + 1000)
 					},
 				)
@@ -800,7 +800,7 @@ func TestFlatMap_DoubleBufferConsistency_StressABA(t *testing.T) {
 					val := pair{X: uint16(s), Y: ^uint16(s)}
 					m.Compute(
 						0,
-						func(e *Entry[int, pair]) {
+						func(e *MapEntry[int, pair]) {
 							e.Update(val)
 						},
 					)
@@ -868,7 +868,7 @@ func TestFlatMap_SeqlockConsistency_StressABA(t *testing.T) {
 					val := pair{X: uint64(s), Y: ^uint64(s)}
 					m.Compute(
 						0,
-						func(e *Entry[int, pair]) {
+						func(e *MapEntry[int, pair]) {
 							e.Update(val)
 						},
 					)
@@ -1042,14 +1042,14 @@ func TestFlatMap_KeyTornRead_Stress(t *testing.T) {
 						// Delete
 						m.Compute(
 							k,
-							func(e *Entry[bigKey, int]) {
+							func(e *MapEntry[bigKey, int]) {
 								e.Delete()
 							},
 						)
 						// Re-insert
 						m.Compute(
 							k,
-							func(e *Entry[bigKey, int]) {
+							func(e *MapEntry[bigKey, int]) {
 								e.Update(i)
 							},
 						)
@@ -1152,13 +1152,13 @@ func TestFlatMap_KeyTornRead_Stress_Heavy(t *testing.T) {
 						k := keys[i]
 						m.Compute(
 							k,
-							func(e *Entry[bigKey, int]) {
+							func(e *MapEntry[bigKey, int]) {
 								e.Delete()
 							},
 						)
 						m.Compute(
 							k,
-							func(e *Entry[bigKey, int]) {
+							func(e *MapEntry[bigKey, int]) {
 								e.Update(i)
 							},
 						)
@@ -1204,7 +1204,7 @@ func TestFlatMap_Range_NoDuplicateVisit_Heavy(t *testing.T) {
 				for i := offset; i < N; i += writerN {
 					m.Compute(
 						i,
-						func(e *Entry[int, int]) {
+						func(e *MapEntry[int, int]) {
 							e.Update(e.Value() + 1)
 						},
 					)
@@ -1257,7 +1257,7 @@ func TestFlatMap_Range_NoDuplicateVisit(t *testing.T) {
 					// mutate value to force seq changes
 					m.Compute(
 						i,
-						func(e *Entry[int, int]) {
+						func(e *MapEntry[int, int]) {
 							e.Update(e.Value() + 1)
 						},
 					)
@@ -1296,7 +1296,7 @@ func TestFlatMap_RangeProcess_Basic(t *testing.T) {
 	}
 
 	// Delete evens, add +100 to odds, cancel others (none)
-	m.ComputeRange(func(e *Entry[int, int]) bool {
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
 		if e.Key()%2 == 0 {
 			e.Delete()
 		} else {
@@ -1325,7 +1325,7 @@ func TestFlatMap_RangeProcess_CancelAndEarlyStop(t *testing.T) {
 		m.Store(i, i)
 	}
 	count := 0
-	m.ComputeRange(func(e *Entry[int, int]) bool {
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
 		count++
 		if count < 10 {
 			e.Update(e.Value() + 1)
@@ -1369,7 +1369,7 @@ func TestFlatMap_RangeProcess_Concurrent(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *Entry[int, int]) bool {
+				m.ComputeRange(func(e *MapEntry[int, int]) bool {
 					if e.Key()%7 == 0 {
 						e.Delete()
 					} else {
@@ -1391,7 +1391,7 @@ func TestFlatMap_RangeProcess_Concurrent(t *testing.T) {
 				for i := range N {
 					m.Compute(
 						i,
-						func(e *Entry[int, int]) {
+						func(e *MapEntry[int, int]) {
 							if !e.Loaded() {
 								e.Update(i)
 							} else {
@@ -1593,7 +1593,7 @@ func TestFlatMap_ConcurrentShrinkWithRangeProcess(t *testing.T) {
 			defer wg.Done()
 			for range 50 {
 				processCount := 0
-				m.ComputeRange(func(e *Entry[int, int]) bool {
+				m.ComputeRange(func(e *MapEntry[int, int]) bool {
 					processCount++
 					if e.Value() != e.Key()*5 {
 						atomic.AddInt64(&processErrors, 1)
@@ -1831,7 +1831,7 @@ func TestFlatMap_RangeProcess_DuringResize(t *testing.T) {
 					return
 				default:
 					m.ComputeRange(
-						func(e *Entry[int, int]) bool {
+						func(e *MapEntry[int, int]) bool {
 							count++
 							// Occasionally update values
 							if count%100 == 0 {
@@ -1865,7 +1865,7 @@ func TestFlatMap_RangeProcess_DuringResize(t *testing.T) {
 	}
 
 	// Verify map is still consistent
-	m.ComputeRange(func(e *Entry[int, int]) bool {
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
 		if e.Value() < 0 {
 			t.Errorf("Found negative value %d for key %d", e.Value(), e.Key())
 		}
@@ -1885,7 +1885,7 @@ func TestFlatMap_RangeProcess_EarlyTermination(t *testing.T) {
 	// Test that ComputeRange can handle panics gracefully (if any)
 	// and that partial processing doesn't corrupt the map
 	processedCount := 0
-	m.ComputeRange(func(e *Entry[int, int]) bool {
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
 		processedCount++
 		if e.Key() == 10 {
 			// Simulate early termination by returning without processing
@@ -1898,7 +1898,7 @@ func TestFlatMap_RangeProcess_EarlyTermination(t *testing.T) {
 
 	// Verify that the map is still consistent
 	consistentCount := 0
-	m.ComputeRange(func(e *Entry[int, int]) bool {
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
 		consistentCount++
 		if e.Value() < 0 {
 			t.Errorf("Found inconsistent value %d for key %d", e.Value(), e.Key())
@@ -2302,7 +2302,7 @@ func TestFlatMap_RangeProcess_BlockWriters_Strict(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *Entry[int, testValue]) bool {
+				m.ComputeRange(func(e *MapEntry[int, testValue]) bool {
 					// Verify invariant during processing
 					if e.Value().Y != ^e.Value().X {
 						tornReads.Add(1)
@@ -2335,7 +2335,7 @@ func TestFlatMap_RangeProcess_BlockWriters_Strict(t *testing.T) {
 				default:
 					key := rand.IntN(N)
 					startTime := time.Now()
-					m.Compute(key, func(e *Entry[int, testValue]) {
+					m.Compute(key, func(e *MapEntry[int, testValue]) {
 						if !e.Loaded() {
 							return
 						}
@@ -2438,7 +2438,7 @@ func TestFlatMap_RangeProcess_AllowWriters_Concurrent(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *Entry[int, testValue]) bool {
+				m.ComputeRange(func(e *MapEntry[int, testValue]) bool {
 					// Verify invariant
 					if e.Value().B != ^e.Value().A {
 						tornReads.Add(1)
@@ -2470,7 +2470,7 @@ func TestFlatMap_RangeProcess_AllowWriters_Concurrent(t *testing.T) {
 					return
 				default:
 					key := rand.IntN(N)
-					m.Compute(key, func(e *Entry[int, testValue]) {
+					m.Compute(key, func(e *MapEntry[int, testValue]) {
 						if !e.Loaded() {
 							return
 						}
@@ -2591,7 +2591,7 @@ func TestFlatMap_RangeProcess_TornReadDetection_Stress(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *Entry[int, complexValue]) bool {
+				m.ComputeRange(func(e *MapEntry[int, complexValue]) bool {
 					validateValue(e.Key(), e.Value(), "ComputeRange")
 
 					// Modify while maintaining invariants
@@ -2664,7 +2664,7 @@ func TestFlatMap_RangeProcess_TornReadDetection_Stress(t *testing.T) {
 					return
 				default:
 					key := rand.IntN(N)
-					m.Compute(key, func(e *Entry[int, complexValue]) {
+					m.Compute(key, func(e *MapEntry[int, complexValue]) {
 						if !e.Loaded() {
 							return
 						}
@@ -2727,7 +2727,7 @@ func TestFlatMap_RangeProcess_WriterBlocking_Verification(t *testing.T) {
 		defer wg.Done()
 		close(rangeProcessStarted)
 
-		m.ComputeRange(func(e *Entry[int, int]) bool {
+		m.ComputeRange(func(e *MapEntry[int, int]) bool {
 			// Simulate some processing time
 			time.Sleep(10 * time.Millisecond)
 			e.Update(e.Value() + 1)
@@ -3150,4 +3150,80 @@ func TestFlatMap_ComputeAll_EarlyStop(t *testing.T) {
 	if updated != 10 {
 		t.Fatalf("updated=%d, want 10", updated)
 	}
+}
+
+func TestFlatMap_Rebuild_Wrapper(t *testing.T) {
+	m := NewFlatMap[int, int]()
+
+	// Populate some data
+	for i := range 100 {
+		m.Store(i, i*100)
+	}
+
+	// Perform exclusive operation using rebuild and FlatMapRebuild wrapper
+	m.Rebuild(func(m *MapRebuild[int, int]) {
+		// Verify we can read
+		if v, ok := m.Load(1); !ok || v != 100 {
+			t.Errorf("Load inside rebuild failed: got %v, want 100", v)
+		}
+
+		// Perform updates using rm methods (which use compute(..., true))
+		// Update existing
+		m.Compute(1, func(e *MapEntry[int, int]) {
+			e.Update(101)
+		})
+		// Insert new
+		m.Store(3, 300)
+
+		// LoadOrStore
+		actual, loaded := m.LoadOrStore(1001, 100100)
+		if loaded || actual != 100100 {
+			t.Errorf("LoadOrStore failed: loaded=%v, actual=%v", loaded, actual)
+		}
+
+		// Delete
+		m.Delete(2)
+	}, true) // Block writers
+
+	// Verify results after rebuild
+	if v, ok := m.Load(1); !ok || v != 101 {
+		t.Errorf("Value for key 1 not updated: got %v, want 101", v)
+	}
+	if v, ok := m.Load(2); ok {
+		t.Errorf("Value for key 2 should be deleted: got %v", v)
+	}
+	if v, ok := m.Load(3); !ok || v != 300 {
+		t.Errorf("Value for key 3 not inserted: got %v, want 300", v)
+	}
+	if v, ok := m.Load(1001); !ok || v != 100100 {
+		t.Errorf("Value for key 1001 not inserted: got %v, want 100100", v)
+	}
+}
+
+func TestFlatMap_Rebuild_Concurrent(t *testing.T) {
+	m := NewFlatMap[int, int]()
+	done := make(chan struct{})
+
+	// Start a long-running rebuild that allows writers
+	go func() {
+		m.Rebuild(func(rm *MapRebuild[int, int]) {
+			// Simulate work
+			time.Sleep(100 * time.Millisecond)
+		}, false) // Allow writers
+		close(done)
+	}()
+
+	// Give the rebuild goroutine a moment to start
+	time.Sleep(10 * time.Millisecond)
+
+	// Try to write from main goroutine - should NOT block
+	start := time.Now()
+	m.Store(1, 100)
+	duration := time.Since(start)
+
+	if duration > 50*time.Millisecond {
+		t.Errorf("Store blocked for %v, expected non-blocking", duration)
+	}
+
+	<-done
 }

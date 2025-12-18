@@ -256,7 +256,7 @@ func TestMap_InterfaceKey(t *testing.T) {
 func TestMap_Compute_Basic(t *testing.T) {
 	m := NewMap[string, int]()
 
-	ret, loaded := m.Compute("k1", func(e *Entry[string, int]) {
+	ret, loaded := m.Compute("k1", func(e *MapEntry[string, int]) {
 		e.Update(5)
 	})
 	if loaded || ret != 5 {
@@ -267,7 +267,7 @@ func TestMap_Compute_Basic(t *testing.T) {
 	}
 
 	m.Store("k2", 1)
-	ret, loaded = m.Compute("k2", func(e *Entry[string, int]) {
+	ret, loaded = m.Compute("k2", func(e *MapEntry[string, int]) {
 		e.Update(e.Value() + 1)
 	})
 	if !loaded || ret != 2 {
@@ -278,7 +278,7 @@ func TestMap_Compute_Basic(t *testing.T) {
 	}
 
 	m.Store("k3", 10)
-	ret, loaded = m.Compute("k3", func(e *Entry[string, int]) {
+	ret, loaded = m.Compute("k3", func(e *MapEntry[string, int]) {
 		e.Delete()
 	})
 	if !loaded || ret != 0 {
@@ -289,7 +289,7 @@ func TestMap_Compute_Basic(t *testing.T) {
 	}
 
 	m.Store("k4", 7)
-	ret, loaded = m.Compute("k4", func(e *Entry[string, int]) {
+	ret, loaded = m.Compute("k4", func(e *MapEntry[string, int]) {
 	})
 	if !loaded || ret != 7 {
 		t.Fatalf("Compute cancel ret=%d ok=%v", ret, loaded)
@@ -305,7 +305,7 @@ func TestMap_ComputeRange_UpdateDeleteCancel(t *testing.T) {
 	m.Store("b", 2)
 	m.Store("c", 3)
 
-	m.ComputeRange(func(e *Entry[string, int]) bool {
+	m.ComputeRange(func(e *MapEntry[string, int]) bool {
 		if e.Key() == "c" {
 			e.Delete()
 			return true
@@ -6544,7 +6544,7 @@ func TestMap_RangeProcess_BlockWriters_Strict(t *testing.T) {
 				default:
 					key := rand.IntN(N)
 					startTime := time.Now()
-					m.Compute(key, func(e *Entry[int, testValue]) {
+					m.Compute(key, func(e *MapEntry[int, testValue]) {
 						if !e.Loaded() {
 							return
 						}
@@ -6681,7 +6681,7 @@ func TestMap_RangeProcess_AllowWriters_Concurrent(t *testing.T) {
 					return
 				default:
 					key := rand.IntN(N)
-					m.Compute(key, func(e *Entry[int, testValue]) {
+					m.Compute(key, func(e *MapEntry[int, testValue]) {
 						if !e.Loaded() {
 							return
 						}
@@ -6876,7 +6876,7 @@ func TestMap_RangeProcess_TornReadDetection_Stress(t *testing.T) {
 					return
 				default:
 					key := rand.IntN(N)
-					m.Compute(key, func(e *Entry[int, complexValue]) {
+					m.Compute(key, func(e *MapEntry[int, complexValue]) {
 						if !e.Loaded() {
 							return
 						}
@@ -7006,6 +7006,82 @@ func TestMap_RangeProcess_WriterBlocking_Verification(t *testing.T) {
 	if val, ok := m.Load(0); !ok || val != 999 {
 		t.Errorf("Expected final value 999, got %v (ok=%v)", val, ok)
 	}
+}
+
+func TestMap_Rebuild_Wrapper(t *testing.T) {
+	m := NewMap[int, int]()
+
+	// Populate some data
+	for i := range 100 {
+		m.Store(i, i*100)
+	}
+
+	// Perform exclusive operation using rebuild and MapRebuild wrapper
+	m.Rebuild(func(m *MapRebuild[int, int]) {
+		// Verify we can read
+		if v, ok := m.Load(1); !ok || v != 100 {
+			t.Errorf("Load inside rebuild failed: got %v, want 100", v)
+		}
+
+		// Perform updates using rm methods
+		// Update existing
+		m.Compute(1, func(e *MapEntry[int, int]) {
+			e.Update(101)
+		})
+		// Insert new
+		m.Store(3, 300)
+
+		// LoadOrStore
+		actual, loaded := m.LoadOrStore(1001, 100100)
+		if loaded || actual != 100100 {
+			t.Errorf("LoadOrStore failed: loaded=%v, actual=%v", loaded, actual)
+		}
+
+		// Delete
+		m.Delete(2)
+	}, true) // Block writers
+
+	// Verify results after rebuild
+	if v, ok := m.Load(1); !ok || v != 101 {
+		t.Errorf("Value for key 1 not updated: got %v, want 101", v)
+	}
+	if v, ok := m.Load(2); ok {
+		t.Errorf("Value for key 2 should be deleted: got %v", v)
+	}
+	if v, ok := m.Load(3); !ok || v != 300 {
+		t.Errorf("Value for key 3 not inserted: got %v, want 300", v)
+	}
+	if v, ok := m.Load(1001); !ok || v != 100100 {
+		t.Errorf("Value for key 1001 not inserted: got %v, want 100100", v)
+	}
+}
+
+func TestMap_Rebuild_Concurrent(t *testing.T) {
+	m := NewMap[int, int]()
+	done := make(chan struct{})
+
+	// Start a long-running rebuild that allows writers
+	go func() {
+		m.Rebuild(func(rm *MapRebuild[int, int]) {
+			// Simulate work
+			time.Sleep(100 * time.Millisecond)
+		}, false) // Allow writers
+		close(done)
+	}()
+
+	// Give the rebuild goroutine a moment to start
+	time.Sleep(10 * time.Millisecond)
+
+	// Try to write from main goroutine - should NOT block
+	start := time.Now()
+	m.Store(1, 100)
+	duration := time.Since(start)
+
+	if duration > 50*time.Millisecond {
+		t.Errorf("Store blocked for %v, expected non-blocking", duration)
+	}
+
+	<-done
 }
 
 // ============================================================================

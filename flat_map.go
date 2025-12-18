@@ -38,11 +38,11 @@ type FlatMap[K comparable, V any] struct {
 
 type flatRebuildState[K comparable, V any] struct {
 	hint        atomic.Uint32
-	chunks      int32
+	chunks      atomic.Int32
 	newTable    SeqLockSlot[flatTable[K, V]]
 	newTableSeq SeqLock32 // seqlock of new table
-	process     int32     // atomic
-	completed   int32     // atomic
+	process     atomic.Int32
+	completed   atomic.Int32
 	gate        Gate
 }
 
@@ -224,7 +224,7 @@ func (m *FlatMap[K, V]) LoadOrStore(
 			return v, true
 		}
 	}
-	return m.Compute(key, func(e *Entry[K, V]) {
+	return m.Compute(key, func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			return
 		}
@@ -244,7 +244,7 @@ func (m *FlatMap[K, V]) LoadOrStoreFn(
 			return v, true
 		}
 	}
-	return m.Compute(key, func(e *Entry[K, V]) {
+	return m.Compute(key, func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			return
 		}
@@ -260,7 +260,7 @@ func (m *FlatMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 			return v, ok
 		}
 	}
-	_, loaded = m.Compute(key, func(e *Entry[K, V]) {
+	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			previous = e.Value()
 			e.Update(value)
@@ -277,7 +277,7 @@ func (m *FlatMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 			return v, ok
 		}
 	}
-	_, loaded = m.Compute(key, func(e *Entry[K, V]) {
+	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			previous = e.Value()
 			e.Delete()
@@ -288,7 +288,7 @@ func (m *FlatMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 
 // Store sets the value for a key.
 func (m *FlatMap[K, V]) Store(key K, value V) {
-	m.Compute(key, func(e *Entry[K, V]) {
+	m.Compute(key, func(e *MapEntry[K, V]) {
 		e.Update(value)
 	})
 }
@@ -296,7 +296,7 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	_, loaded = m.Compute(key, func(e *Entry[K, V]) {
+	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
 		previous = e.Value()
 		e.Update(value)
 	})
@@ -310,7 +310,7 @@ func (m *FlatMap[K, V]) Delete(key K) {
 			return
 		}
 	}
-	m.Compute(key, func(e *Entry[K, V]) {
+	m.Compute(key, func(e *MapEntry[K, V]) {
 		e.Delete()
 	})
 }
@@ -339,7 +339,15 @@ func (m *FlatMap[K, V]) Delete(key K) {
 //   - loaded: true if the key existed before the operation
 func (m *FlatMap[K, V]) Compute(
 	key K,
-	fn func(e *Entry[K, V]),
+	fn func(e *MapEntry[K, V]),
+) (actual V, loaded bool) {
+	return m.compute(key, fn, false)
+}
+
+func (m *FlatMap[K, V]) compute(
+	key K,
+	fn func(e *MapEntry[K, V]),
+	ignoreHint bool,
 ) (actual V, loaded bool) {
 	for {
 		table := SeqLockRead32(&m.tableSeq, &m.table)
@@ -356,20 +364,22 @@ func (m *FlatMap[K, V]) Compute(
 		root.Lock()
 
 		// Help finishing rebuild if needed
-		if hint := mapRebuildHint(m.rs.hint.Load()); hint != mapNoHint {
-			switch hint {
-			case mapGrowHint, mapShrinkHint:
-				if m.rs.newTableSeq.Ready() {
+		if !ignoreHint {
+			if hint := mapRebuildHint(m.rs.hint.Load()); hint != mapNoHint {
+				switch hint {
+				case mapGrowHint, mapShrinkHint:
+					if m.rs.newTableSeq.Ready() {
+						root.Unlock()
+						m.helpCopyAndWait(&m.rs)
+						continue
+					}
+				case mapRebuildBlockWritersHint:
 					root.Unlock()
-					m.helpCopyAndWait(&m.rs)
+					m.rs.gate.Wait()
 					continue
+				default:
+					// mapRebuildWithWritersHint: allow concurrent writers
 				}
-			case mapRebuildBlockWritersHint:
-				root.Unlock()
-				m.rs.gate.Wait()
-				continue
-			default:
-				// mapRebuildWithWritersHint: allow concurrent writers
 			}
 		}
 		if SeqLockRead32(&m.tableSeq, &m.table).buckets.ptr != table.buckets.ptr {
@@ -386,7 +396,7 @@ func (m *FlatMap[K, V]) Compute(
 			emptyMeta uint64
 			lastB     *flatBucket[K, V]
 		)
-		it := Entry[K, V]{entry: entry_[K, V]{Key: key}}
+		it := MapEntry[K, V]{entry: entry_[K, V]{Key: key}}
 		if opt.EmbeddedHash_ {
 			it.entry.SetHash(hash)
 		}
@@ -572,7 +582,7 @@ func (m *FlatMap[K, V]) All() func(yield func(K, V) bool) {
 //
 // Recommendation: keep fn lightweight to reduce lock hold time.
 func (m *FlatMap[K, V]) ComputeRange(
-	fn func(e *Entry[K, V]) bool,
+	fn func(e *MapEntry[K, V]) bool,
 	blockWriters ...bool,
 ) {
 	hint := mapRebuildAllowWritersHint
@@ -580,12 +590,12 @@ func (m *FlatMap[K, V]) ComputeRange(
 		hint = mapRebuildBlockWritersHint
 	}
 
-	m.rebuild(hint, func() {
+	m.rebuild(hint, func(_ *MapRebuild[K, V]) {
 		table := SeqLockRead32(&m.tableSeq, &m.table)
 		if table.buckets.ptr == nil {
 			return
 		}
-		it := Entry[K, V]{
+		it := MapEntry[K, V]{
 			loaded: true,
 		}
 		for i := 0; i <= table.mask; i++ {
@@ -630,8 +640,8 @@ func (m *FlatMap[K, V]) ComputeRange(
 // It provides the same functionality as ComputeRange but in iterator form.
 func (m *FlatMap[K, V]) Entries(
 	blockWriters ...bool,
-) func(yield func(e *Entry[K, V]) bool) {
-	return func(yield func(e *Entry[K, V]) bool) {
+) func(yield func(e *MapEntry[K, V]) bool) {
+	return func(yield func(e *MapEntry[K, V]) bool) {
 		m.ComputeRange(yield, blockWriters...)
 	}
 }
@@ -655,7 +665,7 @@ func (m *FlatMap[K, V]) Clear() {
 		return
 	}
 
-	m.rebuild(mapRebuildBlockWritersHint, func() {
+	m.rebuild(mapRebuildBlockWritersHint, func(_ *MapRebuild[K, V]) {
 		SeqLockWriteLocked32(&m.tableSeq, &m.table,
 			newFlatTable[K, V](minTableLen, runtime.GOMAXPROCS(0)))
 	})
@@ -679,23 +689,16 @@ func (m *FlatMap[K, V]) ToMap(limit ...int) map[K]V {
 	return a
 }
 
-func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) (*flatRebuildState[K, V], bool) {
-	rs := &m.rs
-	if !rs.hint.CompareAndSwap(uint32(mapNoHint), uint32(hint)) {
-		return rs, false
+func (m *FlatMap[K, V]) Rebuild(
+	fn func(m *MapRebuild[K, V]),
+	blockWriters ...bool,
+) {
+	hint := mapRebuildAllowWritersHint
+	if len(blockWriters) != 0 && blockWriters[0] {
+		hint = mapRebuildBlockWritersHint
 	}
-	rs.chunks = 0
-	rs.process = 0
-	rs.completed = 0
-	rs.newTable = SeqLockSlot[flatTable[K, V]]{}
-	rs.newTableSeq.ClearLocked()
-	rs.gate.Close()
-	return rs, true
-}
 
-func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
-	rs.hint.Store(uint32(mapNoHint))
-	rs.gate.Open()
+	m.rebuild(hint, fn)
 }
 
 // rebuild reorganizes the map. Only these hints are supported:
@@ -703,7 +706,7 @@ func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
 //   - mapExclusiveRebuildHint: allows concurrent reads
 func (m *FlatMap[K, V]) rebuild(
 	rebuildHint mapRebuildHint,
-	fn func(),
+	fn func(m *MapRebuild[K, V]),
 ) {
 	for {
 		// Help finishing rebuild if needed
@@ -721,11 +724,30 @@ func (m *FlatMap[K, V]) rebuild(
 			}
 		}
 		if rs, ok := m.beginRebuild(rebuildHint); ok {
-			fn()
+			fn(noEscape(&MapRebuild[K, V]{f: m}))
 			m.endRebuild(rs)
 			return
 		}
 	}
+}
+
+func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) (*flatRebuildState[K, V], bool) {
+	rs := &m.rs
+	if !rs.hint.CompareAndSwap(uint32(mapNoHint), uint32(hint)) {
+		return rs, false
+	}
+	rs.chunks.Store(0)
+	rs.process.Store(0)
+	rs.completed.Store(0)
+	rs.newTable = SeqLockSlot[flatTable[K, V]]{}
+	rs.newTableSeq.ClearLocked()
+	rs.gate.Close()
+	return rs, true
+}
+
+func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
+	rs.hint.Store(uint32(mapNoHint))
+	rs.gate.Open()
 }
 
 //go:noinline
@@ -782,19 +804,22 @@ func (m *FlatMap[K, V]) finalizeResize(
 ) {
 	overCpus := cpus * resizeOverPartition
 	chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
-	rs.chunks = int32(chunks)
+	rs.chunks.Store(int32(chunks))
 	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable,
-		newFlatTable[K, V](newLen, cpus)) // Release rs
+		newFlatTable[K, V](newLen, cpus))
 	m.helpCopyAndWait(rs)
 }
 
 //go:noinline
 func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	newTable := SeqLockRead32(&rs.newTableSeq, &rs.newTable) // Acquire rs
+	newTable := SeqLockRead32(&rs.newTableSeq, &rs.newTable)
 	if newTable.buckets.ptr == nil ||
 		newTable.buckets.ptr == table.buckets.ptr {
-		rs.gate.Wait()
+		return
+	}
+	chunks := rs.chunks.Load()
+	if chunks == 0 {
 		return
 	}
 	oldLen := table.mask + 1
@@ -808,10 +833,9 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
 	// owns the write operations for its assigned destination buckets.
 	baseLen := min(newLen, oldLen)
-	chunks := rs.chunks
 	chunkSz := (baseLen + int(chunks) - 1) / int(chunks)
 	for {
-		process := atomic.AddInt32(&rs.process, 1)
+		process := rs.process.Add(1)
 		if process > chunks {
 			rs.gate.Wait()
 			return
@@ -820,7 +844,7 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 		start := int(process) * chunkSz
 		end := min(start+chunkSz, baseLen)
 		m.copyBucket(&table, start, end, oldLen, baseLen, &newTable)
-		if atomic.AddInt32(&rs.completed, 1) == chunks {
+		if rs.completed.Add(1) == chunks {
 			SeqLockWriteLocked32(&m.tableSeq, &m.table, newTable)
 			m.endRebuild(rs)
 			return

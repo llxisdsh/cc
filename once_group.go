@@ -45,7 +45,7 @@ func (g *OnceGroup[K, V]) Do(
 	c, loaded := g.m.LoadOrStore(key, primary)
 	if loaded {
 		// mark duplication under lock to ensure shared=true visibility
-		_, _ = g.m.Compute(key, func(it *Entry[K, *call[V]]) {
+		_, _ = g.m.Compute(key, func(it *MapEntry[K, *call[V]]) {
 			if it.Loaded() {
 				atomic.AddInt32(&it.Value().dups, 1)
 			}
@@ -91,7 +91,7 @@ func (g *OnceGroup[K, V]) DoChan(
 			return ch
 		}
 		// Mark duplication for shared flag visibility
-		_, _ = g.m.Compute(key, func(it *Entry[K, *call[V]]) {
+		_, _ = g.m.Compute(key, func(it *MapEntry[K, *call[V]]) {
 			if it.Loaded() {
 				atomic.AddInt32(&it.Value().dups, 1)
 			}
@@ -128,7 +128,7 @@ func (g *OnceGroup[K, V]) ForgetUnshared(key K) bool {
 	deleted := false
 	_, _ = g.m.Compute(
 		key,
-		func(it *Entry[K, *call[V]]) {
+		func(it *MapEntry[K, *call[V]]) {
 			if it.Loaded() && atomic.LoadInt32(&it.Value().dups) == 0 {
 				it.Delete()
 				deleted = true
@@ -161,7 +161,7 @@ func (g *OnceGroup[K, V]) doCall(
 		var chs []chan<- OnceGroupResult[V]
 		_, _ = g.m.Compute(
 			key,
-			func(it *Entry[K, *call[V]]) {
+			func(it *MapEntry[K, *call[V]]) {
 				if it.Loaded() && it.Value() == c {
 					chs = append(chs, it.Value().chans...)
 				}

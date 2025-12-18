@@ -33,7 +33,7 @@ type rwLockGroupEntry struct {
 
 // Lock acquires an exclusive write lock for the given key.
 func (g *RWLockGroup[K]) Lock(k K) {
-	v, _ := g.m.Compute(k, func(e *Entry[K, *rwLockGroupEntry]) {
+	v, _ := g.m.Compute(k, func(e *MapEntry[K, *rwLockGroupEntry]) {
 		val := e.Value()
 		if val == nil {
 			val = &rwLockGroupEntry{}
@@ -52,7 +52,7 @@ func (g *RWLockGroup[K]) Unlock(k K) {
 	}
 	v.mu.Unlock()
 
-	g.m.Compute(k, func(e *Entry[K, *rwLockGroupEntry]) {
+	g.m.Compute(k, func(e *MapEntry[K, *rwLockGroupEntry]) {
 		val := e.Value()
 		if val == nil {
 			return
@@ -66,7 +66,7 @@ func (g *RWLockGroup[K]) Unlock(k K) {
 
 // RLock acquires a shared read lock for the given key.
 func (g *RWLockGroup[K]) RLock(k K) {
-	v, _ := g.m.Compute(k, func(e *Entry[K, *rwLockGroupEntry]) {
+	v, _ := g.m.Compute(k, func(e *MapEntry[K, *rwLockGroupEntry]) {
 		val := e.Value()
 		if val == nil {
 			val = &rwLockGroupEntry{}
@@ -85,7 +85,7 @@ func (g *RWLockGroup[K]) RUnlock(k K) {
 	}
 	v.mu.RUnlock()
 
-	g.m.Compute(k, func(e *Entry[K, *rwLockGroupEntry]) {
+	g.m.Compute(k, func(e *MapEntry[K, *rwLockGroupEntry]) {
 		val := e.Value()
 		if val == nil {
 			return

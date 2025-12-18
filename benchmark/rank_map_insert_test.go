@@ -70,7 +70,7 @@ func testInsert_pb_FlatMapOf(
 
 				m.Compute(
 					j,
-					func(e *cc.Entry[int, int]) {
+					func(e *cc.MapEntry[int, int]) {
 						e.Update(j)
 					},
 				)
@@ -226,7 +226,7 @@ func testInsert_pb_MapOf(
 				// m.Store(Int(j), j)
 				m.Compute(
 					Int(j),
-					func(e *cc.Entry[Int, int]) {
+					func(e *cc.MapEntry[Int, int]) {
 						e.Update(j)
 					},
 				)
@@ -391,7 +391,7 @@ func testInsertString_pb_FlatMapOf(
 
 				m.Compute(
 					strconv.Itoa(j),
-					func(e *cc.Entry[string, int]) {
+					func(e *cc.MapEntry[string, int]) {
 						e.Update(j)
 					},
 				)
@@ -530,8 +530,8 @@ func testInsertString_pb_MapOf(
 				m.Store(String(strconv.Itoa(j)), j)
 				// m.Compute(
 				//	j,
-				//	func(*Entry[int, int]) (*Entry[int, int], int, bool) {
-				//		return &Entry[int, int]{Value: j}, 0, false
+				//	func(*MapEntry[int, int]) (*MapEntry[int, int], int, bool) {
+				//		return &MapEntry[int, int]{Value: j}, 0, false
 				//	},
 				// )
 			}
@@ -1158,9 +1158,9 @@ func testInsert_hashMaps(
 				// m.Store(strconv.Itoa(j), j)
 				// m.Compute(
 				//	strconv.Itoa(j),
-				// 	func(*Entry[string, int]) (*Entry[string, int], int,
+				// 	func(*MapEntry[string, int]) (*MapEntry[string, int], int,
 				// bool) {
-				//		return &Entry[string, int]{Value: j}, 0, false
+				//		return &MapEntry[string, int]{Value: j}, 0, false
 				//	},
 				// )
 			}

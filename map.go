@@ -221,6 +221,7 @@ func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 			}
 			return &entry_[K, V]{Value: value}, value, false
 		},
+		false,
 	)
 }
 
@@ -259,6 +260,7 @@ func (m *Map[K, V]) LoadOrStoreFn(
 			newValue := newValueFn()
 			return &entry_[K, V]{Value: newValue}, newValue, false
 		},
+		false,
 	)
 }
 
@@ -306,6 +308,7 @@ func (m *Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
 			}
 			return nil, *(new(V)), false
 		},
+		false,
 	)
 }
 
@@ -333,6 +336,7 @@ func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			}
 			return nil, *new(V), false
 		},
+		false,
 	)
 }
 
@@ -363,6 +367,7 @@ func (m *Map[K, V]) Store(key K, value V) {
 		func(*entry_[K, V]) (*entry_[K, V], V, bool) {
 			return &entry_[K, V]{Value: value}, *new(V), false
 		},
+		false,
 	)
 }
 
@@ -397,6 +402,7 @@ func (m *Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 			}
 			return &entry_[K, V]{Value: value}, *new(V), false
 		},
+		false,
 	)
 }
 
@@ -421,6 +427,7 @@ func (m *Map[K, V]) Delete(key K) {
 		func(*entry_[K, V]) (*entry_[K, V], V, bool) {
 			return nil, *new(V), false
 		},
+		false,
 	)
 }
 
@@ -471,6 +478,7 @@ func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 			}
 			return e, zero, false
 		},
+		false,
 	)
 	return swapped
 }
@@ -514,6 +522,7 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 			}
 			return e, zero, false
 		},
+		false,
 	)
 	return deleted
 }
@@ -542,7 +551,15 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 //   - loaded: True if the key existed before the callback, false otherwise.
 func (m *Map[K, V]) Compute(
 	key K,
-	fn func(e *Entry[K, V]),
+	fn func(e *MapEntry[K, V]),
+) (actual V, loaded bool) {
+	return m.compute(key, fn, false)
+}
+
+func (m *Map[K, V]) compute(
+	key K,
+	fn func(e *MapEntry[K, V]),
+	ignoreHint bool,
 ) (actual V, loaded bool) {
 	table := (*mapTable)(loadPtr(&m.table))
 	if table == nil {
@@ -551,7 +568,7 @@ func (m *Map[K, V]) Compute(
 	hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 	return m.computeEntry_(table, hash, &key,
 		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
-			it := Entry[K, V]{entry: entry_[K, V]{Key: key}}
+			it := MapEntry[K, V]{entry: entry_[K, V]{Key: key}}
 			if e != nil {
 				it.entry = *e
 				it.loaded = true
@@ -566,6 +583,7 @@ func (m *Map[K, V]) Compute(
 				return e, it.entry.Value, it.loaded
 			}
 		},
+		ignoreHint,
 	)
 }
 
@@ -605,10 +623,10 @@ func (m *Map[K, V]) All() func(yield func(K, V) bool) {
 //
 // Recommendation: keep fn lightweight to reduce lock hold time.
 func (m *Map[K, V]) ComputeRange(
-	fn func(e *Entry[K, V]) bool,
+	fn func(e *MapEntry[K, V]) bool,
 	blockWriters ...bool,
 ) {
-	it := Entry[K, V]{loaded: true}
+	it := MapEntry[K, V]{loaded: true}
 	m.computeRangeEntry_(func(e *entry_[K, V]) (*entry_[K, V], bool) {
 		it.entry = *e
 		it.op = cancelOp
@@ -628,8 +646,8 @@ func (m *Map[K, V]) ComputeRange(
 // It provides the same functionality as ComputeRange but in iterator form.
 func (m *Map[K, V]) Entries(
 	blockWriters ...bool,
-) func(yield func(e *Entry[K, V]) bool) {
-	return func(yield func(e *Entry[K, V]) bool) {
+) func(yield func(e *MapEntry[K, V]) bool) {
+	return func(yield func(e *MapEntry[K, V]) bool) {
 		m.ComputeRange(yield, blockWriters...)
 	}
 }
@@ -650,7 +668,7 @@ func (m *Map[K, V]) Clear() {
 	if table == nil {
 		return
 	}
-	m.rebuild(mapRebuildBlockWritersHint, func() {
+	m.rebuild(mapRebuildBlockWritersHint, func(_ *MapRebuild[K, V]) {
 		cpus := runtime.GOMAXPROCS(0)
 		newTable := newMapTable(m.minLen, cpus)
 		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
@@ -797,6 +815,7 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 			func(*entry_[K, V]) (*entry_[K, V], V, bool) {
 				return e, e.Value, false
 			},
+			false,
 		)
 		return true
 	})
@@ -870,6 +889,7 @@ func (m *Map[K, V]) computeEntry_(
 	hash uintptr,
 	key *K,
 	fn func(e *entry_[K, V]) (*entry_[K, V], V, bool),
+	ignoreHint bool,
 ) (V, bool) {
 	h1v := h1(hash, m.intKey)
 	h2v := h2(hash)
@@ -883,23 +903,25 @@ func (m *Map[K, V]) computeEntry_(
 
 		// This is the first check, checking if there is a rebuild operation in
 		// progress before acquiring the bucket lock
-		if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
-			switch rs.hint {
-			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.table) != nil /*skip init*/ &&
-					loadPtr(&rs.newTable) != nil /*skip newTable is nil*/ {
+		if !ignoreHint {
+			if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
+				switch rs.hint {
+				case mapGrowHint, mapShrinkHint:
+					if loadPtr(&rs.table) != nil /*skip init*/ &&
+						loadPtr(&rs.newTable) != nil /*skip newTable is nil*/ {
+						root.Unlock()
+						m.helpCopyAndWait(rs)
+						table = (*mapTable)(loadPtr(&m.table))
+						continue
+					}
+				case mapRebuildBlockWritersHint:
 					root.Unlock()
-					m.helpCopyAndWait(rs)
+					rs.latch.Wait()
 					table = (*mapTable)(loadPtr(&m.table))
 					continue
+				default:
+					// mapRebuildWithWritersHint: allow concurrent writers
 				}
-			case mapRebuildBlockWritersHint:
-				root.Unlock()
-				rs.latch.Wait()
-				table = (*mapTable)(loadPtr(&m.table))
-				continue
-			default:
-				// mapRebuildWithWritersHint: allow concurrent writers
 			}
 		}
 
@@ -1122,7 +1144,7 @@ func (m *Map[K, V]) computeRangeEntry_(
 		hint = mapRebuildBlockWritersHint
 	}
 
-	m.rebuild(hint, func() {
+	m.rebuild(hint, func(_ *MapRebuild[K, V]) {
 		table := (*mapTable)(loadPtr(&m.table))
 		for i := 0; i <= table.mask; i++ {
 			root := table.buckets.At(i)
@@ -1161,18 +1183,21 @@ func (m *Map[K, V]) computeRangeEntry_(
 	})
 }
 
-func (m *Map[K, V]) beginRebuild(hint mapRebuildHint) (*rebuildState, bool) {
-	rs := new(rebuildState)
-	rs.hint = hint
-	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
-		return nil, false
+// Rebuild performs a map rebuild operation with the given function.
+// The function is executed with exclusive access (or shared based on blockWriters) to the map.
+//
+// Parameters:
+//   - fn: The function to execute during rebuild. It receives a MapRebuild instance.
+//   - blockWriters: Optional. If true, concurrent writers are blocked. Default is false (allow writers).
+func (m *Map[K, V]) Rebuild(
+	fn func(m *MapRebuild[K, V]),
+	blockWriters ...bool,
+) {
+	hint := mapRebuildAllowWritersHint
+	if len(blockWriters) != 0 && blockWriters[0] {
+		hint = mapRebuildBlockWritersHint
 	}
-	return rs, true
-}
-
-func (m *Map[K, V]) endRebuild(rs *rebuildState) {
-	atomic.StorePointer(&m.rs, nil)
-	rs.latch.Open()
+	m.rebuild(hint, fn)
 }
 
 // rebuild reorganizes the map. Only these hints are supported:
@@ -1180,7 +1205,7 @@ func (m *Map[K, V]) endRebuild(rs *rebuildState) {
 //   - mapExclusiveRebuildHint: allows concurrent reads
 func (m *Map[K, V]) rebuild(
 	hint mapRebuildHint,
-	fn func(),
+	fn func(m *MapRebuild[K, V]),
 ) {
 	for {
 		// Help finishing rebuild if needed
@@ -1200,11 +1225,25 @@ func (m *Map[K, V]) rebuild(
 		}
 
 		if rs, ok := m.beginRebuild(hint); ok {
-			fn()
+			fn(noEscape(&MapRebuild[K, V]{m: m}))
 			m.endRebuild(rs)
 			return
 		}
 	}
+}
+
+func (m *Map[K, V]) beginRebuild(hint mapRebuildHint) (*rebuildState, bool) {
+	rs := new(rebuildState)
+	rs.hint = hint
+	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
+		return nil, false
+	}
+	return rs, true
+}
+
+func (m *Map[K, V]) endRebuild(rs *rebuildState) {
+	atomic.StorePointer(&m.rs, nil)
+	rs.latch.Open()
 }
 
 //go:noinline

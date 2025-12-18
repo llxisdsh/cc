@@ -32,7 +32,7 @@ func NewSessionManager() *SessionManager {
 // Login creates or updates a session.
 func (sm *SessionManager) Login(userID, data string, expirySeconds int64) {
 	now := time.Now().UnixNano()
-	sm.sessions.Compute(userID, func(e *cc.Entry[string, Session]) {
+	sm.sessions.Compute(userID, func(e *cc.MapEntry[string, Session]) {
 		e.Update(Session{
 			UserID:     userID,
 			Data:       data,
@@ -45,7 +45,7 @@ func (sm *SessionManager) Login(userID, data string, expirySeconds int64) {
 // Touch updates the LastActive timestamp if the session exists.
 func (sm *SessionManager) Touch(userID string) bool {
 	now := time.Now().UnixNano()
-	_, loaded := sm.sessions.Compute(userID, func(e *cc.Entry[string, Session]) {
+	_, loaded := sm.sessions.Compute(userID, func(e *cc.MapEntry[string, Session]) {
 		if e.Loaded() {
 			s := e.Value()
 			s.LastActive = now
