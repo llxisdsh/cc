@@ -8,6 +8,10 @@ import (
 )
 
 func TestRally_Boundary(t *testing.T) {
+	if intSize == 32 {
+		t.Skip("Skipping TestRally_Boundary on 32-bit int systems")
+	}
+
 	r := &Rally{}
 
 	defer func() {
@@ -20,7 +24,9 @@ func TestRally_Boundary(t *testing.T) {
 
 	// Pass huge parties count
 	// int can be 64-bit
-	r.Meet(int(^uint32(0)) + 5)
+	// Use variable to avoid compiler constant overflow check on 32-bit
+	huge := int64(^uint32(0)) + 5
+	r.Meet(int(huge))
 }
 
 func TestRally_Simple(t *testing.T) {
