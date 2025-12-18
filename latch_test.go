@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+func TestLatch_Boundary(t *testing.T) {
+	l := &Latch{}
+	// State = 0xFFFFFFFE (Max count, done=0).
+	l.state.Store(0xFFFFFFFE)
+
+	done := make(chan bool)
+	go func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Latch.Wait should panic on overflow")
+			} else if r != "cc: Latch waiter overflow" {
+				t.Errorf("Unexpected panic: %v", r)
+			}
+			done <- true
+		}()
+		l.Wait()
+	}()
+	<-done
+}
+
 func TestLatchBasic(t *testing.T) {
 	var e Latch
 

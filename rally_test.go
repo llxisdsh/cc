@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+func TestRally_Boundary(t *testing.T) {
+	r := &Rally{}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("Rally.Meet should panic on huge parties")
+		} else if r != "cc: parties exceeds max uint32" {
+			t.Errorf("Unexpected panic: %v", r)
+		}
+	}()
+
+	// Pass huge parties count
+	// int can be 64-bit
+	r.Meet(int(^uint32(0)) + 5)
+}
+
 func TestRally_Simple(t *testing.T) {
 	const parties = 10
 	var b Rally

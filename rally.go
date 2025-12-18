@@ -9,13 +9,16 @@ import (
 // Rally is a reusable synchronization primitive that allows a set of
 // goroutines to wait for each other to reach a common barrier point.
 //
-// It is useful in programs involving a fixed sized party of goroutines that
+// It is useful in programs involving a fixed-size party of goroutines that
 // must occasionally wait for each other. The barrier is called "cyclic"
-// because it can be re-used after the waiting logic is released.
+// because it can be reused after the waiting logic is released.
 //
 // It is zero-value usable.
 //
 // Size: 16 bytes (8 byte state + 2*4 byte sema).
+//
+// Limitations:
+// - Max parties: 2^32 - 1. Panics on overflow.
 type Rally struct {
 	_ noCopy
 	// state 64-bit:
@@ -41,6 +44,9 @@ type Rally struct {
 func (b *Rally) Meet(parties int) int {
 	if parties <= 0 {
 		panic("cc: parties must be positive")
+	}
+	if uint64(parties) > (1<<32)-1 {
+		panic("cc: parties exceeds max uint32")
 	}
 
 	// Fast path for single party

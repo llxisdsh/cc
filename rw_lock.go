@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 )
 
-// RWLock is a spin-based Reader-Writer lock backed by a uintptr.
+// RWLock is a spin-based Reader-Writer lock backed by an uintptr.
 // It is writer-preferred to prevent reader starvation.
 type RWLock uintptr
 
@@ -89,7 +89,7 @@ func (l *RWLock) RUnlock() {
 	atomic.AddUintptr((*uintptr)(l), ^uintptr(rwReadUnit-1))
 }
 
-// RWLock32 is a spin-based Reader-Writer lock backed by a uint32.
+// RWLock32 is a spin-based Reader-Writer lock backed by an uint32.
 // It is writer-preferred to prevent reader starvation.
 type RWLock32 uint32
 

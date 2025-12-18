@@ -21,6 +21,9 @@ import (
 //	e := Epoch{}
 //	go func() { e.WaitAtLeast(5); print("Reached 5!") }()
 //	e.Add(5) // Wakes the waiter
+//
+// Limitations:
+// - Max value: 2^64 - 1. Panics on overflow.
 type Epoch struct {
 	_     noCopy
 	state atomic.Uint64
@@ -30,26 +33,31 @@ type Epoch struct {
 }
 
 type epochWaiter struct {
-	target uint32
+	target uint64
 	sema   opt.Sema
 	// next is protected by Epoch.mu
 	next *epochWaiter
 }
 
 // Current returns the current epoch value.
-func (e *Epoch) Current() uint32 {
-	return uint32(e.state.Load())
+func (e *Epoch) Current() uint64 {
+	return e.state.Load()
 }
 
 // Add advances the epoch by delta and wakes waiters whose targets are met.
-func (e *Epoch) Add(delta uint32) uint32 {
+func (e *Epoch) Add(delta uint64) uint64 {
 	if delta == 0 {
 		return e.Current()
 	}
 
 	// 1. Atomic increment (fast path for writers)
 	// We return the NEW value.
-	newVal := uint32(e.state.Add(uint64(delta)))
+	newVal := e.state.Add(delta)
+
+	if newVal < delta {
+		// Overflowed 64-bit.
+		panic("cc: Epoch counter overflow")
+	}
 
 	// 2. Wake waiters (slow path)
 	// Only acquire lock if we need to wake someone.
@@ -95,19 +103,19 @@ func (e *Epoch) Add(delta uint32) uint32 {
 }
 
 // WaitAtLeast blocks until the epoch reaches at least the target value.
-func (e *Epoch) WaitAtLeast(target uint32) {
+func (e *Epoch) WaitAtLeast(target uint64) {
 	// 1. Fast path: check if condition already met
-	if uint32(e.state.Load()) >= target {
+	if e.state.Load() >= target {
 		return
 	}
 	e.slowWaitAtLeast(target)
 }
 
-func (e *Epoch) slowWaitAtLeast(target uint32) {
+func (e *Epoch) slowWaitAtLeast(target uint64) {
 	// 2. Slow path: enqueue
 	e.mu.Lock()
 	// Check again inside lock
-	if uint32(e.state.Load()) >= target {
+	if e.state.Load() >= target {
 		e.mu.Unlock()
 		return
 	}

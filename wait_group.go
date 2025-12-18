@@ -11,15 +11,15 @@ import (
 // without waiting for all Wait() calls to return.
 //
 // Limitations:
-// - Max tasks: 2^22 - 1 (approx 4 million)
-// - Max waiters: 2^22 - 1 (approx 4 million)
-// - Generations: 2^20 (approx 1 million, then wraps)
+// - Max tasks: 2^32 - 1 (approx 4.29 billion)
+// - Max waiters: 2^16 - 1 (65535). For higher waiter counts (broadcast), use [Gate].
+// - Generations: 2^16 (65536, then wraps)
 type WaitGroup struct {
 	_ noCopy
 	// state stores:
-	// - Generation (20 bits)
-	// - Waiter Count (22 bits)
-	// - Task Counter (22 bits)
+	// - Generation (16 bits)
+	// - Waiter Count (16 bits)
+	// - Task Counter (32 bits)
 	state atomic.Uint64
 
 	// sema is a double-buffered semaphore to prevent signal stealing.
@@ -27,9 +27,9 @@ type WaitGroup struct {
 }
 
 const (
-	taskBits   = 22
-	waiterBits = 22
-	genBits    = 20
+	taskBits   = 32
+	waiterBits = 16
+	genBits    = 16
 
 	taskMask   = (1 << taskBits) - 1
 	waiterMask = ((1 << waiterBits) - 1) << taskBits
@@ -45,9 +45,9 @@ func (wg *WaitGroup) Add(delta int) {
 	var spins int
 	for {
 		state := wg.state.Load()
-		cnt := int32(state & taskMask)
+		cnt := int64(state & taskMask)
 
-		newCnt := int64(cnt) + int64(delta)
+		newCnt := cnt + int64(delta)
 		if newCnt < 0 {
 			panic("cc: negative WaitGroup counter")
 		}

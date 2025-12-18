@@ -6,6 +6,34 @@ import (
 	"time"
 )
 
+// Helper to set private state for whitebox testing
+func setEpochState(e *Epoch, val uint64) {
+	e.state.Store(val)
+}
+
+func TestEpoch_Boundary(t *testing.T) {
+	e := &Epoch{}
+	// Set state to MaxUint32 to verify we can cross the old boundary
+	setEpochState(e, 0xFFFFFFFF)
+
+	e.Add(1)
+	if e.Current() != 0x100000000 {
+		t.Errorf("Epoch failed to cross 32-bit boundary. Got %x", e.Current())
+	}
+
+	// Test WaitAtLeast works across boundary
+	target := uint64(0x100000000) + 1
+
+	done := make(chan bool)
+	go func() {
+		e.WaitAtLeast(target)
+		done <- true
+	}()
+
+	e.Add(1) // Now at target
+	<-done
+}
+
 func TestEpoch_WaitAndAdd(t *testing.T) {
 	var e Epoch
 	done := make(chan struct{})

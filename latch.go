@@ -9,7 +9,9 @@ import (
 // Latch is a synchronization primitive for "wait for completion" (One-Way Door).
 // It supports multiple waiters.
 // Once Open() is called, all current and future Wait() calls return immediately.
-// It is 8 bytes in size (4 byte state + 4 byte semaphore).
+//
+// Limitations:
+// - Max waiters: 2^31 - 1. Panics on overflow.
 type Latch struct {
 	_ noCopy
 	// state 32-bit:
@@ -61,6 +63,10 @@ func (e *Latch) slowWait() {
 		s := e.state.Load()
 		if s&latchDoneFlag != 0 {
 			return
+		}
+
+		if (s >> 1) == 0x7FFFFFFF {
+			panic("cc: Latch waiter overflow")
 		}
 
 		if e.state.CompareAndSwap(s, s+latchOneWaiter) {

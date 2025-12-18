@@ -4,6 +4,22 @@ import (
 	"testing"
 )
 
+func TestPhaser_Boundary(t *testing.T) {
+	p := NewPhaser()
+	// Set state to have 65535 parties.
+	p.state.Store(uint64(65535) << 16)
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("Phaser.Register should panic on overflow")
+		} else if r != "cc: Phaser parties overflow" {
+			t.Errorf("Unexpected panic: %v", r)
+		}
+	}()
+
+	p.Register()
+}
+
 func TestPhaser_Basic(t *testing.T) {
 	p := NewPhaser()
 	p.Register() // 1 party (Main)

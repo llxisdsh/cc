@@ -7,6 +7,25 @@ import (
 	"time"
 )
 
+func TestGate_Boundary(t *testing.T) {
+	g := &Gate{}
+	g.state.Store(0xFFFFFFFF)
+
+	done := make(chan bool)
+	go func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Gate.Wait should panic on overflow")
+			} else if r != "cc: Gate waiter overflow" {
+				t.Errorf("Unexpected panic: %v", r)
+			}
+			done <- true
+		}()
+		g.Wait()
+	}()
+	<-done
+}
+
 func TestGate_Simple(t *testing.T) {
 	var e Gate
 

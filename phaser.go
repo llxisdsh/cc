@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 )
 
-// Phaser is a reusable synchronization barrier, similar to java.util.concurrent.Phaser.
+// Phaser is a reusable synchronization barrier, similar to [java.util.concurrent.Phaser].
 // It supports dynamic registration of parties and synchronization in phases.
 //
 // Concepts:
@@ -13,11 +13,14 @@ import (
 //   - Arrive: A party signals it reached the barrier.
 //   - Await: A party waits for others to arrive.
 //
-// Key Differences from WaitGroup/Barrier:
+// Key Differences from [Rally]:
 //   - Dynamic: Parties can be added/removed (Register/Deregister) at any time.
 //   - Split-Phase: Arrive() and AwaitAdvance() are separate, allowing "Arrive and Continue" patterns.
 //
 // Size: 24 bytes (state + TicketLock + Epoch).
+//
+// Limitations:
+// - Max parties: 65535. Panics on overflow.
 type Phaser struct {
 	_ noCopy
 
@@ -40,10 +43,14 @@ func NewPhaser() *Phaser {
 	return p
 }
 
-// Register adds a new party to the phaser.
+// Register adds a new party to the [Phaser].
 // Returns the current phase number.
 func (p *Phaser) Register() int {
 	p.mu.Lock()
+	if (p.state.Load()>>16)&0xFFFF == 0xFFFF {
+		p.mu.Unlock()
+		panic("cc: Phaser parties overflow")
+	}
 	p.state.Add(1 << 16) // Increment parties
 	phase := int(p.state.Load() >> 32)
 	p.mu.Unlock()
@@ -91,7 +98,7 @@ func (p *Phaser) Arrive() int {
 // Returns the new phase number.
 func (p *Phaser) AwaitAdvance(phase int) int {
 	// Wait until Epoch >= phase + 1
-	target := uint32(phase + 1)
+	target := uint64(phase + 1)
 	p.epoch.WaitAtLeast(target)
 	return int(p.epoch.Current())
 }
@@ -122,7 +129,7 @@ func (p *Phaser) ArriveAndAwaitAdvance() int {
 	p.mu.Unlock()
 
 	// Block
-	target := uint32(phase + 1)
+	target := uint64(phase + 1)
 	p.epoch.WaitAtLeast(target)
 
 	return int(p.epoch.Current())
@@ -141,7 +148,7 @@ func (p *Phaser) ArriveAndDeregister() int {
 	parties--
 
 	if parties == 0 {
-		// Empty phaser. Advance phase to clean up/unblock any weird state?
+		// Empty [Phaser]. Advance phase to clean up/unblock any weird state?
 		// Advancing ensures consistency if someone was waiting (though they shouldn't be if we are the last).
 		p.state.Store(uint64(phase+1) << 32) // parties=0, arrived=0
 		p.epoch.Add(1)

@@ -2,10 +2,11 @@ package cc
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
-// Wait executes fn and waits for it to return or for the context to be cancelled.
+// Wait executes fn and waits for it to return or for the context to be canceled.
 // It is useful for making blocking calls (that don't support Context) cancellable.
 //
 // Usage:
@@ -33,8 +34,8 @@ func WaitTimeout(timeout time.Duration, fn func()) error {
 	})
 }
 
-// Do executes fn and waits for it to return or for the context to be cancelled.
-// It returns fn's error if it completes, or ctx.Err() if cancelled.
+// Do execute fn and waits for it to return or for the context to be canceled.
+// It returns fn's error if it completes, or ctx.Err() if canceled.
 //
 // Usage:
 //
@@ -73,7 +74,7 @@ func DoTimeout(timeout time.Duration, fn func() error) error {
 	return Do(ctx, fn)
 }
 
-// Repeat executes the action periodically with the given interval until the context is cancelled.
+// Repeat executes the action periodically with the given interval until the context is canceled.
 // It stops immediately if the action returns an error.
 // The first execution happens immediately.
 //
@@ -109,7 +110,7 @@ func Repeat(ctx context.Context, interval time.Duration, action func(context.Con
 }
 
 // Parallel executes n copies of the action concurrently.
-// It blocks until all actions complete or the context is cancelled.
+// It blocks until all actions complete or the context is canceled.
 // Returns the first error encountered, if any.
 //
 // If n <= 0, it defaults to GOMAXPROCS(0).
@@ -135,19 +136,19 @@ func Parallel(ctx context.Context, n int, action func(context.Context, int) erro
 	// We use a channel to collect the first error.
 	// Buffer size 1 is enough because we only care about the first one.
 	errCh := make(chan error, 1)
+	var failed atomic.Bool
 
 	for i := 0; i < n; i++ {
 		go func(idx int) {
 			defer wg.Done()
 
 			// If an error already occurred, skip execution
-			select {
-			case <-errCh:
+			if failed.Load() {
 				return
-			default:
 			}
 
 			if err := action(ctx, idx); err != nil {
+				failed.Store(true)
 				select {
 				case errCh <- err:
 				default:

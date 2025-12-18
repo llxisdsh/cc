@@ -17,7 +17,8 @@ import (
 //
 // It is zero-value usable (starts Closed).
 //
-// Size: 16 bytes (8 byte state + 2*4 byte sema).
+// Limitations:
+// - Max waiters: 2^32 - 1. Panics on overflow.
 type Gate struct {
 	_ noCopy
 	// state 64-bit:
@@ -151,6 +152,9 @@ func (e *Gate) slowWait() {
 		}
 
 		// Not Open. Add to waiter count.
+		if (s & gateCntMsk) == gateCntMsk {
+			panic("cc: Gate waiter overflow")
+		}
 		if e.state.CompareAndSwap(s, s+1) {
 			gen := (s >> 32) & 0x7FFFFFFF
 			e.sema[gen%2].Acquire()

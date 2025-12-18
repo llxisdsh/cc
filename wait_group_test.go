@@ -7,6 +7,87 @@ import (
 	"time"
 )
 
+func TestWaitGroupAddChecks(t *testing.T) {
+	// 1. Add(0)
+	t.Run("AddZero", func(t *testing.T) {
+		var wg WaitGroup
+		wg.Add(0)
+		if wg.Count() != 0 {
+			t.Errorf("Add(0) changed count to %d", wg.Count())
+		}
+		wg.Add(1)
+		wg.Add(0)
+		if wg.Count() != 1 {
+			t.Errorf("Add(0) changed count to %d", wg.Count())
+		}
+	})
+
+	// 2. Add causing overflow (newCnt >= 2^32)
+	t.Run("AddOverflow", func(t *testing.T) {
+		var wg WaitGroup
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Add causing overflow should panic")
+			} else {
+				if r != "cc: WaitGroup counter overflow" {
+					t.Errorf("Unexpected panic: %v", r)
+				}
+			}
+		}()
+		// Task count is 32-bit (unsigned), so Max is 2^32 - 1.
+		// Since Add accepts signed int, we need to carefully construct the overflow.
+		// On 64-bit systems, int is 64-bit, so we can pass > 2^32 directly.
+		// On 32-bit systems, int is 32-bit, so we can't pass > 2^31-1 directly in one call.
+		//
+		// Strategy: Add MaxInt32 twice, then add more to cross 2^32.
+
+		const MaxInt32 = 1<<31 - 1
+		wg.Add(MaxInt32)
+		wg.Add(MaxInt32)
+		// Current count approx 2^32 - 2.
+		// Adding 3 will overflow 32-bit unsigned space.
+		wg.Add(3)
+	})
+
+	// 3. Add causing negative result
+	t.Run("AddNegativeResult", func(t *testing.T) {
+		var wg WaitGroup
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Add causing negative result should panic")
+			} else {
+				if r != "cc: negative WaitGroup counter" {
+					t.Errorf("Unexpected panic: %v", r)
+				}
+			}
+		}()
+		wg.Add(-1)
+	})
+
+	// 4. Add causing int64 overflow (safety check)
+	// This tests if the internal calculation `cnt + int64(delta)` overflows int64.
+	// This is very unlikely unless delta is huge (near 2^63).
+	// But `Add` takes `int`.
+	// On 64-bit system, `int` is 64-bit.
+	// If current count is 0, and we add MaxInt64, newCnt is MaxInt64.
+	// MaxInt64 > 2^32, so it should be caught by "counter overflow".
+	t.Run("AddIntMax", func(t *testing.T) {
+		var wg WaitGroup
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Add causing overflow should panic")
+			} else {
+				// Should hit the 32-bit limit check first
+				if r != "cc: WaitGroup counter overflow" {
+					t.Errorf("Unexpected panic: %v", r)
+				}
+			}
+		}()
+		const MaxInt = int(^uint(0) >> 1)
+		wg.Add(MaxInt)
+	})
+}
+
 func TestWaitGroupReuse(t *testing.T) {
 	var wg WaitGroup
 	var trace []string
@@ -53,7 +134,7 @@ func TestWaitGroupConcurrentReuse(t *testing.T) {
 	var wg WaitGroup
 	const N = 1000
 
-	for i := 0; i < N; i++ {
+	for range N {
 		wg.Add(1)
 		go func() {
 			wg.Done()

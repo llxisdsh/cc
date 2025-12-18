@@ -4,15 +4,18 @@ import "github.com/llxisdsh/cc/internal/opt"
 
 // FairSemaphore is a counting semaphore that guarantees FIFO (First-In-First-Out) order.
 //
-// Standard Semaphores (like golang.org/x/sync/semaphore) generally optimize for throughput
+// Standard Semaphores (like [golang.org/x/sync/semaphore]) generally optimize for throughput
 // and may allow barging (new waiters stealing permits), which can lead to starvation
 // or unfairness in specific workloads.
 //
-// FairSemaphore ensures that permits are strictly assigned to waiters in the order of arrival.
+// [FairSemaphore] ensures that permits are strictly assigned to waiters in the order of arrival.
 //
 // Implementation:
-// It uses a mutex-protected linked list of waiters and a `TicketLock` for the mutex itself
+// It uses a mutex-protected linked list of waiters and a [TicketLock] for the mutex itself
 // to ensure even the internal lock acquisition is fair.
+//
+// Limitations:
+// - Max permits: 2^63 - 1. Panics on overflow.
 type FairSemaphore struct {
 	_       noCopy
 	mu      TicketLock
@@ -76,6 +79,10 @@ func (s *FairSemaphore) Release(n int64) {
 		return
 	}
 	s.mu.Lock()
+	if s.permits > 0 && s.permits+n < 0 {
+		s.mu.Unlock()
+		panic("cc: FairSemaphore permit overflow")
+	}
 	s.permits += n
 	for s.head != nil && s.permits >= s.head.n {
 		w := s.head
