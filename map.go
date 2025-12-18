@@ -1184,11 +1184,14 @@ func (m *Map[K, V]) computeRangeEntry_(
 }
 
 // Rebuild performs a map rebuild operation with the given function.
-// The function is executed with exclusive access (or shared based on blockWriters) to the map.
+// The function is executed with exclusive access
+// (or shared based on blockWriters) to the map.
 //
 // Parameters:
-//   - fn: The function to execute during rebuild. It receives a MapRebuild instance.
-//   - blockWriters: Optional. If true, concurrent writers are blocked. Default is false (allow writers).
+//   - fn: The function to execute during rebuild.
+//     It receives a MapRebuild instance.
+//   - blockWriters: Optional. If true, concurrent writers are blocked.
+//     Default is false (allow writers).
 func (m *Map[K, V]) Rebuild(
 	fn func(m *MapRebuild[K, V]),
 	blockWriters ...bool,

@@ -689,6 +689,15 @@ func (m *FlatMap[K, V]) ToMap(limit ...int) map[K]V {
 	return a
 }
 
+// Rebuild performs a map rebuild operation with the given function.
+// The function is executed with exclusive access
+// (or shared based on blockWriters) to the map.
+//
+// Parameters:
+//   - fn: The function to execute during rebuild.
+//     It receives a MapRebuild instance.
+//   - blockWriters: Optional. If true, concurrent writers are blocked.
+//     Default is false (allow writers).
 func (m *FlatMap[K, V]) Rebuild(
 	fn func(m *MapRebuild[K, V]),
 	blockWriters ...bool,

@@ -122,3 +122,21 @@ func (m *MapRebuild[K, V]) Range(yield func(key K, value V) bool) {
 func (m *MapRebuild[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
+
+// Size returns the number of key-value pairs in the map.
+// This operation sums counters across all size stripes for an approximate
+// count.
+func (m *MapRebuild[K, V]) Size() int {
+	if m.m != nil {
+		return m.m.Size()
+	}
+	return m.f.Size()
+}
+
+// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
+func (m *MapRebuild[K, V]) ToMap(limit ...int) map[K]V {
+	if m.m != nil {
+		return m.m.ToMap(limit...)
+	}
+	return m.f.ToMap(limit...)
+}
