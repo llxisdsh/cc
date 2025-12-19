@@ -403,8 +403,8 @@ function showDoc(type) {
                 <h4 style="margin-top: 2.5rem; font-size: 1.4rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; color: var(--text);">Code Showroom</h4>
                 ${content.examples.map(ex => `
                     <div class="example-box">
-                        <h5 style="margin: 1.5rem 0 0.5rem; font-size: 1.1rem; color: #6366f1;">${ex.title}</h5>
-                        <div class="code-block glass" style="padding: 1rem; font-size: 0.85rem; border-radius: 8px; border: 1px solid var(--border); background: rgba(0,0,0,0.2);">
+                        <h5 style="margin: 1.5rem 0 0.5rem; font-size: 1.1rem; color: var(--primary-alt);">${ex.title}</h5>
+                        <div class="code-block glass" style="padding: 1rem; font-size: 0.85rem; border-radius: 8px; border: 1px solid var(--border); background: rgba(0,0,0,0.3);">
                             <pre style="margin: 0; white-space: pre-wrap; font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace; line-height: 1.5; color: #e2e8f0;"><code>${ex.code}</code></pre>
                         </div>
                     </div>
@@ -426,7 +426,7 @@ function showDoc(type) {
         ${examplesHTML}
       </div>
       <div class="principle-sidebar">
-        <h4 style="margin-bottom: 1rem; font-size: 1.2rem;">Experimental Principles</h4>
+        <h4 style="margin-bottom: 1rem; font-size: 1.2rem;">Core Principles</h4>
         ${principlesHTML}
       </div>
     </div>
