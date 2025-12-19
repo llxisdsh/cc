@@ -16,8 +16,10 @@
     box-sizing: border-box;
     margin: 0;
     padding: 0;
+    -webkit-tap-highlight-color: transparent;
 }
 
+html,
 body {
     background-color: var(--bg);
     background-image:
@@ -27,7 +29,9 @@ body {
     font-family: var(--font-sans);
     line-height: 1.6;
     overflow-x: hidden;
+    width: 100%;
     min-height: 100vh;
+    overscroll-behavior-y: none;
 }
 
 .container {
@@ -53,7 +57,7 @@ nav {
     right: 0;
     z-index: 100;
     padding: 1rem 0;
-    transition: all 0.3s;
+    transition: background 0.3s, backdrop-filter 0.3s, border-color 0.3s, padding 0.3s;
 }
 
 nav.scrolled {
@@ -412,6 +416,10 @@ pre {
     color: var(--text);
 }
 
+.doc-btn:active {
+    transform: scale(0.96);
+}
+
 .doc-btn.active {
     background: linear-gradient(135deg, var(--primary-alt), var(--primary));
     color: white;
@@ -617,10 +625,6 @@ pre {
 
 /* Responsive */
 @media (max-width: 768px) {
-    .hero h1 {
-        font-size: 3rem;
-    }
-
     .menu-toggle {
         display: flex;
     }
@@ -635,7 +639,7 @@ pre {
         backdrop-filter: blur(20px);
         flex-direction: column;
         justify-content: center;
-        gap: 3rem;
+        gap: 2.5rem;
         transition: right 0.5s cubic-bezier(0.4, 0, 0.2, 1);
         z-index: 100;
         padding: 2rem;
@@ -646,12 +650,57 @@ pre {
     }
 
     .nav-links a {
-        font-size: 1.75rem;
+        font-size: 1.5rem;
     }
 
     .nav-links .lang-toggle {
-        font-size: 1.5rem;
-        padding: 0.8rem 1.5rem;
+        font-size: 1.1rem;
+        padding: 0.6rem 1.2rem;
+    }
+
+    .container {
+        padding: 0 1.25rem;
+    }
+
+    .hero {
+        padding-top: 7rem;
+        padding-bottom: 4rem;
+    }
+
+    .hero h1 {
+        font-size: 2.75rem;
+        line-height: 1.1;
+        margin-bottom: 1rem;
+    }
+
+    .hero p {
+        font-size: 1.1rem;
+        margin-bottom: 2rem;
+    }
+
+    .section-title {
+        margin-bottom: 2.5rem;
+    }
+
+    .section-title h2 {
+        font-size: 2rem;
+    }
+
+    .features,
+    .showcase,
+    .performance-section,
+    .primitives,
+    .knowledge-center {
+        padding-top: 3.5rem;
+        padding-bottom: 3.5rem;
+    }
+
+    .card {
+        padding: 1.5rem;
+    }
+
+    .grid {
+        gap: 1.25rem;
     }
 }
 

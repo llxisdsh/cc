@@ -372,13 +372,21 @@ const docContent = {
 
 let currentLang = 'en';
 
+const docOrder = ['map', 'gate', 'phaser', 'locks', 'advanced'];
+
 function showDoc(type) {
     const container = document.getElementById('doc-container');
     const content = docContent[currentLang][type];
 
     // Update nav buttons
     document.querySelectorAll('.doc-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.getAttribute('onclick').includes(type));
+        const btnType = btn.getAttribute('onclick').match(/'([^']+)'/)[1];
+        btn.classList.toggle('active', btnType === type);
+
+        // Auto scroll button into view on mobile
+        if (btnType === type && window.innerWidth < 768) {
+            btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+        }
     });
 
     let principlesHTML = content.principles.map(p => `
@@ -488,6 +496,45 @@ document.addEventListener('DOMContentLoaded', () => {
     updateContent();
     showDoc('map'); // Default doc
 
+    // Touch Swipe for Docs
+    let touchStartX = 0;
+    let touchEndX = 0;
+
+    const docContainer = document.getElementById('doc-container');
+    docContainer.addEventListener('touchstart', e => {
+        touchStartX = e.changedTouches[0].screenX;
+    }, { passive: true });
+
+    docContainer.addEventListener('touchend', e => {
+        touchEndX = e.changedTouches[0].screenX;
+        handleSwipe();
+    }, { passive: true });
+
+    function handleSwipe() {
+        const swipeThreshold = 50;
+        const diff = touchStartX - touchEndX;
+
+        if (Math.abs(diff) < swipeThreshold) return;
+
+        const activeBtn = document.querySelector('.doc-btn.active');
+        if (!activeBtn) return;
+
+        const currentType = activeBtn.getAttribute('onclick').match(/'([^']+)'/)[1];
+        const currentIndex = docOrder.indexOf(currentType);
+
+        if (diff > swipeThreshold) {
+            // Swipe left -> Next doc
+            if (currentIndex < docOrder.length - 1) {
+                showDoc(docOrder[currentIndex + 1]);
+            }
+        } else {
+            // Swipe right -> Previous doc
+            if (currentIndex > 0) {
+                showDoc(docOrder[currentIndex - 1]);
+            }
+        }
+    }
+
     const perfSection = document.getElementById('performance');
     if (perfSection) observer.observe(perfSection);
 });
@@ -517,14 +564,4 @@ document.querySelectorAll('.nav-links a').forEach(link => {
             toggleMenu();
         }
     });
-});
-
-// Scroll shadow effect
-window.addEventListener('scroll', () => {
-    const nav = document.getElementById('navbar');
-    if (window.scrollY > 50) {
-        nav.classList.add('scrolled');
-    } else {
-        nav.classList.remove('scrolled');
-    }
 });
