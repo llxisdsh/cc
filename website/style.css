@@ -19,6 +19,10 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+html {
+    scroll-behavior: smooth;
+}
+
 html,
 body {
     background-color: var(--bg);
@@ -36,6 +40,11 @@ body {
     max-width: 1100px;
     margin: 0 auto;
     padding: 0 2rem;
+}
+
+section[id] {
+    scroll-margin-top: 80px;
+    /* Offset to prevent fixed navbar from covering headings */
 }
 
 /* Glassmorphism utility */
@@ -83,9 +92,9 @@ nav.scrolled {
 .logo span {
     font-size: 1.1em;
     font-weight: 900;
-    color: #e879f9;
-    -webkit-text-fill-color: #e879f9;
-    text-shadow: 0 0 20px rgba(168, 85, 247, 0.6);
+    color: var(--primary-alt);
+    -webkit-text-fill-color: var(--primary-alt);
+    text-shadow: 0 0 15px var(--secondary-glow);
     margin-right: -1px;
 }
 
