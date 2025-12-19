@@ -46,15 +46,15 @@ const translations = {
         "perf.label.throughput": "Throughput",
         "perf.label.latency": "P999 Latency",
         "perf.label.memory": "Memory Usage",
-        "perf.map.throughput": "10x Faster",
-        "perf.map.latency": "1/20 Delay",
-        "perf.map.mem": "50% Lower"
+        "perf.map.throughput": "10x Increase",
+        "perf.map.latency": "95% Reduction",
+        "perf.map.mem": "50% Savings"
     },
     zh: {
         "nav.features": "核心特性",
         "nav.showcase": "深度探索",
         "hero.title": "Concurrent Core for Go",
-        "hero.subtitle": "专为关键路径设计的轻量级、高性能 Go 并发工具包，关注极致延迟与零内存分配。",
+        "hero.subtitle": "专为关键路径设计的轻量级、高性能并发工具包，关注极致延迟与零内存分配。",
         "hero.getStarted": "API 参考",
         "hero.github": "快速开始 (GitHub)",
         "features.title": "核心组件",
@@ -97,9 +97,9 @@ const translations = {
         "perf.label.throughput": "吞吐能力",
         "perf.label.latency": "P999 延迟",
         "perf.label.memory": "内存占用",
-        "perf.map.throughput": "提升 10 倍",
-        "perf.map.latency": "降低至 1/20",
-        "perf.map.mem": "降低 50%"
+        "perf.map.throughput": "增长10倍",
+        "perf.map.latency": "减少95% ",
+        "perf.map.mem": "节约50%"
     }
 };
 
@@ -400,12 +400,12 @@ function showDoc(type) {
     if (content.examples) {
         examplesHTML = `
             <div class="examples-section">
-                <h4 style="margin-top: 2.5rem; font-size: 1.4rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; color: var(--text);">Code Showroom</h4>
+                <h4 class="showroom-title">Code Showroom</h4>
                 ${content.examples.map(ex => `
                     <div class="example-box">
-                        <h5 style="margin: 1.5rem 0 0.5rem; font-size: 1.1rem; color: var(--primary-alt);">${ex.title}</h5>
-                        <div class="code-block glass" style="padding: 1rem; font-size: 0.85rem; border-radius: 8px; border: 1px solid var(--border); background: rgba(0,0,0,0.3);">
-                            <pre style="margin: 0; white-space: pre-wrap; font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace; line-height: 1.5; color: #e2e8f0;"><code>${ex.code}</code></pre>
+                        <h5>${ex.title}</h5>
+                        <div class="code-block">
+                            <pre><code>${ex.code}</code></pre>
                         </div>
                     </div>
                 `).join('')}
@@ -467,22 +467,43 @@ window.addEventListener('scroll', () => {
     }
 });
 
-// Chart Animation on Scroll
+// Performance Chart Animation with 1s Visibility Check
+let perfAnimationTimer = null;
+
 const observerOptions = {
-    threshold: 0.2
+    threshold: 0.3,
+    rootMargin: '0px 0px -100px 0px'
 };
 
 const observer = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
         if (entry.isIntersecting) {
-            entry.target.querySelectorAll('.chart-bar').forEach(bar => {
-                const finalWidth = bar.style.width;
-                bar.style.width = '0';
-                setTimeout(() => {
-                    bar.style.width = finalWidth;
-                }, 100);
-            });
-            observer.unobserve(entry.target);
+            // Start 1s "gaze" timer
+            perfAnimationTimer = setTimeout(() => {
+                const rows = entry.target.querySelectorAll('.chart-row');
+                rows.forEach((row, index) => {
+                    const bar = row.querySelector('.chart-bar.cc');
+                    if (!bar) return;
+
+                    // Set base immediately
+                    bar.style.transition = 'none';
+                    bar.style.width = bar.getAttribute('data-base');
+
+                    // Staggered reveal
+                    setTimeout(() => {
+                        row.classList.add('active');
+                        bar.style.transition = 'width 1.5s cubic-bezier(0.19, 1, 0.22, 1)';
+                        bar.style.width = bar.getAttribute('data-target');
+                    }, 50 + index * 500);
+                });
+                observer.unobserve(entry.target);
+            }, 300);
+        } else {
+            // Cancel if scrolled away within 0.3s
+            if (perfAnimationTimer) {
+                clearTimeout(perfAnimationTimer);
+                perfAnimationTimer = null;
+            }
         }
     });
 }, observerOptions);

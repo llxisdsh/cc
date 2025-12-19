@@ -148,28 +148,31 @@ m.Compute(<span class="token string">"key"</span>, <span class="token keyword">f
             <div class="chart-row">
                 <div class="chart-label">
                     <span data-i18n="perf.label.throughput">Throughput</span>
-                    <span data-i18n="perf.map.throughput">10x Faster</span>
+                    <span class="chart-value" data-i18n="perf.map.throughput">10x Growth</span>
                 </div>
                 <div class="chart-bar-bg">
-                    <div class="chart-bar cc" style="width: 100%"></div>
+                    <div class="chart-bar base"></div>
+                    <div class="chart-bar cc" data-base="10%" data-target="100%"></div>
                 </div>
             </div>
             <div class="chart-row">
                 <div class="chart-label">
                     <span data-i18n="perf.label.latency">P999 Latency</span>
-                    <span data-i18n="perf.map.latency">1/20 Delay</span>
+                    <span class="chart-value" data-i18n="perf.map.latency">95% Reduction</span>
                 </div>
                 <div class="chart-bar-bg">
-                    <div class="chart-bar cc" style="width: 100%"></div>
+                    <div class="chart-bar base"></div>
+                    <div class="chart-bar cc contrast" data-base="100%" data-target="10%"></div>
                 </div>
             </div>
             <div class="chart-row">
                 <div class="chart-label">
                     <span data-i18n="perf.label.memory">Memory usage</span>
-                    <span data-i18n="perf.map.mem">50% Lower</span>
+                    <span class="chart-value" data-i18n="perf.map.mem">50% Efficiency</span>
                 </div>
                 <div class="chart-bar-bg">
-                    <div class="chart-bar cc" style="width: 100%"></div>
+                    <div class="chart-bar base"></div>
+                    <div class="chart-bar cc contrast" data-base="100%" data-target="50%"></div>
                 </div>
             </div>
         </div>

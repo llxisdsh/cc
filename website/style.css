@@ -28,9 +28,9 @@ html,
 body {
     background-color: var(--bg);
     background-image:
-        radial-gradient(circle at 50% 0%, #0f172a 0%, transparent 40%),
-        radial-gradient(circle at 100% 100%, #082f49 0%, transparent 30%),
-        radial-gradient(circle at 0% 100%, #0c4a6e 0%, transparent 25%);
+        radial-gradient(circle at 50% 0%, #0f172a 0%, transparent 35%),
+        radial-gradient(circle at 100% 100%, #082f49 0%, transparent 20%),
+        radial-gradient(circle at 0% 100%, #0c4a6e 0%, transparent 15%);
     color: var(--text);
     font-family: var(--font-sans);
     line-height: 1.6;
@@ -84,20 +84,29 @@ nav.scrolled {
 
 .logo {
     font-size: 1.5rem;
-    font-weight: 800;
-    background: linear-gradient(to right, #fff, var(--primary-alt));
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+    font-weight: 700;
+    color: #e2e8f0;
+    letter-spacing: -0.01em;
+    cursor: pointer;
+    transition: all 0.3s;
 }
 
 .logo span {
-    font-size: 1.1em;
     font-weight: 900;
     color: var(--primary-alt);
-    -webkit-text-fill-color: var(--primary-alt);
-    text-shadow: 0 0 15px var(--secondary-glow);
-    margin-right: -1px;
+    text-shadow: 0 0 20px rgba(45, 212, 191, 0.4);
+    margin-right: -0.5px;
+    font-size: 1.05em;
+    display: inline-block;
+    filter: brightness(1.2);
+}
+
+.logo:hover {
+    color: #fff;
+}
+
+.logo:hover span {
+    filter: brightness(1.4) drop-shadow(0 0 8px var(--primary-alt));
 }
 
 .nav-links {
@@ -130,8 +139,9 @@ nav.scrolled {
 }
 
 .lang-toggle:hover {
-    border-color: var(--primary);
-    background: rgba(168, 85, 247, 0.1);
+    border-color: var(--primary-alt);
+    background: rgba(45, 212, 191, 0.1);
+    box-shadow: 0 0 10px rgba(45, 212, 191, 0.2);
 }
 
 .menu-toggle {
@@ -208,20 +218,23 @@ nav.scrolled {
 .btn-primary {
     background: linear-gradient(135deg, #0ed7b5, var(--primary-alt));
     color: #020617;
-    box-shadow: 0 0 25px var(--secondary-glow);
+    box-shadow: 0 2px 0 rgba(0, 0, 0, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .btn-primary:hover {
-    transform: translateY(-2px) scale(1.02);
-    box-shadow: 0 0 35px var(--primary-glow);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(45, 212, 191, 0.2);
+    filter: brightness(1.1);
+    border-color: rgba(255, 255, 255, 0.3);
 }
 
 .btn-secondary {
-    background: var(--surface);
+    background: rgba(15, 23, 42, 0.6);
     color: var(--text);
     border: 1px solid var(--border);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
 }
 
 .btn-secondary:hover {
@@ -236,7 +249,8 @@ nav.scrolled {
     padding: 1.5rem;
     text-align: left;
     border: 1px solid var(--border);
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), 0 0 30px rgba(45, 212, 191, 0.03);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9), 0 0 15px rgba(45, 212, 191, 0.05);
     font-family: 'Fira Code', 'Courier New', monospace;
     position: relative;
     overflow: hidden;
@@ -322,7 +336,7 @@ nav.scrolled {
 .card-icon {
     width: 48px;
     height: 48px;
-    background: linear-gradient(135deg, #134e4a, var(--primary-alt));
+    background: linear-gradient(135deg, #075985, var(--primary-alt));
     border-radius: 12px;
     display: flex;
     align-items: center;
@@ -393,7 +407,7 @@ pre {
 .knowledge-center {
     padding-top: 8rem;
     padding-bottom: 8rem;
-    background: radial-gradient(circle at 100% 100%, rgba(45, 212, 191, 0.02), transparent 40%);
+    background: transparent;
     border-top: 1px solid var(--border);
 }
 
@@ -445,10 +459,11 @@ pre {
 }
 
 .doc-btn.active {
-    background: linear-gradient(135deg, var(--primary-alt), #0891b2);
+    background: linear-gradient(135deg, var(--primary-alt), #06b6d4);
     color: #020617;
-    box-shadow: 0 0 20px var(--secondary-glow);
+    box-shadow: 0 2px 10px rgba(45, 212, 191, 0.3);
     border-color: transparent;
+    filter: brightness(1.1);
 }
 
 .doc-content {
@@ -475,13 +490,13 @@ pre {
 }
 
 .analogy-box {
-    background: rgba(14, 165, 233, 0.05);
+    background: rgba(2, 6, 23, 0.4);
     border-left: 3px solid var(--primary-alt);
     padding: 2rem;
     border-radius: 4px 12px 12px 4px;
     margin: 2.5rem 0;
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary-alt);
 }
 
 .analogy-box h4 {
@@ -496,12 +511,12 @@ pre {
 }
 
 .principle-card {
-    background: rgba(2, 6, 23, 0.6);
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(2, 6, 23, 0.8);
+    border: 1px solid var(--border);
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     padding: 1.5rem;
     border-radius: var(--radius);
-    transition: border-color 0.3s;
+    transition: all 0.3s;
 }
 
 .principle-card:hover {
@@ -616,37 +631,95 @@ pre {
 }
 
 .chart-bar-bg {
-    height: 14px;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 7px;
+    height: 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 2px;
     overflow: hidden;
+    position: relative;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .chart-bar {
     height: 100%;
-    background: #64748b;
-    border-radius: 7px;
     width: 0;
-    transition: width 1s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: width 1.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chart-bar.base {
+    background: rgba(255, 255, 255, 0.05);
+    /* Stealth base for sync.Map */
+    width: 100% !important;
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 1;
 }
 
 .chart-bar.cc {
-    background: linear-gradient(to right, var(--primary-alt), var(--primary));
-    box-shadow: 0 0 15px var(--primary-glow);
+    background: linear-gradient(to right, #0ea5e9, var(--primary-alt));
+    box-shadow: 0 0 10px rgba(45, 212, 191, 0.3);
+    position: relative;
+    z-index: 2;
+}
+
+.chart-bar.cc.contrast {
+    background: linear-gradient(to right, #38bdf8, #2dd4bf);
+    filter: hue-rotate(-20deg) brightness(1.2);
+    /* Contrast for reduction metrics */
+}
+
+.chart-value {
+    opacity: 0;
+    transform: translateX(10px);
+    transition: all 0.6s ease-out;
+}
+
+.chart-row.active .chart-value {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.chart-bar.cc.contrast {
+    background: linear-gradient(to right, #6366f1, #0ea5e9);
 }
 
 .examples-section {
     animation: fadeIn 0.5s ease-out;
 }
 
-.example-box {
-    margin-bottom: 2.5rem;
+.showroom-title {
+    margin-top: 3rem;
+    font-size: 1.5rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.75rem;
+    color: var(--text);
+    letter-spacing: -0.02em;
+}
+
+.example-box h5 {
+    margin: 2rem 0 0.75rem;
+    font-size: 1.1rem;
+    color: var(--primary-alt);
+}
+
+.code-block {
+    background: #020617;
+    border: 1px solid var(--border);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 1.25rem;
+    font-size: 0.875rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    position: relative;
+    overflow: hidden;
 }
 
 .code-block pre {
     margin: 0;
     white-space: pre-wrap;
-    word-break: break-all;
+    font-family: 'Fira Code', monospace;
+    line-height: 1.6;
+    color: #e2e8f0;
 }
 
 .token.number {
