@@ -48,7 +48,9 @@ const translations = {
         "perf.label.memory": "Memory Usage",
         "perf.map.throughput": "10x Increase",
         "perf.map.latency": "95% Reduction",
-        "perf.map.mem": "50% Savings"
+        "perf.map.mem": "50% Savings",
+        "game.win.title": "Achievement Unlocked!",
+        "game.win.subtitle": "The world now has one more bored soul."
     },
     zh: {
         "nav.features": "核心特性",
@@ -99,7 +101,9 @@ const translations = {
         "perf.label.memory": "内存占用",
         "perf.map.throughput": "增长10倍",
         "perf.map.latency": "减少95% ",
-        "perf.map.mem": "节约50%"
+        "perf.map.mem": "节约50%",
+        "game.win.title": "成就解锁！",
+        "game.win.subtitle": "世界上又多了一个无聊的灵魂。"
     }
 };
 
@@ -516,6 +520,65 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     updateContent();
     showDoc('map'); // Default doc
+
+    // Logo "Devour" Mini-game
+    const logo = document.querySelector('#gameLogo');
+    if (logo) {
+        let eatenCount = 0;
+        const chars = logo.querySelectorAll('.char:not(.highlight)');
+        const highlights = logo.querySelectorAll('.char.highlight');
+        const totalChars = chars.length;
+        let gameActive = false;
+
+        const resetGame = () => {
+            eatenCount = 0;
+            gameActive = false;
+            logo.classList.remove('game-won');
+            chars.forEach(char => {
+                char.classList.remove('eaten');
+            });
+        };
+
+        const checkWin = () => {
+            if (eatenCount === totalChars) {
+                logo.classList.add('game-won');
+            }
+        };
+
+        // Click to eat (normal chars)
+        chars.forEach(char => {
+            char.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (!char.classList.contains('eaten')) {
+                    char.classList.add('eaten');
+                    eatenCount++;
+                    checkWin();
+                }
+            });
+        });
+
+        // Click blink effect for highlight chars
+        highlights.forEach(char => {
+            char.addEventListener('click', (e) => {
+                e.stopPropagation();
+                char.classList.add('blink');
+                setTimeout(() => {
+                    char.classList.remove('blink');
+                }, 150);
+            });
+        });
+
+        // Reset on mouse leave
+        logo.addEventListener('mouseleave', () => {
+            if (gameActive) {
+                setTimeout(resetGame, 100);
+            }
+        });
+
+        logo.addEventListener('mouseenter', () => {
+            gameActive = true;
+        });
+    }
 
     const perfSection = document.getElementById('performance');
     if (perfSection) observer.observe(perfSection);

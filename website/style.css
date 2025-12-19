@@ -88,25 +88,129 @@ nav.scrolled {
     color: #e2e8f0;
     letter-spacing: -0.01em;
     cursor: pointer;
-    transition: all 0.3s;
+    transition: color 0.3s;
+    display: inline-flex;
+    align-items: baseline;
+    min-width: 13rem;
+    /* Locked width to prevent nav jitter */
 }
 
-.logo span {
+.logo .char {
+    display: inline-block;
+    transition: transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    cursor: default;
+}
+
+.logo .char.highlight {
     font-weight: 900;
     color: var(--primary-alt);
-    text-shadow: 0 0 20px rgba(45, 212, 191, 0.4);
-    margin-right: -0.5px;
     font-size: 1.05em;
+    cursor: pointer;
+}
+
+.logo .char.highlight:hover {
+    transform: translateY(-4px);
+    color: #fff;
+}
+
+.logo .char.highlight.blink {
+    opacity: 0;
+}
+
+.logo .char:not(.highlight):not(.eaten) {
+    cursor: pointer;
+}
+
+.logo .char:not(.highlight):hover {
+    transform: translateY(-4px);
+    color: #fff;
+}
+
+.logo .char.eaten {
+    opacity: 0;
+    transform: scale(0) rotate(180deg);
+    pointer-events: none;
+}
+
+.logo .spacer {
     display: inline-block;
-    filter: brightness(1.2);
+    width: 0.3em;
 }
 
 .logo:hover {
     color: #fff;
 }
 
-.logo:hover span {
-    filter: brightness(1.4) drop-shadow(0 0 8px var(--primary-alt));
+.logo.game-won .char.highlight {
+    animation: fusion 0.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+}
+
+.logo.game-won .char.highlight:first-of-type {
+    animation-delay: 0s;
+    transform: translateX(0);
+}
+
+.logo.game-won .char.highlight:last-of-type {
+    animation-delay: 0.1s;
+    transform: translateX(0);
+}
+
+@keyframes fusion {
+    0% {
+        transform: translateX(0);
+        opacity: 1;
+    }
+
+    50% {
+        transform: translateX(-0.3em);
+        opacity: 1;
+    }
+
+    100% {
+        transform: translateX(-0.3em);
+        opacity: 1;
+    }
+}
+
+.win-badge {
+    position: absolute;
+    top: 120%;
+    left: 50%;
+    transform: translateX(-50%) scale(0);
+    background: linear-gradient(135deg, var(--primary-alt), #0ea5e9);
+    color: #020617;
+    padding: 0.75rem 1.25rem;
+    border-radius: 8px;
+    font-weight: 700;
+    white-space: nowrap;
+    opacity: 0;
+    transition: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    pointer-events: none;
+    box-shadow: 0 8px 24px rgba(45, 212, 191, 0.5);
+    border: 2px solid rgba(255, 255, 255, 0.2);
+}
+
+.win-badge .win-title {
+    font-size: 1rem;
+    margin-bottom: 0.25rem;
+    letter-spacing: 0.02em;
+}
+
+.win-badge .win-subtitle {
+    font-size: 0.75rem;
+    opacity: 0.85;
+    font-weight: 500;
+}
+
+.logo.game-won .win-badge {
+    opacity: 1;
+    transform: translateX(-50%) scale(1) translateY(-5px);
+}
+
+.dud {
+    color: var(--primary-alt);
+    opacity: 0.5;
+    font-family: 'Fira Code', monospace;
 }
 
 .nav-links {
