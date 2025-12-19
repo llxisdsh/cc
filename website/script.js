@@ -496,45 +496,6 @@ document.addEventListener('DOMContentLoaded', () => {
     updateContent();
     showDoc('map'); // Default doc
 
-    // Touch Swipe for Docs
-    let touchStartX = 0;
-    let touchEndX = 0;
-
-    const docContainer = document.getElementById('doc-container');
-    docContainer.addEventListener('touchstart', e => {
-        touchStartX = e.changedTouches[0].screenX;
-    }, { passive: true });
-
-    docContainer.addEventListener('touchend', e => {
-        touchEndX = e.changedTouches[0].screenX;
-        handleSwipe();
-    }, { passive: true });
-
-    function handleSwipe() {
-        const swipeThreshold = 50;
-        const diff = touchStartX - touchEndX;
-
-        if (Math.abs(diff) < swipeThreshold) return;
-
-        const activeBtn = document.querySelector('.doc-btn.active');
-        if (!activeBtn) return;
-
-        const currentType = activeBtn.getAttribute('onclick').match(/'([^']+)'/)[1];
-        const currentIndex = docOrder.indexOf(currentType);
-
-        if (diff > swipeThreshold) {
-            // Swipe left -> Next doc
-            if (currentIndex < docOrder.length - 1) {
-                showDoc(docOrder[currentIndex + 1]);
-            }
-        } else {
-            // Swipe right -> Previous doc
-            if (currentIndex > 0) {
-                showDoc(docOrder[currentIndex - 1]);
-            }
-        }
-    }
-
     const perfSection = document.getElementById('performance');
     if (perfSection) observer.observe(perfSection);
 });

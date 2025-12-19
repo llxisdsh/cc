@@ -24,10 +24,10 @@
             <div class="nav-links" id="navLinks">
                 <a href="#features" data-i18n="nav.features">Features</a>
                 <a href="#showcase" data-i18n="nav.showcase">Showcase</a>
-                <a href="https://github.com/llxisdsh/cc" target="_blank">GitHub</a>
+                <a href="https://github.com/llxisdsh/cc" target="_blank" rel="noopener">GitHub</a>
                 <button class="lang-toggle" onclick="toggleLanguage()">EN / 中文</button>
             </div>
-            <button class="menu-toggle" id="menuToggle" onclick="toggleMenu()">
+            <button class="menu-toggle" id="menuToggle" onclick="toggleMenu()" title="Toggle Menu">
                 <span></span>
                 <span></span>
                 <span></span>
@@ -43,7 +43,8 @@
         <div class="hero-actions animate-fade-in" style="animation-delay: 0.2s;">
             <a href="https://pkg.go.dev/github.com/llxisdsh/cc" class="btn btn-primary" data-i18n="hero.getStarted">Go
                 Reference</a>
-            <a href="https://github.com/llxisdsh/cc" class="btn btn-secondary" data-i18n="hero.github">View on
+            <a href="https://github.com/llxisdsh/cc" class="btn btn-secondary" data-i18n="hero.github"
+                rel="noopener">View on
                 GitHub</a>
         </div>
 
@@ -175,25 +176,35 @@ m.Compute(<span class="token string">"key"</span>, <span class="token keyword">f
         </div>
     </section>
 
-    <section id="knowledge" class="knowledge-center container">
-        <div class="section-title">
-            <h2 data-i18n="knowledge.title">Deep Dive Center</h2>
-            <p data-i18n="knowledge.subtitle">Understand the soul of concurrent programming through vivid analogies and
-                rigorous principles.</p>
+    <section id="knowledge" class="knowledge-center">
+        <div class="container">
+            <div class="section-title">
+                <h2 data-i18n="knowledge.title">Deep Dive Center</h2>
+                <p data-i18n="knowledge.subtitle">Understand the soul of concurrent programming through vivid analogies
+                    and
+                    rigorous principles.</p>
+            </div>
         </div>
 
-        <div class="doc-nav" id="doc-nav">
-            <button class="doc-btn active" onclick="showDoc('map')" data-i18n="doc.nav.map">Map & FlatMap</button>
-            <button class="doc-btn" onclick="showDoc('gate')" data-i18n="doc.nav.gate">Gate & Latch</button>
-            <button class="doc-btn" onclick="showDoc('phaser')" data-i18n="doc.nav.phaser">Phaser & Rally</button>
-            <button class="doc-btn" onclick="showDoc('locks')" data-i18n="doc.nav.locks">Basic Locks</button>
-            <button class="doc-btn" onclick="showDoc('advanced')" data-i18n="doc.nav.advanced">Advanced
-                Primitives</button>
+        <div class="doc-nav-wrapper" id="doc-nav-anchor">
+            <div class="container">
+                <div class="doc-nav" id="doc-nav">
+                    <button class="doc-btn active" onclick="showDoc('map')" data-i18n="doc.nav.map">Map &
+                        FlatMap</button>
+                    <button class="doc-btn" onclick="showDoc('gate')" data-i18n="doc.nav.gate">Gate & Latch</button>
+                    <button class="doc-btn" onclick="showDoc('phaser')" data-i18n="doc.nav.phaser">Phaser &
+                        Rally</button>
+                    <button class="doc-btn" onclick="showDoc('locks')" data-i18n="doc.nav.locks">Basic Locks</button>
+                    <button class="doc-btn" onclick="showDoc('advanced')" data-i18n="doc.nav.advanced">Advanced
+                        Primitives</button>
+                </div>
+            </div>
         </div>
 
-        <div id="doc-container">
-            <!-- Content populated by JS -->
-        </div>
+        <div class="container">
+            <div id="doc-container">
+                <!-- Content populated by JS -->
+            </div>
     </section>
 
     <footer class="container">
