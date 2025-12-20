@@ -387,9 +387,15 @@ function showDoc(type) {
         const btnType = btn.getAttribute('onclick').match(/'([^']+)'/)[1];
         btn.classList.toggle('active', btnType === type);
 
-        // Auto scroll button into view on mobile
+        // Auto scroll button into view on mobile (horizontal only within doc-nav)
         if (btnType === type && window.innerWidth < 768) {
-            btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+            const docNav = btn.closest('.doc-nav');
+            if (docNav) {
+                const btnRect = btn.getBoundingClientRect();
+                const navRect = docNav.getBoundingClientRect();
+                const scrollLeft = btn.offsetLeft - (navRect.width / 2) + (btnRect.width / 2);
+                docNav.scrollTo({ left: scrollLeft, behavior: 'smooth' });
+            }
         }
     });
 
@@ -512,8 +518,23 @@ const observer = new IntersectionObserver((entries) => {
     });
 }, observerOptions);
 
+// Prevent scroll restoration and ensure page starts at top
+if ('scrollRestoration' in history) {
+    history.scrollRestoration = 'manual';
+}
+
+// Force scroll to top on page load (especially for mobile)
+window.scrollTo(0, 0);
+document.documentElement.scrollTop = 0;
+document.body.scrollTop = 0;
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+    // Ensure we're at the top on DOM ready
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+
     const savedLang = localStorage.getItem('cc_lang');
     if (savedLang && translations[savedLang]) {
         currentLang = savedLang;
@@ -609,4 +630,13 @@ document.querySelectorAll('.nav-links a').forEach(link => {
             toggleMenu();
         }
     });
+});
+
+// Final scroll reset after page fully loads (critical for mobile)
+window.addEventListener('load', () => {
+    setTimeout(() => {
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+    }, 0);
 });
