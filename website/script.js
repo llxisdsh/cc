@@ -113,24 +113,55 @@ const docContent = {
             title: "Map & FlatMap: The Storage Masters",
             desc: "Concurrent Core provides two distinct flavors of maps for different performance profiles.",
             analogy: "<b>The Supermarket vs. The Boutique Warehouse:</b> <br>Standard <code>Map</code> is like a supermarket aisles (buckets) where people check out items. <code>FlatMap</code> is a boutique warehouse where items are packed tightly onto shelves (cache lines) to minimize walking distance.",
-            main: "Standard <code>Map</code> is a drop-in <code>sync.Map</code> replacement designed for extreme concurrent paths. Our benchmarks show <b>10x throughput</b> and <b>1/20th the P999 latency</b> while consuming only <b>50% of the memory</b> compared to <code>sync.Map</code>. <code>FlatMap</code> takes it even further with a cache-line aligned inline storage, making it the choice for latency-critical paths.",
+            main: "<code>cc.Map</code> is a drop-in <code>sync.Map</code> replacement with <b>10x throughput</b>, <b>1/20th P999 latency</b>, and <b>50% memory</b>. Unique to cc.Map: <code>Compute()</code> for atomic read-modify-write, <code>Entries()</code> for safe iteration with update/delete, and <code>Rebuild()</code> for batch atomic operations. <code>FlatMap</code> provides cache-line aligned inline storage for latency-critical paths.",
             principles: [
-                { title: "Seqlock (Sequence Lock)", desc: "Readers check a version number twice. If it didn't change, the read was consistent. This avoids heavy atomic write-barriers for readers." },
-                { title: "False Sharing Mitigation", desc: "Data structures are padded to sync with CPU cache lines (64/128 bytes) to prevent cores from fighting over the same memory line." },
-                { title: "Memory Allocation", desc: "Reduced pointers and flat memory layouts lead to 50% less overhead and lower GC pressure." }
+                { title: "Sharded Architecture", desc: "Map uses fine-grained bucket sharding with SeqLock per-bucket, allowing massive concurrent reads without global contention." },
+                { title: "Seqlock (Sequence Lock)", desc: "Readers check a version number twice. If it didn't change, the read was consistent—avoiding heavy atomic write-barriers." },
+                { title: "False Sharing Mitigation", desc: "Structures are padded to CPU cache lines (64/128 bytes) to prevent cores from fighting over the same memory line." }
             ],
             examples: [
                 {
-                    title: "Atomic Iteration (Entries)",
-                    code: `<span class="token comment">// Update or Delete entries during high-perf iteration</span>\n<span class="token keyword">for</span> e := <span class="token keyword">range</span> m.Entries() {\n    <span class="token keyword">if</span> e.Key() % <span class="token number">2</span> == <span class="token number">0</span> {\n        e.Update(e.Value() + <span class="token number">1</span>)\n    } <span class="token keyword">else</span> {\n        e.Delete()\n    }\n}`
+                    title: "Atomic Read-Modify-Write (Compute)",
+                    code: `<span class="token keyword">var</span> m cc.Map[<span class="token type">string</span>, <span class="token type">int</span>]
+<span class="token comment">// Compute: atomic increment without Load+Store race</span>
+m.Compute(<span class="token string">"counter"</span>, <span class="token keyword">func</span>(e *cc.MapEntry[<span class="token type">string</span>, <span class="token type">int</span>]) {
+    <span class="token keyword">if</span> e.Loaded() {
+        e.Update(e.Value() + <span class="token number">1</span>)
+    } <span class="token keyword">else</span> {
+        e.Update(<span class="token number">1</span>) <span class="token comment">// Initialize if not exists</span>
+    }
+})`
                 },
                 {
-                    title: "Batch Atomic Updates (Rebuild)",
-                    code: `<span class="token comment">// Perform multiple operations atomically as a batch</span>\nm.Rebuild(<span class="token keyword">func</span>(m *cc.MapRebuild[<span class="token type">string</span>, <span class="token type">int</span>]) {\n    m.Store(<span class="token string">"new_task"</span>, <span class="token number">1</span>)\n    m.Delete(<span class="token string">"expired"</span>)\n    m.Compute(<span class="token string">"counter"</span>, <span class="token keyword">func</span>(e *cc.MapEntry[<span class="token type">string</span>, <span class="token type">int</span>]) {\n        e.Update(e.Value() + <span class="token number">1</span>)\n    })\n})`
+                    title: "Safe Iteration (Entries)",
+                    code: `<span class="token comment">// Update or Delete during iteration—safe and atomic</span>
+<span class="token keyword">for</span> e := <span class="token keyword">range</span> m.Entries() {
+    <span class="token keyword">if</span> shouldRemove(e.Key()) {
+        e.Delete()
+    } <span class="token keyword">else</span> {
+        e.Update(transform(e.Value()))
+    }
+}`
+                },
+                {
+                    title: "Batch Atomic Operations (Rebuild)",
+                    code: `<span class="token comment">// Multiple operations as single atomic transaction</span>
+m.Rebuild(<span class="token keyword">func</span>(r *cc.MapRebuild[<span class="token type">string</span>, <span class="token type">int</span>]) {
+    r.Store(<span class="token string">"new"</span>, <span class="token number">1</span>)
+    r.Delete(<span class="token string">"old"</span>)
+    r.Compute(<span class="token string">"counter"</span>, <span class="token keyword">func</span>(e *cc.MapEntry[<span class="token type">string</span>, <span class="token type">int</span>]) {
+        e.Update(e.Value() + <span class="token number">1</span>)
+    })
+})`
                 },
                 {
                     title: "Drop-in sync.Map Replacement",
-                    code: `<span class="token comment">// Fully compatible with standard sync.Map API</span>\n<span class="token keyword">var</span> m cc.Map[<span class="token type">string</span>, <span class="token type">int</span>]\nm.Store(<span class="token string">"health"</span>, <span class="token number">100</span>)\nval, loaded := m.LoadOrStore(<span class="token string">"health"</span>, <span class="token number">200</span>)`
+                    code: `<span class="token comment">// 100% API compatible with sync.Map</span>
+<span class="token keyword">var</span> m cc.Map[<span class="token type">string</span>, <span class="token type">int</span>]
+m.Store(<span class="token string">"key"</span>, <span class="token number">100</span>)
+val, ok := m.Load(<span class="token string">"key"</span>)
+val, loaded := m.LoadOrStore(<span class="token string">"key"</span>, <span class="token number">200</span>)
+m.Delete(<span class="token string">"key"</span>)`
                 }
             ]
         },
@@ -138,32 +169,80 @@ const docContent = {
             title: "Advanced Concurrency Primitives",
             desc: "A suite of sophisticated primitives for complex orchestration and performance-critical safety.",
             analogy: "<b>The Orchestral Conductor:</b> <br>While basic locks are like simple traffic lights, these primitives are the conductor of an orchestra, ensuring multiple sections work in perfect harmony, handling failures gracefully, and optimizing for the fairest resource distribution.",
-            main: "This section covers high-level tools designed for sophisticated coordination. <code>OnceGroup</code> handles request coalescing, <code>WaitGroup</code> tracks task lifecycles, and <code>LockGroups</code> provide fine-grained, dynamic locking for arbitrary keys.",
+            main: "This section covers high-level tools designed for sophisticated coordination. <code>OnceGroup</code> handles request coalescing with full panic/Goexit propagation. <code>WaitGroup</code> is <b>fully reusable</b>—unlike sync.WaitGroup, it can start a new batch immediately after the previous batch completes without waiting for Wait() calls to return. <code>FairSemaphore</code> guarantees strict FIFO permit acquisition. <code>Epoch</code> provides version-based coordination without thundering herd problems. <code>LockGroups</code> offer dynamic, auto-cleanup key-based locking.",
             principles: [
-                { title: "Failure Propagation", desc: "OnceGroup correctly propagates panics and Goexits to all waiters, a feat standard singleflights often fail to achieve." },
-                { title: "Dynamic Lock Cleanup", desc: "TicketLockGroup and RWLockGroup automatically remove unused locks from memory when no goroutines are waiting." },
-                { title: "Strict FIFO Fairness", desc: "FairSemaphore guarantees that permits are granted in the order of arrival, preventing 'barging' and starvation." }
+                { title: "Panic & Goexit Propagation", desc: "OnceGroup correctly propagates panics and Goexits to ALL waiters, a critical safety guarantee that standard singleflights often fail to achieve." },
+                { title: "Instant Reusability", desc: "WaitGroup can be reused immediately after Done()—no need to wait for Wait() calls to return. Double-buffered semaphores prevent signal stealing across generations." },
+                { title: "Anti-Thundering Herd", desc: "Epoch uses an ordered waiter list to wake only those whose target is met, avoiding the broadcast storms of condition variables." },
+                { title: "Dynamic Lock Cleanup", desc: "LockGroups use reference counting to automatically remove unused locks from memory when no goroutines are waiting." },
+                { title: "Strict FIFO Fairness", desc: "FairSemaphore guarantees permits are granted in the exact order of arrival, preventing 'barging' and starvation." }
             ],
             examples: [
                 {
-                    title: "Smart Singleflight (OnceGroup)",
-                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, Result]\n\n<span class="token comment">// Subsequent calls wait for the first one and share results</span>\nv, err, shared := g.Do(<span class="token string">"api_key"</span>, <span class="token keyword">func</span>() (Result, <span class="token type">error</span>) {\n    <span class="token keyword">return</span> fetchFromDB()\n})`
+                    title: "Reusable WaitGroup (Key Difference)",
+                    code: `<span class="token keyword">var</span> wg cc.WaitGroup
+<span class="token comment">// Unlike sync.WaitGroup: reuse immediately after batch completes</span>
+<span class="token keyword">for</span> batch := <span class="token keyword">range</span> batches {
+    <span class="token keyword">for</span> _, task := <span class="token keyword">range</span> batch {
+        wg.Go(<span class="token keyword">func</span>() { process(task) })
+    }
+    wg.Wait() <span class="token comment">// Instantly reusable for next batch!</span>
+}
+<span class="token comment">// Introspection: Count() and Waiters() for debugging</span>
+fmt.Printf(<span class="token string">"Tasks: %d, Waiters: %d"</span>, wg.Count(), wg.Waiters())`
                 },
                 {
-                    title: "Modern Task Tracking (WaitGroup)",
-                    code: `<span class="token keyword">var</span> wg cc.WaitGroup\n\n<span class="token comment">// Launch managed goroutines directly</span>\nwg.Go(<span class="token keyword">func</span>() { doWork() })\n\n<span class="token comment">// Check if done without blocking</span>\n<span class="token keyword">if</span> wg.TryWait() { finish() }`
+                    title: "Async Singleflight (DoChan)",
+                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, *User]
+<span class="token comment">// DoChan: returns channel immediately for async result</span>
+ch := g.DoChan(<span class="token string">"user-123"</span>, <span class="token keyword">func</span>() (*User, <span class="token type">error</span>) {
+    <span class="token keyword">return</span> fetchUser(<span class="token string">"123"</span>)
+})
+doOtherWork() <span class="token comment">// Continue working while loading...</span>
+result := <-ch <span class="token comment">// Receive result when ready</span>
+user, err, shared := result.Val, result.Err, result.Shared`
                 },
                 {
-                    title: "Starvation-Free Semaphore",
-                    code: `<span class="token comment">// Guarantees FIFO even under extreme contention</span>\nsem := cc.NewFairSemaphore(<span class="token number">5</span>)\nsem.Acquire(<span class="token number">1</span>)\n<span class="token keyword">defer</span> sem.Release(<span class="token number">1</span>)`
+                    title: "Cache Invalidation (Forget)",
+                    code: `<span class="token keyword">var</span> cache cc.OnceGroup[<span class="token type">string</span>, *Data]
+data, err, _ := cache.Do(<span class="token string">"key"</span>, loadFromDB)
+<span class="token comment">// Invalidate: next call will re-execute the function</span>
+cache.Forget(<span class="token string">"key"</span>)
+<span class="token comment">// ForgetUnshared: only invalidate if no duplicates joined</span>
+<span class="token keyword">if</span> cache.ForgetUnshared(<span class="token string">"key"</span>) { log.Println(<span class="token string">"Removed"</span>) }`
                 },
                 {
-                    title: "Dynamic Key-Based Locking",
-                    code: `<span class="token comment">// Lock on arbitrary strings without pre-allocating locks</span>\n<span class="token keyword">var</span> users cc.TicketLockGroup[<span class="token type">string</span>]\nusers.Lock(<span class="token string">"user-123"</span>)\n<span class="token keyword">defer</span> users.Unlock(<span class="token string">"user-123"</span>)`
+                    title: "Version Coordination (Epoch)",
+                    code: `<span class="token keyword">var</span> epoch cc.Epoch
+<span class="token comment">// Waiter: block until version reaches target (no thundering herd!)</span>
+<span class="token keyword">go</span> <span class="token keyword">func</span>() {
+    epoch.WaitAtLeast(<span class="token number">5</span>)
+    fmt.Println(<span class="token string">"Version 5 reached!"</span>)
+}()
+epoch.Add(<span class="token number">5</span>) <span class="token comment">// Publisher: advance version, wakes only relevant waiters</span>`
                 },
                 {
-                    title: "Shared Key-Based Locking (RW)",
-                    code: `<span class="token comment">// Reader-Writer support for arbitrary resources</span>\n<span class="token keyword">var</span> resources cc.RWLockGroup[<span class="token type">int</span>]\nresources.RLock(<span class="token number">42</span>)\n<span class="token keyword">defer</span> resources.RUnlock(<span class="token number">42</span>)`
+                    title: "Non-Blocking TryAcquire",
+                    code: `sem := cc.NewFairSemaphore(<span class="token number">5</span>)
+<span class="token comment">// TryAcquire: non-blocking, returns false immediately if unavailable</span>
+<span class="token keyword">if</span> sem.TryAcquire(<span class="token number">1</span>) {
+    <span class="token keyword">defer</span> sem.Release(<span class="token number">1</span>)
+    doWork()
+} <span class="token keyword">else</span> {
+    queueForLater() <span class="token comment">// Fallback when permits unavailable</span>
+}`
+                },
+                {
+                    title: "Dynamic Key Locking (Auto-Cleanup)",
+                    code: `<span class="token keyword">var</span> users cc.TicketLockGroup[<span class="token type">string</span>]
+<span class="token comment">// Lock arbitrary keys—no pre-allocation, auto-cleanup when unlocked</span>
+users.Lock(<span class="token string">"user-123"</span>)
+updateUser(<span class="token string">"123"</span>)
+users.Unlock(<span class="token string">"user-123"</span>) <span class="token comment">// Lock automatically removed from memory</span>
+
+<span class="token comment">// RWLockGroup for shared reads on arbitrary keys</span>
+<span class="token keyword">var</span> configs cc.RWLockGroup[<span class="token type">string</span>]
+configs.RLock(<span class="token string">"db"</span>); readConfig(); configs.RUnlock(<span class="token string">"db"</span>)`
                 }
             ]
         },
@@ -171,23 +250,43 @@ const docContent = {
             title: "Gate & Latch: Flow Control",
             desc: "Simplified state management for goroutine coordination.",
             analogy: "<b>The Toll Booth:</b> <br>A <code>Gate</code> can be opened (all pass), closed (stop here), or pulsed (one batch passes). A <code>Latch</code> is a one-way exit gate; once it's kicked open, it stays open forever.",
-            main: "Built on Go's internal <code>runtime_semacquire</code>, these tools allow zero-allocation signaling. Use a <code>Gate</code> for pause/resume logic and a <code>Latch</code> for initialization or shutdown signals.",
+            main: "<code>Gate</code> provides reusable Open/Close/Pulse coordination with <code>IsOpen()</code> fast-path check. <code>Latch</code> is for one-shot initialization signals—once Open(), it stays open forever. Both are built on Go's internal <code>runtime_semacquire</code> for zero-allocation signaling.",
             principles: [
                 { title: "Double-Buffered Sema", desc: "Uses two separate semaphores to prevent 'signal stealing' during rapid state transitions." },
-                { title: "Generation Counting", desc: "Ensures that calls to Pulse() only wake up waiters that were present at the moment of the pulse." }
+                { title: "Generation Counting", desc: "Ensures that calls to Pulse() only wake up waiters that were present at the moment of the pulse." },
+                { title: "Fast-Path Check", desc: "IsOpen() provides a non-blocking state query for hot paths that need to avoid blocking." }
             ],
             examples: [
                 {
-                    title: "Flash Signaling (Pulse)",
-                    code: `<span class="token keyword">var</span> g cc.Gate\n\n<span class="token comment">// Pulse wakes current waiters but stays Closed for future ones</span>\n<span class="token keyword">go</span> <span class="token keyword">func</span>() {\n    g.Wait()\n    fmt.Println(<span class="token string">"Woken by flash pulse"</span>)\n}()\n\ng.Pulse()`
+                    title: "Basic Gate Control (Open/Close)",
+                    code: `<span class="token keyword">var</span> gate cc.Gate
+<span class="token comment">// Coordinator: control worker flow</span>
+gate.Open()  <span class="token comment">// All waiters pass immediately</span>
+<span class="token comment">// ... workers process ...</span>
+gate.Close() <span class="token comment">// Future Wait() calls block</span>
+
+<span class="token comment">// Fast-path check without blocking</span>
+<span class="token keyword">if</span> gate.IsOpen() { doQuickWork() }`
                 },
                 {
-                    title: "One-Way Initialization (Latch)",
-                    code: `<span class="token keyword">var</span> initialized cc.Latch\n\n<span class="token comment">// Once opened, it never closes again</span>\ninitialized.Open()\n\n<span class="token comment">// High-performance fast path check</span>\n<span class="token keyword">if</span> initialized.Wait() {\n    doFastPath()\n}`
+                    title: "Broadcast Without Keeping Open (Pulse)",
+                    code: `<span class="token keyword">var</span> cond cc.Gate
+<span class="token comment">// Pulse: wake ALL current waiters, but stay Closed for future ones</span>
+<span class="token comment">// This is like sync.Cond.Broadcast() but safer</span>
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { cond.Wait(); handleUpdate() }()
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { cond.Wait(); handleUpdate() }()
+cond.Pulse() <span class="token comment">// Both wake up, future Wait() still blocks</span>`
                 },
                 {
-                    title: "Flow Control (Pause/Resume)",
-                    code: `<span class="token comment">// Reusable control loop</span>\n<span class="token keyword">for</span> {\n    g.Wait() <span class="token comment">// Blocks if gate is Closed</span>\n    task := queue.Pop()\n    process(task)\n    <span class="token keyword">if</span> queue.Empty() { g.Close() }\n}`
+                    title: "One-Shot Initialization (Latch)",
+                    code: `<span class="token keyword">var</span> ready cc.Latch
+<span class="token comment">// Worker goroutines wait for initialization</span>
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { ready.Wait(); useConfig() }()
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { ready.Wait(); useConfig() }()
+
+loadConfig()
+ready.Open() <span class="token comment">// All waiters released, future Wait() returns immediately</span>
+<span class="token comment">// Open() is idempotent—safe to call multiple times</span>`
                 }
             ]
         },
@@ -245,24 +344,55 @@ const docContent = {
             title: "Map 与 FlatMap：存储大师",
             desc: "Concurrent Core 提供了两种针对不同性能曲线的 Map 实现。",
             analogy: "<b>超市 vs 精品仓库：</b> <br>标准 <code>Map</code> 就像超市货架（桶），多人在不同通道结账。<code>FlatMap</code> 则像一个精品仓库，货物紧密排列（缓存线对齐），以最大限度缩短搬运工（CPU）的走动距离。",
-            main: "标准 <code>Map</code> 是 <code>sync.Map</code> 的高性能掉入式替代品。基准测试显示，在保持完全兼容的同时，它能提供 <b>10 倍的吞吐量</b> 和 <b>1/20 的 P999 延迟</b>，且 <b>内存占用仅为 50%</b>。<code>FlatMap</code> 则通过对齐缓存行的扁平存储，在延迟敏感的极致场景中表现更为卓越。",
+            main: "<code>cc.Map</code> 是 <code>sync.Map</code> 的掉入式替代品，提供 <b>10 倍吞吐量</b>、<b>1/20 P999 延迟</b>、<b>50% 内存占用</b>。cc.Map 独有功能: <code>Compute()</code> 原子读-改-写、<code>Entries()</code> 安全迭代并更新/删除、<code>Rebuild()</code> 批量原子操作。<code>FlatMap</code> 提供缓存线对齐的内联存储，适用于延迟敏感的极致场景。",
             principles: [
-                { title: "Seqlock (序列锁)", desc: "读取者通过双重检查版本号来确保一致性，完全避免了笨重的原子写屏障。" },
-                { title: "伪共享消除", desc: "数据结构通过填充（Padding）与 CPU 缓存线对齐，防止多个核心争抢同一行内存。" },
-                { title: "极简内存布局", desc: "通过减少指针嵌套和扁平化布局，内存开销降低 50%，极大缓解 GC 压力。" }
+                { title: "分片架构", desc: "Map 使用细粒度桶分片，每个桶配备独立 SeqLock，实现海量并发读取而无全局竞争。" },
+                { title: "Seqlock (序列锁)", desc: "读取者双重检查版本号确保一致性，完全避免笨重的原子写屏障。" },
+                { title: "伪共享消除", desc: "结构体通过填充与 CPU 缓存线（64/128 字节）对齐，防止核心争抢同一内存行。" }
             ],
             examples: [
                 {
-                    title: "原子级迭代 (Entries)",
-                    code: `<span class="token comment">// 在高性能迭代中安全地更新或删除条目</span>\n<span class="token keyword">for</span> e := <span class="token keyword">range</span> m.Entries() {\n    <span class="token keyword">if</span> e.Key() % <span class="token number">2</span> == <span class="token number">0</span> {\n        e.Update(e.Value() + <span class="token number">1</span>)\n    } <span class="token keyword">else</span> {\n        e.Delete()\n    }\n}`
+                    title: "原子读-改-写 (Compute)",
+                    code: `<span class="token keyword">var</span> m cc.Map[<span class="token type">string</span>, <span class="token type">int</span>]
+<span class="token comment">// Compute: 原子递增，避免 Load+Store 竞态</span>
+m.Compute(<span class="token string">"counter"</span>, <span class="token keyword">func</span>(e *cc.MapEntry[<span class="token type">string</span>, <span class="token type">int</span>]) {
+    <span class="token keyword">if</span> e.Loaded() {
+        e.Update(e.Value() + <span class="token number">1</span>)
+    } <span class="token keyword">else</span> {
+        e.Update(<span class="token number">1</span>) <span class="token comment">// 不存在则初始化</span>
+    }
+})`
                 },
                 {
-                    title: "批量原子更新 (Rebuild)",
-                    code: `<span class="token comment">// 作为一个批处理原子性地执行多个操作</span>\nm.Rebuild(<span class="token keyword">func</span>(m *cc.MapRebuild[<span class="token type">string</span>, <span class="token type">int</span>]) {\n    m.Store(<span class="token string">"new_task"</span>, <span class="token number">1</span>)\n    m.Delete(<span class="token string">"expired"</span>)\n    m.Compute(<span class="token string">"counter"</span>, <span class="token keyword">func</span>(e *cc.MapEntry[<span class="token type">string</span>, <span class="token type">int</span>]) {\n        e.Update(e.Value() + <span class="token number">1</span>)\n    })\n})`
+                    title: "安全迭代 (Entries)",
+                    code: `<span class="token comment">// 迭代期间更新或删除——安全且原子</span>
+<span class="token keyword">for</span> e := <span class="token keyword">range</span> m.Entries() {
+    <span class="token keyword">if</span> shouldRemove(e.Key()) {
+        e.Delete()
+    } <span class="token keyword">else</span> {
+        e.Update(transform(e.Value()))
+    }
+}`
                 },
                 {
-                    title: "完全兼容 sync.Map",
-                    code: `<span class="token comment">// 作为标准库 sync.Map 的掉入式替代品</span>\n<span class="token keyword">var</span> m cc.Map[<span class="token type">string</span>, <span class="token type">int</span>]\nm.Store(<span class="token string">"health"</span>, <span class="token number">100</span>)\nval, loaded := m.LoadOrStore(<span class="token string">"health"</span>, <span class="token number">200</span>)`
+                    title: "批量原子操作 (Rebuild)",
+                    code: `<span class="token comment">// 多个操作作为单一原子事务</span>
+m.Rebuild(<span class="token keyword">func</span>(r *cc.MapRebuild[<span class="token type">string</span>, <span class="token type">int</span>]) {
+    r.Store(<span class="token string">"new"</span>, <span class="token number">1</span>)
+    r.Delete(<span class="token string">"old"</span>)
+    r.Compute(<span class="token string">"counter"</span>, <span class="token keyword">func</span>(e *cc.MapEntry[<span class="token type">string</span>, <span class="token type">int</span>]) {
+        e.Update(e.Value() + <span class="token number">1</span>)
+    })
+})`
+                },
+                {
+                    title: "sync.Map 掉入式替代",
+                    code: `<span class="token comment">// 100% API 兼容 sync.Map</span>
+<span class="token keyword">var</span> m cc.Map[<span class="token type">string</span>, <span class="token type">int</span>]
+m.Store(<span class="token string">"key"</span>, <span class="token number">100</span>)
+val, ok := m.Load(<span class="token string">"key"</span>)
+val, loaded := m.LoadOrStore(<span class="token string">"key"</span>, <span class="token number">200</span>)
+m.Delete(<span class="token string">"key"</span>)`
                 }
             ]
         },
@@ -270,7 +400,7 @@ const docContent = {
             title: "高级并发原语",
             desc: "一组专为复杂调度和性能关键路径设计的精密原语。",
             analogy: "<b>交响乐指挥：</b> <br>如果基础锁是简单的红绿灯，这些原语就是交响乐团的指挥，确保各个声部协同工作，优雅处理异常，并优化资源分配的绝对公平性。",
-            main: "该部分涵盖了专为复杂协作设计的高级工具。<code>OnceGroup</code> 处理请求合并，<code>WaitGroup</code> 追踪任务生命周期，<code>LockGroups</code> 则为任意 Key 提供细粒度的动态加锁支持。",
+            main: "该部分涵盖了专为复杂协作设计的高级工具。<code>OnceGroup</code> 处理请求合并，自动传播 panic/Goexit。<code>WaitGroup</code> 是<b>完全可重用</b>的——与 sync.WaitGroup 不同，前一批任务完成后可立即启动新批次，无需等待所有 Wait() 调用返回。<code>FairSemaphore</code> 保证严格 FIFO 许可获取。<code>Epoch</code> 提供基于版本的协调，无惊群效应。<code>LockGroups</code> 提供动态、自动清理的 Key 级锁。",
             principles: [
                 { title: "异常自动传播", desc: "OnceGroup 能将 panic 和 Goexit 正确传播给所有等待者，这是许多 singleflight 实现无法企及的稳健性。" },
                 { title: "动态锁清理", desc: "TicketLockGroup 和 RWLockGroup 在没有协程等待时会自动从内存中释放未使用的锁对象。" },
@@ -278,24 +408,70 @@ const docContent = {
             ],
             examples: [
                 {
-                    title: "智能单飞去重 (OnceGroup)",
-                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, Result]\n\n<span class="token comment">// 后续调用将等待第一个任务并共享结果</span>\nv, err, shared := g.Do(<span class="token string">"api_key"</span>, <span class="token keyword">func</span>() (Result, <span class="token type">error</span>) {\n    <span class="token keyword">return</span> fetchFromDB()\n})`
+                    title: "可复用 WaitGroup (关键区别)",
+                    code: `<span class="token keyword">var</span> wg cc.WaitGroup
+<span class="token comment">// 与 sync.WaitGroup 不同: 批次完成后可立即复用</span>
+<span class="token keyword">for</span> batch := <span class="token keyword">range</span> batches {
+    <span class="token keyword">for</span> _, task := <span class="token keyword">range</span> batch {
+        wg.Go(<span class="token keyword">func</span>() { process(task) })
+    }
+    wg.Wait() <span class="token comment">// 立即可用于下一批次！</span>
+}
+<span class="token comment">// 内省: Count() 返回活跃任务数，Waiters() 返回阻塞的 Wait() 调用数</span>
+fmt.Printf(<span class="token string">"Tasks: %d, Waiters: %d"</span>, wg.Count(), wg.Waiters())`
                 },
                 {
-                    title: "现代任务追踪 (WaitGroup)",
-                    code: `<span class="token keyword">var</span> wg cc.WaitGroup\n\n<span class="token comment">// 直接启动受管协程</span>\nwg.Go(<span class="token keyword">func</span>() { doWork() })\n\n<span class="token comment">// 非阻塞检查是否完成</span>\n<span class="token keyword">if</span> wg.TryWait() { finish() }`
+                    title: "异步单飞 (DoChan)",
+                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, *User]
+<span class="token comment">// DoChan: 立即返回通道，异步获取结果</span>
+ch := g.DoChan(<span class="token string">"user-123"</span>, <span class="token keyword">func</span>() (*User, <span class="token type">error</span>) {
+    <span class="token keyword">return</span> fetchUser(<span class="token string">"123"</span>)
+})
+doOtherWork() <span class="token comment">// 加载期间继续其他工作...</span>
+result := <-ch <span class="token comment">// 结果就绪时接收</span>
+user, err, shared := result.Val, result.Err, result.Shared`
                 },
                 {
-                    title: "无饥饿公平信号量",
-                    code: `<span class="token comment">// 即使在高竞争下也保证严格的 FIFO</span>\nsem := cc.NewFairSemaphore(<span class="token number">5</span>)\nsem.Acquire(<span class="token number">1</span>)\n<span class="token keyword">defer</span> sem.Release(<span class="token number">1</span>)`
+                    title: "缓存失效 (Forget)",
+                    code: `<span class="token keyword">var</span> cache cc.OnceGroup[<span class="token type">string</span>, *Data]
+data, err, _ := cache.Do(<span class="token string">"key"</span>, loadFromDB)
+<span class="token comment">// Forget: 使缓存失效，下次调用将重新执行函数</span>
+cache.Forget(<span class="token string">"key"</span>)
+<span class="token comment">// ForgetUnshared: 仅在没有其他等待者时失效</span>
+<span class="token keyword">if</span> cache.ForgetUnshared(<span class="token string">"key"</span>) { log.Println(<span class="token string">"已移除"</span>) }`
                 },
                 {
-                    title: "动态 Key 级锁 (TicketLockGroup)",
-                    code: `<span class="token comment">// 对任意字符串进行加锁，无需预分配</span>\n<span class="token keyword">var</span> users cc.TicketLockGroup[<span class="token type">string</span>]\nusers.Lock(<span class="token string">"user-123"</span>)\n<span class="token keyword">defer</span> users.Unlock(<span class="token string">"user-123"</span>)`
+                    title: "版本协调 (Epoch)",
+                    code: `<span class="token keyword">var</span> epoch cc.Epoch
+<span class="token comment">// 等待者: 阻塞直到版本达到目标 (无惊群效应!)</span>
+<span class="token keyword">go</span> <span class="token keyword">func</span>() {
+    epoch.WaitAtLeast(<span class="token number">5</span>)
+    fmt.Println(<span class="token string">"版本 5 已到达!"</span>)
+}()
+epoch.Add(<span class="token number">5</span>) <span class="token comment">// 发布者: 推进版本，仅唤醒相关等待者</span>`
                 },
                 {
-                    title: "Key 级读写锁 (RWLockGroup)",
-                    code: `<span class="token comment">// 对任意资源提供读写分离锁支持</span>\n<span class="token keyword">var</span> resources cc.RWLockGroup[<span class="token type">int</span>]\nresources.RLock(<span class="token number">42</span>)\n<span class="token keyword">defer</span> resources.RUnlock(<span class="token number">42</span>)`
+                    title: "非阻塞 TryAcquire",
+                    code: `sem := cc.NewFairSemaphore(<span class="token number">5</span>)
+<span class="token comment">// TryAcquire: 非阻塞，许可不可用时立即返回 false</span>
+<span class="token keyword">if</span> sem.TryAcquire(<span class="token number">1</span>) {
+    <span class="token keyword">defer</span> sem.Release(<span class="token number">1</span>)
+    doWork()
+} <span class="token keyword">else</span> {
+    queueForLater() <span class="token comment">// 许可不可用时的回退逻辑</span>
+}`
+                },
+                {
+                    title: "动态 Key 锁 (自动清理)",
+                    code: `<span class="token keyword">var</span> users cc.TicketLockGroup[<span class="token type">string</span>]
+<span class="token comment">// 对任意 Key 加锁——无需预分配，解锁时自动清理</span>
+users.Lock(<span class="token string">"user-123"</span>)
+updateUser(<span class="token string">"123"</span>)
+users.Unlock(<span class="token string">"user-123"</span>) <span class="token comment">// 锁自动从内存中移除</span>
+
+<span class="token comment">// RWLockGroup 支持共享读</span>
+<span class="token keyword">var</span> configs cc.RWLockGroup[<span class="token type">string</span>]
+configs.RLock(<span class="token string">"db"</span>); readConfig(); configs.RUnlock(<span class="token string">"db"</span>)`
                 }
             ]
         },
@@ -303,23 +479,43 @@ const docContent = {
             title: "Gate 与 Latch: 流量控制",
             desc: "用于协程间协作的简化状态管理。",
             analogy: "<b>收费站：</b> <br><code>Gate</code>（门控）可以打开（全体通过）、关闭（全体拦截）或脉冲（放行一批）。<code>Latch</code>（闩锁）则是一个单向出口，一旦踢开，就永远保持开启状态。",
-            main: "这些工具基于 Go 内部的 <code>runtime_semacquire</code> 构建，实现了零分配信号通知。<code>Gate</code> 适用于暂停/恢复逻辑，<code>Latch</code> 适用于初始化或停机信号。",
+            main: "<code>Gate</code> 提供可复用的 Open/Close/Pulse 协调，带有 <code>IsOpen()</code> 快速路径检查。<code>Latch</code> 用于一次性初始化信号——一旦 Open()，永远保持开启。两者均基于 Go 内部的 <code>runtime_semacquire</code> 构建，实现零分配信号通知。",
             principles: [
-                { title: "双缓冲信号量", desc: "使用两个独立的信号量，防止在状态快速切换时发生“信号冒领”。" },
-                { title: "代际计数 (Generation)", desc: "确保 Pulse() 调用只唤醒在脉冲发生的瞬间确实在等待的协程。" }
+                { title: "双缓冲信号量", desc: "使用两个独立的信号量，防止在状态快速切换时发生'信号冒领'。" },
+                { title: "代际计数", desc: "确保 Pulse() 调用只唤醒在脉冲发生瞬间确实在等待的协程。" },
+                { title: "快速路径检查", desc: "IsOpen() 提供非阻塞的状态查询，适用于热路径避免阻塞。" }
             ],
             examples: [
                 {
-                    title: "快速脉冲信号 (Pulse)",
-                    code: `<span class="token keyword">var</span> g cc.Gate\n\n<span class="token comment">// Pulse 唤醒当前等待者，但对后续协程保持关闭</span>\n<span class="token keyword">go</span> <span class="token keyword">func</span>() {\n    g.Wait()\n    fmt.Println(<span class="token string">"被脉冲信号唤醒"</span>)\n}()\n\ng.Pulse()`
+                    title: "基础 Gate 控制 (Open/Close)",
+                    code: `<span class="token keyword">var</span> gate cc.Gate
+<span class="token comment">// 协调者: 控制工作者流量</span>
+gate.Open()  <span class="token comment">// 所有等待者立即通过</span>
+<span class="token comment">// ... 工作者处理任务 ...</span>
+gate.Close() <span class="token comment">// 后续 Wait() 调用将阻塞</span>
+
+<span class="token comment">// 非阻塞快速路径检查</span>
+<span class="token keyword">if</span> gate.IsOpen() { doQuickWork() }`
                 },
                 {
-                    title: "单次初始化 (Latch)",
-                    code: `<span class="token keyword">var</span> initialized cc.Latch\n\n<span class="token comment">// 一旦开启，永不关闭</span>\ninitialized.Open()\n\n<span class="token comment">// 高性能快路径检查</span>\n<span class="token keyword">if</span> initialized.Wait() {\n    doFastPath()\n}`
+                    title: "广播但不保持开启 (Pulse)",
+                    code: `<span class="token keyword">var</span> cond cc.Gate
+<span class="token comment">// Pulse: 唤醒所有当前等待者，但对后续协程保持关闭</span>
+<span class="token comment">// 类似 sync.Cond.Broadcast() 但更安全</span>
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { cond.Wait(); handleUpdate() }()
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { cond.Wait(); handleUpdate() }()
+cond.Pulse() <span class="token comment">// 两者都被唤醒，后续 Wait() 仍阻塞</span>`
                 },
                 {
-                    title: "流程控制 (暂停/恢复)",
-                    code: `<span class="token comment">// 可复用的控制循环</span>\n<span class="token keyword">for</span> {\n    g.Wait() <span class="token comment">// 如果闸门关闭则阻塞</span>\n    task := queue.Pop()\n    process(task)\n    <span class="token keyword">if</span> queue.Empty() { g.Close() }\n}`
+                    title: "一次性初始化 (Latch)",
+                    code: `<span class="token keyword">var</span> ready cc.Latch
+<span class="token comment">// 工作协程等待初始化完成</span>
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { ready.Wait(); useConfig() }()
+<span class="token keyword">go</span> <span class="token keyword">func</span>() { ready.Wait(); useConfig() }()
+
+loadConfig()
+ready.Open() <span class="token comment">// 所有等待者释放，后续 Wait() 立即返回</span>
+<span class="token comment">// Open() 是幂等的——可安全多次调用</span>`
                 }
             ]
         },
