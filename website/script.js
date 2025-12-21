@@ -306,7 +306,7 @@ ready.Open() <span class="token comment">// All waiters released, future Wait() 
                 },
                 {
                     title: "Cyclic Synchronization (Rally)",
-                    code: `<span class="token comment">// Batch processor waiting for exactly 10 workers</span>\nb := cc.NewRally(<span class="token number">10</span>)\n\n<span class="token keyword">for</span> i := <span class="token number">0</span>; i < <span class="token number">10</span>; i++ {\n    <span class="token keyword">go</span> <span class="token keyword">func</span>() {\n        doPreWork()\n        b.Meet() <span class="token comment">// All wait here for 10th worker</span>\n        doBatchWork()\n    }()\n}`
+                    code: `<span class="token comment">// Batch processor waiting for exactly 10 workers</span>\n<span class="token keyword">var</span> b cc.Rally\n\n<span class="token keyword">for</span> i := <span class="token number">0</span>; i < <span class="token number">10</span>; i++ {\n    <span class="token keyword">go</span> <span class="token keyword">func</span>() {\n        doPreWork()\n        b.Meet(<span class="token number">10</span>) <span class="token comment">// All wait here for 10th worker</span>\n        doBatchWork()\n    }()\n}`
                 },
                 {
                     title: "Multi-Phase Tracking",
@@ -535,7 +535,7 @@ ready.Open() <span class="token comment">// 所有等待者释放，后续 Wait(
                 },
                 {
                     title: "循环同步 (Rally)",
-                    code: `<span class="token comment">// 批处理器等待正好 10 个工作协程</span>\nb := cc.NewRally(<span class="token number">10</span>)\n\n<span class="token keyword">for</span> i := <span class="token number">0</span>; i < <span class="token number">10</span>; i++ {\n    <span class="token keyword">go</span> <span class="token keyword">func</span>() {\n        doPreWork()\n        b.Meet() <span class="token comment">// 所有人都在此等待第 10 个成员</span>\n        doBatchWork()\n    }()\n}`
+                    code: `<span class="token comment">// 批处理器等待正好 10 个工作协程</span>\n<span class="token keyword">var</span> b cc.Rally\n\n<span class="token keyword">for</span> i := <span class="token number">0</span>; i < <span class="token number">10</span>; i++ {\n    <span class="token keyword">go</span> <span class="token keyword">func</span>() {\n        doPreWork()\n        b.Meet(<span class="token number">10</span>) <span class="token comment">// 所有人都在此等待第 10 个成员</span>\n        doBatchWork()\n    }()\n}`
                 },
                 {
                     title: "多阶段追踪",
