@@ -681,27 +681,35 @@ const observerOptions = {
     rootMargin: '0px 0px -100px 0px'
 };
 
+const playPerfAnimation = (container) => {
+    const rows = container.querySelectorAll('.chart-row');
+    rows.forEach((row, index) => {
+        const bar = row.querySelector('.chart-bar.cc');
+        if (!bar) return;
+
+        // Reset
+        row.classList.remove('active');
+        bar.style.transition = 'none';
+        bar.style.width = bar.getAttribute('data-base');
+
+        // Force reflow
+        void bar.offsetWidth;
+
+        // Animate
+        setTimeout(() => {
+            row.classList.add('active');
+            bar.style.transition = 'width 1.5s cubic-bezier(0.19, 1, 0.22, 1)';
+            bar.style.width = bar.getAttribute('data-target');
+        }, 600 + index * 1000);
+    });
+};
+
 const observer = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
         if (entry.isIntersecting) {
             // Start 1s "gaze" timer
             perfAnimationTimer = setTimeout(() => {
-                const rows = entry.target.querySelectorAll('.chart-row');
-                rows.forEach((row, index) => {
-                    const bar = row.querySelector('.chart-bar.cc');
-                    if (!bar) return;
-
-                    // Set base immediately
-                    bar.style.transition = 'none';
-                    bar.style.width = bar.getAttribute('data-base');
-
-                    // Staggered reveal
-                    setTimeout(() => {
-                        row.classList.add('active');
-                        bar.style.transition = 'width 1.5s cubic-bezier(0.19, 1, 0.22, 1)';
-                        bar.style.width = bar.getAttribute('data-target');
-                    }, 50 + index * 500);
-                });
+                playPerfAnimation(entry.target);
                 observer.unobserve(entry.target);
             }, 300);
         } else {
@@ -798,7 +806,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const perfSection = document.getElementById('performance');
-    if (perfSection) observer.observe(perfSection);
+    if (perfSection) {
+        observer.observe(perfSection);
+
+        // Click to replay animation
+        const chartContainer = perfSection.querySelector('.chart-container');
+        if (chartContainer) {
+            chartContainer.style.cursor = 'pointer';
+            chartContainer.title = 'Click to replay animation';
+            chartContainer.addEventListener('click', () => {
+                playPerfAnimation(perfSection);
+            });
+        }
+    }
 });
 
 function toggleMenu() {
