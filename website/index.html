@@ -141,7 +141,7 @@
 m.Store(<span class="token string">"key"</span>, <span class="token string">42</span>)
 
 <span class="token comment">// Atomic Read-Modify-Write</span>
-m.Compute(<span class="token string">"key"</span>, <span class="token keyword">func</span>(e *cc.Entry[<span class="token string">string</span>, <span class="token string">int</span>]) {
+m.Compute(<span class="token string">"key"</span>, <span class="token keyword">func</span>(e *cc.MapEntry[<span class="token string">string</span>, <span class="token string">int</span>]) {
     <span class="token keyword">if</span> e.Loaded() {
         e.Update(e.Value() + <span class="token string">1</span>)
     }

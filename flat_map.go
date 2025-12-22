@@ -324,7 +324,7 @@ func (m *FlatMap[K, V]) Delete(key K) {
 //
 // Callback signature:
 //
-//		fn(e *Entry[K, V])
+//		fn(e *MapEntry[K, V])
 //
 //	  - Use e.Loaded() and e.Value() to inspect the current state
 //	  - Use e.Update(newV) to upsert; Use e.Delete() to remove
@@ -562,7 +562,7 @@ func (m *FlatMap[K, V]) All() func(yield func(K, V) bool) {
 //
 // Callback signature:
 //
-//		fn(e *Entry[K, V]) bool
+//		fn(e *MapEntry[K, V]) bool
 //
 //	  - e.Update(newV): update the entry to newV
 //	  - e.Delete(): delete the entry

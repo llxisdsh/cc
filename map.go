@@ -536,7 +536,7 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 //
 // Callback signature:
 //
-//		fn(e *Entry[K, V])
+//		fn(e *MapEntry[K, V])
 //
 //	  - Use e.Loaded() and e.Value() to inspect the current state
 //	  - Use e.Update(newV) to upsert; Use e.Delete() to remove
@@ -603,7 +603,7 @@ func (m *Map[K, V]) All() func(yield func(K, V) bool) {
 //
 // Callback signature:
 //
-//		fn(e *Entry[K, V]) bool
+//		fn(e *MapEntry[K, V]) bool
 //
 //	  - e.Update(newV): update the entry to newV
 //	  - e.Delete(): delete the entry
@@ -858,9 +858,9 @@ func (m *Map[K, V]) loadEntry_(
 //
 // Callback signature:
 //
-//	fn(e *Entry_[K, V]) (newEntry *Entry_[K, V], ret V, status bool)
+//	fn(e *entry_[K, V]) (newEntry *entry_[K, V], ret V, status bool)
 //
-//	 - e *Entry_[K, V]: current entry (nil if key does not exist).
+//	 - e *entry_[K, V]: current entry (nil if key does not exist).
 //	 - newEntry: Executed only when the key is missing. It returns a new entry.
 //	   If it returns nil, the map will not store any value.
 //	 - ret/status: values returned to the caller of Compute, allowing the

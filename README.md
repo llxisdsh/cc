@@ -105,7 +105,7 @@ func main() {
 
     // 3. Compute (Atomic Read-Modify-Write)
     // Safe, lock-free coordination for complex state changes
-    m.Compute("foo", func(e *cc.Entry[string, int]) {
+    m.Compute("foo", func(e *cc.MapEntry[string, int]) {
         if e.Loaded() {
             // Atomically increment if exists
             e.Update(e.Value() + 1)
@@ -113,6 +113,16 @@ func main() {
             // Initialize if missing
             e.Update(1)
         }
+    })
+
+    // 4. Rebuild (Atomic transaction)
+    // Safe, Multiple operations as single atomic transaction
+    m.Rebuild(func(r *cc.MapRebuild[string, int]) {
+        r.Store("new", 1)
+        r.Delete("old")
+        r.Compute("counter", func(e *cc.MapEntry[string, int]) {
+            e.Update(e.Value() + 1)
+        })
     })
 }
 ```
