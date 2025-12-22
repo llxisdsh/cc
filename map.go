@@ -1192,6 +1192,11 @@ func (m *Map[K, V]) computeRangeEntry_(
 //     It receives a MapRebuild instance.
 //   - blockWriters: Optional. If true, concurrent writers are blocked.
 //     Default is false (allow writers).
+//
+// Notes:
+//   - You must use the `m *MapRebuild[K, V]` parameter passed to `fn` for
+//     processing. Do not call methods on the Map instance directly, as this
+//     may cause deadlocks.
 func (m *Map[K, V]) Rebuild(
 	fn func(m *MapRebuild[K, V]),
 	blockWriters ...bool,

@@ -7062,7 +7062,7 @@ func TestMap_Rebuild_Concurrent(t *testing.T) {
 
 	// Start a long-running rebuild that allows writers
 	go func() {
-		m.Rebuild(func(rm *MapRebuild[int, int]) {
+		m.Rebuild(func(_ *MapRebuild[int, int]) {
 			// Simulate work
 			time.Sleep(100 * time.Millisecond)
 		}, false) // Allow writers
