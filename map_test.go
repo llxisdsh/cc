@@ -174,7 +174,7 @@ func TestMap_BucketOfStructSize(t *testing.T) {
 	t.Logf("entriesPerBucket : %d", entriesPerBucket)
 
 	size := unsafe.Sizeof(counterStripe{})
-	t.Log("CounterStripe_ size:", size)
+	t.Log("CounterStripe size:", size)
 
 	size = unsafe.Sizeof(bucket{})
 	t.Log("bucket size:", size)

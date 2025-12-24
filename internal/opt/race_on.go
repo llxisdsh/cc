@@ -4,6 +4,7 @@ package opt
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 const Race_ = true
@@ -36,4 +37,24 @@ func (s *Sema) Release() {
 	s.count++
 	s.cond.Signal()
 	s.mu.Unlock()
+}
+
+// PLocalSlotLock is a simple spinlock using atomic operations.
+// We cannot use sync.Mutex because it may block (park) the goroutine,
+// and we are holding a P (via runtime_procPin), so we cannot allow parking.
+// This spinlock is sufficient for race detector annotations and short critical sections.
+type PLocalSlotLock struct {
+	state atomic.Int32
+}
+
+func (l *PLocalSlotLock) Lock() {
+	for !l.state.CompareAndSwap(0, 1) {
+		// Busy wait. We cannot use runtime.Gosched() safely here while pinned.
+		// Since PLocal contention is only expected from ForEach (rare),
+		// this should be acceptable.
+	}
+}
+
+func (l *PLocalSlotLock) Unlock() {
+	l.state.Store(0)
 }

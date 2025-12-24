@@ -23,13 +23,12 @@ State-of-the-art concurrent map implementations, streamlined from [**llxisdsh/pb
 
 > **Note**: These components retain the core high-performance logic of `llxisdsh/pb` but are packaged here for lightweight integration. For comprehensive benchmarks and advanced architectural details, please refer to the [upstream repository](https://github.com/llxisdsh/pb).
 
-### ⚡ OnceGroup
+### ⚡ PLocal & OnceGroup
 
-Generic, high-performance duplicate suppression (singleflight).
+Generic, high-performance concurrency tools.
 
-- **Generic**: `OnceGroup[K comparable, V any]`.
-- **Robust**: Preserves `panic` and `Goexit` semantics (unlike `x/sync/singleflight`).
-- **Fast**: ~20× faster than `singleflight` for same-key operations with near-zero allocations.
+- **`PLocal[T]`**: Processor-local storage. Shards data by P (GOMAXPROCS) to minimize lock contention.
+- **`OnceGroup[K, V]`**: Coalesces duplicate requests (singleflight). ~20× faster than `singleflight` with panic propagation.
 
 ### 🔒 Synchronization Primitives
 
@@ -125,6 +124,24 @@ func main() {
         })
     })
 }
+```
+
+### PLocal (Processor-Local Storage)
+
+```go
+// 1. Scalable Counter (PLocalCounter)
+var c cc.PLocalCounter
+// High throughput: Writes are sharded by P, avoiding global lock contention
+c.Add(1)         // Scalable: No global lock
+sum := c.Value() // Aggregates across all Ps
+
+// 2. Generic PLocal
+var p cc.PLocal[*bytes.Buffer]
+// Run fn pinned to current P with local shard
+p.With(func(buf **bytes.Buffer) {
+    if *buf == nil { *buf = new(bytes.Buffer) }
+    (*buf).WriteString("data")
+})
 ```
 
 ### OnceGroup

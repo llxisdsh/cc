@@ -75,6 +75,12 @@
                     fine-grained write locking, and cache-sensitive storage.</p>
             </div>
             <div class="card glass">
+                <div class="card-icon">⚙️</div>
+                <h3 data-i18n="features.plocal.title">PLocal Storage</h3>
+                <p data-i18n="features.plocal.desc">Processor-local storage (PLS) that shards data by GOMAXPROCS to
+                    eliminate lock contention in high-concurrency scenarios.</p>
+            </div>
+            <div class="card glass">
                 <div class="card-icon">⚡</div>
                 <h3 data-i18n="features.once.title">OnceGroup</h3>
                 <p data-i18n="features.once.desc">Generic, high-performance duplicate suppression. ~20× faster than
@@ -122,6 +128,7 @@
             <div class="gallery-item">
                 <h4 data-i18n="primitives.specialized">Specialized</h4>
                 <ul>
+                    <li><strong>PLocal</strong> - <span data-i18n="gallery.plocal">Per-processor storage</span></li>
                     <li><strong>FairSemaphore</strong> - <span data-i18n="gallery.sem">FIFO permits</span></li>
                     <li><strong>Epoch</strong> - <span data-i18n="gallery.epoch">Version gates</span></li>
                     <li><strong>SeqLock</strong> - <span data-i18n="gallery.seqlock">Wait-free optimistic-read</span>
@@ -203,6 +210,7 @@ m.Compute(<span class="token string">"key"</span>, <span class="token keyword">f
                 <div class="doc-nav" id="doc-nav">
                     <button class="doc-btn active" onclick="showDoc('map')" data-i18n="doc.nav.map">Map &
                         FlatMap</button>
+                    <button class="doc-btn" onclick="showDoc('plocal')" data-i18n="doc.nav.plocal">PLocal</button>
                     <button class="doc-btn" onclick="showDoc('gate')" data-i18n="doc.nav.gate">Gate & Latch</button>
                     <button class="doc-btn" onclick="showDoc('phaser')" data-i18n="doc.nav.phaser">Phaser &
                         Rally</button>

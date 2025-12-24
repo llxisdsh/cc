@@ -14,6 +14,8 @@ const translations = {
         "features.once.desc": "Orchestrate complex tasks with OnceGroup, WaitGroup, and Fair Semaphores for peak efficiency.",
         "features.locks.title": "Advanced Primitives",
         "features.locks.desc": "Latch, Gate, Rally, Phaser, Epoch, and more. Atomic coordination tools built directly on runtime semaphores.",
+        "features.plocal.title": "PLocal Storage",
+        "features.plocal.desc": "Processor-local storage (PLS) that shards data by GOMAXPROCS to eliminate lock contention in high-concurrency scenarios.",
         "primitives.title": "Synchronization Gallery",
         "primitives.subtitle": "A rich set of primitives for every concurrency pattern.",
         "primitives.coordination": "Coordination",
@@ -27,6 +29,7 @@ const translations = {
         "doc.nav.gate": "Gate & Latch",
         "doc.nav.phaser": "Phaser & Rally",
         "doc.nav.locks": "Basic Locks",
+        "doc.nav.plocal": "PLocal",
         "doc.nav.advanced": "Advanced Primitives",
         "primitives.specialized": "Specialized",
         "gallery.latch": "One-shot signal",
@@ -38,6 +41,7 @@ const translations = {
         "gallery.once": "Smart singleflight",
         "gallery.wg": "Reusable tracker",
         "gallery.lg": "Dynamic key-locks",
+        "gallery.plocal": "Per-processor storage",
         "gallery.sem": "FIFO permits",
         "gallery.epoch": "Version gates",
         "gallery.seqlock": "Wait-free optimistic-read",
@@ -67,6 +71,8 @@ const translations = {
         "features.once.desc": "利用 OnceGroup、WaitGroup 和公平信号量协调复杂任务，实现极致的协作效率。",
         "features.locks.title": "高级并发原语",
         "features.locks.desc": "包含 Latch, Gate, Rally, Phaser, Epoch 等。基于 Go 运行时信号量的原子级协作工具。",
+        "features.plocal.title": "PLocal 处理器本地存储",
+        "features.plocal.desc": "按处理器核心 (P) 分片存储数据，彻底消除高并发场景下的全局锁竞争。",
         "primitives.title": "并发原语画廊",
         "primitives.subtitle": "为各种并发模式提供丰富的原语支持。",
         "primitives.coordination": "协同交互",
@@ -80,6 +86,7 @@ const translations = {
         "doc.nav.gate": "门控 Gate/Latch",
         "doc.nav.phaser": "分层同步 Phaser/Rally",
         "doc.nav.locks": "基础轻量锁",
+        "doc.nav.plocal": "PLocal 本地存储",
         "doc.nav.advanced": "高级并发原语",
         "primitives.specialized": "专家级组件",
         "gallery.latch": "单次触发信号",
@@ -91,6 +98,7 @@ const translations = {
         "gallery.once": "智能单飞去重",
         "gallery.wg": "可复用任务追踪",
         "gallery.lg": "动态 Key 级锁",
+        "gallery.plocal": "处理器本地存储",
         "gallery.sem": "公平信号量",
         "gallery.epoch": "分代版本栅栏",
         "gallery.seqlock": "免等待乐观读锁",
@@ -162,6 +170,36 @@ m.Store(<span class="token string">"key"</span>, <span class="token number">100<
 val, ok := m.Load(<span class="token string">"key"</span>)
 val, loaded := m.LoadOrStore(<span class="token string">"key"</span>, <span class="token number">200</span>)
 m.Delete(<span class="token string">"key"</span>)`
+                }
+            ]
+        },
+        plocal: {
+            title: "PLocal: Scaling with Cores",
+            desc: "Per-processor storage for extreme scalability on multi-core systems.",
+            analogy: "<b>The Private Workbench:</b> <br>Instead of all workers sharing one big tool bench (Global Lock) and waiting in line, each worker has their own private workbench (PLocal). They work independently and only combine results at the end.",
+            main: "<code>PLocal</code> creates a shard of data for each logical processor (P) in the Go runtime. When you access it via <code>With(fn)</code>, your goroutine is pinned to the current P, ensuring exclusive access to that P's shard without a global lock. <code>PLocalCounter</code> is a specialized implementation for high-throughput counting.",
+            principles: [
+                { title: "P-Sharding", desc: "Data is split into GOMAXPROCS shards. Access is local to the processor executing the code." },
+                { title: "Runtime Pinning", desc: "Uses runtime_procPin to prevent the goroutine from migrating to another processor during execution." },
+                { title: "False Sharing Prevention", desc: "Shards are padded to cache lines to prevent cache coherency traffic between cores." }
+            ],
+            examples: [
+                {
+                    title: "Scalable Counter (PLocalCounter)",
+                    code: `<span class="token keyword">var</span> c cc.PLocalCounter
+<span class="token comment">// Add is lock-free relative to other processors</span>
+c.Add(<span class="token number">1</span>)
+<span class="token comment">// Aggregates across all processors when read</span>
+sum := c.Value()`
+                },
+                {
+                    title: "Generic PLocal Usage",
+                    code: `<span class="token keyword">var</span> p cc.PLocal[*bytes.Buffer]
+<span class="token comment">// Run fn pinned to current P with local shard</span>
+p.With(<span class="token keyword">func</span>(buf **bytes.Buffer) {
+    <span class="token keyword">if</span> *buf == nil { *buf = <span class="token keyword">new</span>(bytes.Buffer) }
+    (*buf).WriteString(<span class="token string">"data"</span>)
+})`
                 }
             ]
         },
@@ -396,6 +434,36 @@ m.Delete(<span class="token string">"key"</span>)`
                 }
             ]
         },
+        plocal: {
+            title: "PLocal: 随核心数线性扩展",
+            desc: "为多核系统设计的每处理器独立存储，实现极致的水平扩展能力。",
+            analogy: "<b>私人工作台：</b> <br>传统的全局锁就像所有工人都挤在一个大工作台上工作，必须排队等待。PLocal 就像给每个工人分配了独立的私人工作台，大家各自干活，互不干扰，最后再汇总结果。",
+            main: "<code>PLocal</code> 为 Go 运行时的每个逻辑处理器 (P) 创建一个数据分片。当你通过 <code>With(fn)</code> 访问时，当前 Goroutine 会被固定（Pin）在当前的 P 上，从而无需全局锁即可安全访问该分片。<code>PLocalCounter</code> 是专为高吞吐计数设计的特化实现。",
+            principles: [
+                { title: "P 级分片", desc: "数据按 GOMAXPROCS 分片，访问仅限于当前执行代码的处理器。" },
+                { title: "运行时 Pinning", desc: "使用 runtime_procPin 防止 Goroutine 在执行期间迁移到其他处理器。" },
+                { title: "伪共享消除", desc: "结构体通过填充与 CPU 缓存线对齐，防止核心间因争抢同一缓存行而产生的性能损耗。" }
+            ],
+            examples: [
+                {
+                    title: "高扩展计数器 (PLocalCounter)",
+                    code: `<span class="token keyword">var</span> c cc.PLocalCounter
+<span class="token comment">// Add 相对于其他处理器是无锁的</span>
+c.Add(<span class="token number">1</span>)
+<span class="token comment">// 读取时聚合所有处理器的值</span>
+sum := c.Value()`
+                },
+                {
+                    title: "通用 PLocal 用法",
+                    code: `<span class="token keyword">var</span> p cc.PLocal[*bytes.Buffer]
+<span class="token comment">// 在当前 P 上运行 fn，使用本地分片</span>
+p.With(<span class="token keyword">func</span>(buf **bytes.Buffer) {
+    <span class="token keyword">if</span> *buf == nil { *buf = <span class="token keyword">new</span>(bytes.Buffer) }
+    (*buf).WriteString(<span class="token string">"data"</span>)
+})`
+                }
+            ]
+        },
         advanced: {
             title: "高级并发原语",
             desc: "一组专为复杂调度和性能关键路径设计的精密原语。",
@@ -572,7 +640,7 @@ ready.Open() <span class="token comment">// 所有等待者释放，后续 Wait(
 
 let currentLang = 'en';
 
-const docOrder = ['map', 'gate', 'phaser', 'locks', 'advanced'];
+const docOrder = ['map', 'plocal', 'gate', 'phaser', 'locks', 'advanced'];
 
 function showDoc(type) {
     const container = document.getElementById('doc-container');
