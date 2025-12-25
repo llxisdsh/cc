@@ -910,7 +910,7 @@ function toggleMenu() {
     menuToggle.classList.toggle('active');
 
     // Prevent scrolling when menu is open
-    document.body.style.overflow = navLinks.classList.contains('active') ? 'hidden' : 'auto';
+    document.body.style.overflow = navLinks.classList.contains('active') ? 'hidden' : '';
 }
 
 function updateLanguageToggle() {
