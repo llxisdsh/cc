@@ -463,12 +463,23 @@ c.Add(<span class="token number">1</span>)
 sum := c.Value()`
                 },
                 {
-                    title: "通用 PLocal 用法",
-                    code: `<span class="token keyword">var</span> p cc.PLocal[*bytes.Buffer]
-<span class="token comment">// 在当前 P 上运行 fn，使用本地分片</span>
-p.With(<span class="token keyword">func</span>(buf **bytes.Buffer) {
-    <span class="token keyword">if</span> *buf == nil { *buf = <span class="token keyword">new</span>(bytes.Buffer) }
-    (*buf).WriteString(<span class="token string">"data"</span>)
+                    title: "安全聚合 (With & ForEach)",
+                    code: `<span class="token comment">// 使用 atomic 避免聚合时的竞态问题</span>
+<span class="token keyword">type</span> Stats <span class="token keyword">struct</span> {
+    Requests atomic.Int64
+}
+
+<span class="token keyword">var</span> p = cc.NewPLocal(<span class="token keyword">func</span>() *Stats { <span class="token keyword">return</span> <span class="token keyword">new</span>(Stats) })
+
+<span class="token comment">// 写入: 固定在当前 P，使用 atomic 以兼容并发的 ForEach</span>
+p.With(<span class="token keyword">func</span>(s *Stats) {
+    s.Requests.Add(<span class="token number">1</span>)
+})
+
+<span class="token comment">// 聚合: 遍历所有 P 的分片并求和</span>
+<span class="token keyword">var</span> total <span class="token type">int64</span>
+p.ForEach(<span class="token keyword">func</span>(s *Stats) {
+    total += s.Requests.Load()
 })`
                 }
             ]
