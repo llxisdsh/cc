@@ -193,21 +193,23 @@ c.Add(<span class="token number">1</span>)
 sum := c.Value()`
                 },
                 {
-                    title: "Generic PLocal Usage (With & ForEach)",
-                    code: `<span class="token keyword">type</span> Stats <span class="token keyword">struct</span> {
+                    title: "Safe Aggregation (With & ForEach)",
+                    code: `<span class="token comment">// Use atomic types to avoid races during aggregation</span>
+<span class="token keyword">type</span> Stats <span class="token keyword">struct</span> {
     Requests atomic.Int64
 }
-<span class="token keyword">var</span> p = cc.NewPLocal(<span class="token keyword">func</span>() *Stats { <span class="token keyword">return</span> &Stats{} })
 
-<span class="token comment">// Concurrent Access: Safe to modify without locking</span>
+<span class="token keyword">var</span> p = cc.NewPLocal(<span class="token keyword">func</span>() *Stats { <span class="token keyword">return</span> <span class="token keyword">new</span>(Stats) })
+
+<span class="token comment">// Write: Pinned to P, atomic for safe concurrency with ForEach</span>
 p.With(<span class="token keyword">func</span>(s *Stats) {
     s.Requests.Add(<span class="token number">1</span>)
 })
 
-<span class="token comment">// Aggregation: Safe to read while others are writing</span>
-<span class="token keyword">var</span> totalReq <span class="token type">int64</span>
+<span class="token comment">// Aggregate: Iterate all shards safely</span>
+<span class="token keyword">var</span> total <span class="token type">int64</span>
 p.ForEach(<span class="token keyword">func</span>(s *Stats) {
-    totalReq += s.Requests.Load()
+    total += s.Requests.Load()
 })`
                 }
             ]
