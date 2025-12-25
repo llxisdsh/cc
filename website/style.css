@@ -36,6 +36,7 @@ body {
     line-height: 1.6;
     width: 100%;
     min-height: 100vh;
+    overflow-x: clip;
 }
 
 .container {
@@ -842,6 +843,20 @@ pre {
 @media (max-width: 768px) {
     .menu-toggle {
         display: flex;
+        position: absolute;
+        /* Absolute within nav-content, preventing it from being pushed out */
+        right: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 102;
+    }
+
+    .logo {
+        max-width: calc(100% - 60px);
+        /* Prevent logo from overlapping menu button */
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
     }
 
     .nav-links {
