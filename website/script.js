@@ -754,8 +754,8 @@ window.addEventListener('scroll', () => {
 let perfAnimationTimer = null;
 
 const observerOptions = {
-    threshold: 0.3,
-    rootMargin: '0px 0px -100px 0px'
+    threshold: 0.1, // Trigger as soon as 10% is visible
+    rootMargin: '0px 0px 0px 0px' // No negative margin to trigger earlier
 };
 
 const playPerfAnimation = (container) => {
@@ -777,24 +777,16 @@ const playPerfAnimation = (container) => {
             row.classList.add('active');
             bar.style.transition = 'width 1.5s cubic-bezier(0.19, 1, 0.22, 1)';
             bar.style.width = bar.getAttribute('data-target');
-        }, 600 + index * 1000);
+        }, index * 500); // Reduced initial delay and stagger
     });
 };
 
 const observer = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
         if (entry.isIntersecting) {
-            // Start 1s "gaze" timer
-            perfAnimationTimer = setTimeout(() => {
-                playPerfAnimation(entry.target);
-                observer.unobserve(entry.target);
-            }, 300);
-        } else {
-            // Cancel if scrolled away within 0.3s
-            if (perfAnimationTimer) {
-                clearTimeout(perfAnimationTimer);
-                perfAnimationTimer = null;
-            }
+            // Start immediately without delay
+            playPerfAnimation(entry.target);
+            observer.unobserve(entry.target);
         }
     });
 }, observerOptions);
