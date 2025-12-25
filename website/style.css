@@ -842,6 +842,10 @@ pre {
 @media (max-width: 768px) {
     .menu-toggle {
         display: flex;
+        position: fixed;
+        top: 1.2rem;
+        right: 1.25rem;
+        z-index: 102;
     }
 
     .nav-links {
