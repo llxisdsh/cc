@@ -266,6 +266,7 @@ nav.scrolled {
     height: 2px;
     background: var(--text);
     transition: all 0.3s;
+    /* Menu icon animation duration: 0.3s */
 }
 
 .menu-toggle.active span:nth-child(1) {
@@ -872,13 +873,18 @@ pre {
         flex-direction: column;
         justify-content: center;
         gap: 2.5rem;
-        transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s linear 0.5s;
         z-index: 100;
         padding: 2rem;
+        visibility: hidden;
+        /* Ensure it's ignored by browser layout when closed */
     }
 
     .nav-links.active {
         transform: translateX(0);
+        visibility: visible;
+        transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s linear 0s;
+        /* Show immediately when opening */
     }
 
     .nav-links a {
