@@ -824,6 +824,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedLang = localStorage.getItem('cc_lang');
     if (savedLang && translations[savedLang]) {
         currentLang = savedLang;
+    } else {
+        // Auto-detect language
+        const userLang = navigator.language || navigator.userLanguage;
+        if (userLang && userLang.toLowerCase().startsWith('zh')) {
+            currentLang = 'zh';
+        }
     }
     updateContent();
     showDoc('map'); // Default doc
