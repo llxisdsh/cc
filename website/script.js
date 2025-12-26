@@ -753,6 +753,53 @@ function toggleLanguage() {
     updateLanguageToggle();
 }
 
+function changeTheme(theme) {
+    // 1. Handle CSS File Swapping
+    const themeLink = document.getElementById('theme-stylesheet');
+    if (themeLink) {
+        if (theme === 'rose') {
+            themeLink.href = 'style_rose.css';
+        } else if (theme === 'obsidian') {
+            themeLink.href = 'style_obsidian.css';
+        } else {
+            themeLink.href = 'style.css';
+        }
+    }
+
+    // 2. Handle data-theme attribute (still needed for style.css themes)
+    if (theme === 'github') {
+        document.documentElement.removeAttribute('data-theme');
+    } else {
+        document.documentElement.setAttribute('data-theme', theme);
+    }
+    localStorage.setItem('cc_theme', theme);
+
+    // Update selector if changed programmatically (e.g. on load)
+    const selector = document.getElementById('themeSelect');
+    if (selector) {
+        selector.value = theme;
+    }
+
+    // Update meta theme-color
+    const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+    if (metaThemeColor) {
+        const colors = {
+            'rose': '#0f0505',
+            'obsidian': '#020617',
+            'academic': '#fdfbf7',
+            'swiss': '#ffffff',
+            'github': '#ffffff'
+        };
+        metaThemeColor.content = colors[theme] || '#ffffff';
+    }
+
+    // Close mobile menu if open
+    const navLinks = document.getElementById('navLinks');
+    if (navLinks && navLinks.classList.contains('active')) {
+        toggleMenu();
+    }
+}
+
 // Navbar scroll effect
 window.addEventListener('scroll', () => {
     const nav = document.getElementById('navbar');
@@ -831,6 +878,11 @@ document.addEventListener('DOMContentLoaded', () => {
             currentLang = 'zh';
         }
     }
+
+    // Initialize Theme
+    const savedTheme = localStorage.getItem('cc_theme') || 'github';
+    changeTheme(savedTheme);
+
     updateContent();
     showDoc('map'); // Default doc
 
@@ -934,6 +986,18 @@ document.querySelectorAll('.nav-links a').forEach(link => {
             toggleMenu();
         }
     });
+});
+
+// Close mobile menu when clicking outside
+document.addEventListener('click', (e) => {
+    const navLinks = document.getElementById('navLinks');
+    const menuToggle = document.getElementById('menuToggle');
+
+    if (navLinks && navLinks.classList.contains('active') &&
+        !navLinks.contains(e.target) &&
+        !menuToggle.contains(e.target)) {
+        toggleMenu();
+    }
 });
 
 // Final scroll reset after page fully loads (critical for mobile)

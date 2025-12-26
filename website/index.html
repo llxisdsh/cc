@@ -4,12 +4,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#020617">
+    <meta name="theme-color" content="#ffffff">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Concurrent Core - High Performance Go Concurrency Toolkit</title>
     <meta name="description"
         content="A lightweight, high-performance toolkit for Go designed for critical paths where latency and allocation matter.">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css" id="theme-stylesheet">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
@@ -35,6 +35,14 @@
                 <a href="#features" data-i18n="nav.features">Features</a>
                 <a href="#knowledge" data-i18n="nav.showcase">Explore</a>
                 <a href="https://github.com/llxisdsh/cc" target="_blank" rel="noopener">GitHub</a>
+                <select id="themeSelect" class="theme-select" onchange="changeTheme(this.value)"
+                    aria-label="Theme Selector">
+                    <option value="github">GitHub</option>
+                    <option value="academic">Academic</option>
+                    <option value="swiss">Swiss</option>
+                    <option value="rose">Rose</option>
+                    <option value="obsidian">Obsidian</option>
+                </select>
                 <button class="lang-toggle" onclick="toggleLanguage()">EN / 中文</button>
             </div>
             <button class="menu-toggle" id="menuToggle" onclick="toggleMenu()" title="Toggle Menu">
@@ -179,7 +187,7 @@ m.Compute(<span class="token string">"key"</span>, <span class="token keyword">f
                 </div>
                 <div class="chart-bar-bg">
                     <div class="chart-bar base"></div>
-                    <div class="chart-bar cc contrast" data-base="100%" data-target="10%"></div>
+                    <div class="chart-bar cc contrast" data-base="100%" data-target="5%"></div>
                 </div>
             </div>
             <div class="chart-row">
