@@ -30,9 +30,9 @@ type PLocal[T any] struct {
 	// shards is a pointer to a slice of pointers to slots.
 	// We use pointers to slots so that resizing the slice (and copying pointers)
 	// does not move the underlying slot values, avoiding data races with active users.
-	shards atomic.Pointer[pLocalShards[T]]
-	init   func() T
-	mu     sync.Mutex // protects grow
+	shards   atomic.Pointer[pLocalShards[T]]
+	provider func() T
+	mu       sync.Mutex // protects grow
 }
 
 type pLocalShards[T any] struct {
@@ -47,14 +47,84 @@ type pLocalSlot[T any] struct {
 	_ [opt.CacheLineSize_]byte
 }
 
-// NewPLocal creates a new PLocal instance with the given init function.
-// If init is nil, the zero value of T will be used.
-// The zero value of PLocal is ready to use, so NewPLocal is only needed
-// when a custom init function is required or to pre-allocate shards.
-func NewPLocal[T any](init func() T) *PLocal[T] {
-	p := &PLocal[T]{init: init}
+// NewPLocal creates a new PLocal instance with the given provider function.
+// provider is called ONLY ONCE per P to create the initial value when a new slot
+// is allocated (lazy initialization).
+//
+// DESIGN RATIONALE:
+// We use `func() T` (factory) instead of `func(*T)` (initializer) for ergonomics.
+// We do NOT call this function on every Get() for two reasons:
+//  1. **Performance**: PLocal is designed for ~1ns latency. An extra function call,
+//     even if inlined, adds overhead checking for nil or executing logic.
+//  2. **Statefulness**: Many use cases (counters, RNGs, pre-allocated buffers)
+//     rely on state persisting across calls on the same P. Forcing a reset
+//     would break these patterns.
+//
+// If you need a "clean" value every time, you should reset it explicitly:
+//
+//	val := p.Get()
+//	val.Reset() // User-defined reset logic, strictly explicit and inlinable.
+func NewPLocal[T any](provider func() T) *PLocal[T] {
+	p := &PLocal[T]{provider: provider}
 	p.grow(runtime.GOMAXPROCS(0))
 	return p
+}
+
+// Get returns the pointer to the P-local value.
+//
+// CAUTION: The returned pointer is strictly P-local. The caller MUST ensure
+// that they do not use this pointer after yielding the processor (e.g.,
+// blocking, syscall, channel send/recv, runtime.Gosched, etc.).
+//
+// Performance Note:
+// This method returns the existing slot for the current P. It does NOT assert
+// ownership or reset the value. This enables using PLocal for:
+// - Accumulators (e.g., metrics counters)
+// - Persistent buffers (reusing capacity)
+// - Thread-local RNG states
+//
+// Usage pattern:
+//
+//	val := p.Get()
+//	*val++ // Use immediately
+//
+// If you need to persist usage across yields, use With or copy the value.
+// This method is designed for extreme low-latency scenarios where function
+// call overhead of With is significant.
+func (p *PLocal[T]) Get() *T {
+	shards := p.shards.Load()
+	// Fast path: if shards exist
+	if shards != nil {
+		pid := runtime_procPin()
+		if pid < shards.len {
+			s := *shards.slice.At(pid)
+			runtime_procUnpin()
+			return &s.val
+		}
+		runtime_procUnpin()
+	}
+
+	// Slow path: grow
+	return p.slowGet()
+}
+
+func (p *PLocal[T]) slowGet() *T {
+	for {
+		pid := runtime_procPin()
+		shards := p.shards.Load()
+		if shards == nil {
+			runtime_procUnpin()
+			p.grow(pid + 1)
+			continue
+		}
+		if pid < shards.len {
+			s := *shards.slice.At(pid)
+			runtime_procUnpin()
+			return &s.val
+		}
+		runtime_procUnpin()
+		p.grow(pid + 1)
+	}
 }
 
 // With executes fn with the P-local value for the current P.
@@ -149,8 +219,8 @@ func (p *PLocal[T]) grow(needed int) {
 	newBacking := make([]pLocalSlot[T], addedCount)
 
 	for i := range addedCount {
-		if p.init != nil {
-			newBacking[i].val = p.init()
+		if p.provider != nil {
+			newBacking[i].val = p.provider()
 		}
 		// Calculate the target index in the new shards slice
 		idx := currentLen + i
@@ -222,9 +292,7 @@ func (p *PLocalCounter) Add(delta uintptr) {
 		}
 		runtime_procUnpin()
 	}
-	p.slowWith(func(c *atomic.Uintptr) {
-		(*c).Add(delta)
-	})
+	p.slowGet().Add(delta)
 }
 
 // Value returns the aggregated value of the P-local counter across all shards.
@@ -274,9 +342,7 @@ func (p *PLocalCounter64) Add(delta uint64) {
 		}
 		runtime_procUnpin()
 	}
-	p.slowWith(func(c *atomic.Uint64) {
-		(*c).Add(delta)
-	})
+	p.slowGet().Add(delta)
 }
 
 // Value returns the aggregated value of the P-local counter across all shards.

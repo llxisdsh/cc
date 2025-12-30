@@ -750,11 +750,6 @@ func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) (*flatRebuildState[K, 
 	if !rs.hint.CompareAndSwap(uint32(mapNoHint), uint32(hint)) {
 		return rs, false
 	}
-	rs.chunks.Store(0)
-	rs.process.Store(0)
-	rs.completed.Store(0)
-	rs.newTable = SeqLockSlot[flatTable[K, V]]{}
-	rs.newTableSeq.ClearLocked()
 	rs.gate.Close()
 	return rs, true
 }
@@ -819,6 +814,9 @@ func (m *FlatMap[K, V]) finalizeResize(
 	overCpus := cpus * resizeOverPartition
 	chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
 	rs.chunks.Store(int32(chunks))
+	rs.process.Store(0)
+	rs.completed.Store(0)
+	rs.newTableSeq.ClearLocked()
 	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable,
 		newFlatTable[K, V](newLen, cpus))
 	m.helpCopyAndWait(rs)
@@ -860,6 +858,7 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 		m.copyBucket(&table, start, end, oldLen, baseLen, &newTable)
 		if rs.completed.Add(1) == chunks {
 			SeqLockWriteLocked32(&m.tableSeq, &m.table, newTable)
+			rs.newTableSeq.ClearLocked()
 			m.endRebuild(rs)
 			return
 		}

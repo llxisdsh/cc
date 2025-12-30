@@ -76,6 +76,53 @@ func TestPLocal_ZeroInit(t *testing.T) {
 	})
 }
 
+func TestPLocal_Get_Basic(t *testing.T) {
+	p := NewPLocal(func() int { return 10 })
+
+	val := p.Get()
+	if *val != 10 {
+		t.Errorf("Expected 10, got %d", *val)
+	}
+	*val = 20
+	val2 := p.Get()
+	// Same P
+	if *val2 != 20 {
+		t.Logf("Got %d on second access (might be diff P)", *val2)
+	}
+}
+
+func TestPLocal_Get_Concurrency(t *testing.T) {
+	// Use atomic.Int64 to ensure race detector doesn't complain about data races
+	// if we accidentally share slots (we shouldn't) or if TSan doesn't see synchronization.
+	// Since Get returns a raw pointer and we mutate it, we should use atomic for safety in tests.
+	p := NewPLocal(func() atomic.Int64 { return atomic.Int64{} })
+
+	var wg sync.WaitGroup
+	workers := 100
+	loops := 1000
+
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for range loops {
+				val := p.Get()
+				val.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var total int64
+	p.ForEach(func(v *atomic.Int64) {
+		total += v.Load()
+	})
+
+	if total != int64(workers*loops) {
+		t.Errorf("Expected total %d, got %d", workers*loops, total)
+	}
+}
+
 func TestPLocal_Concurrency(t *testing.T) {
 	// PLocal counter.
 	p := NewPLocal(func() int { return 0 })
@@ -355,6 +402,106 @@ func TestPLocalCounter_Race(t *testing.T) {
 	wg.Wait()
 }
 
+func TestPLocalCounter64_Race(t *testing.T) {
+	c := NewPLocalCounter64()
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+
+	// Workers doing Add (Fast Path)
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					c.Add(1)
+				}
+			}
+		}()
+	}
+
+	// Workers doing With
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					c.With(func(v *atomic.Uint64) {
+						v.Add(1)
+					})
+				}
+			}
+		}()
+	}
+
+	// Workers doing Value
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					_ = c.Value()
+				}
+			}
+		}()
+	}
+
+	// Workers doing ForEach
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					c.ForEach(func(v *atomic.Uint64) {
+						_ = v.Load()
+					})
+				}
+			}
+		}()
+	}
+
+	// Run fixed number of ops
+	for range 10000 {
+		c.Add(1)
+	}
+
+	close(done)
+	wg.Wait()
+}
+
+func TestPLocalCounter64_Basic(t *testing.T) {
+	c := NewPLocalCounter64()
+	c.Add(10)
+	c.Add(20)
+
+	if val := c.Value(); val != 30 {
+		t.Errorf("Expected 30, got %d", val)
+	}
+
+	c.With(func(v *atomic.Uint64) {
+		v.Add(5)
+	})
+
+	if val := c.Value(); val != 35 {
+		t.Errorf("Expected 35, got %d", val)
+	}
+}
+
 // =============================================================================
 // Benchmark
 // =============================================================================
@@ -584,4 +731,25 @@ func TestPerfCounters(t *testing.T) {
 			}
 		})
 	}
+}
+
+func BenchmarkPLocal_Get(b *testing.B) {
+	l := NewPLocal(func() int { return 0 })
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = l.Get()
+		}
+	})
+}
+
+func BenchmarkSyncPool_GetPut(b *testing.B) {
+	p := sync.Pool{
+		New: func() any { return 0 },
+	}
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			v := p.Get()
+			p.Put(v)
+		}
+	})
 }
