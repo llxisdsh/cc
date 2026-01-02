@@ -727,6 +727,53 @@ function showDoc(type) {
       </div>
     </div>
   `;
+
+    // Scroll to the tab navigation area
+    // Use setTimeout to ensure DOM updates (content changes) are fully processed before scrolling
+    setTimeout(() => {
+        const navWrapper = document.getElementById('doc-nav-anchor');
+        if (navWrapper) {
+            const prevSibling = navWrapper.previousElementSibling;
+
+            if (prevSibling) {
+                // STRATEGY: Calculate target based on the previous sibling (Title Container).
+                // The previous sibling is NOT sticky, so its offsetTop is always reliable and stable.
+
+                // 1. Calculate Absolute Bottom of Previous Sibling (Title)
+                let el = prevSibling;
+                let prevAbsoluteTop = 0;
+                while (el) {
+                    prevAbsoluteTop += el.offsetTop;
+                    el = el.offsetParent;
+                }
+                const prevAbsoluteBottom = prevAbsoluteTop + prevSibling.offsetHeight;
+
+                // 2. Calculate Gap (Margin Collapse)
+                // Browsers collapse vertical margins; we need the max, not the sum.
+                const navStyle = window.getComputedStyle(navWrapper);
+                const prevStyle = window.getComputedStyle(prevSibling);
+                const gap = Math.max(parseFloat(navStyle.marginTop) || 0, parseFloat(prevStyle.marginBottom) || 0);
+
+                // 3. Get Sticky Offset (e.g., 60px or 70px)
+                const stickyTop = parseInt(navStyle.top) || 60;
+
+                // 4. Calculate Exact Target Scroll Position
+                // We want the NavWrapper to start exactly at 'stickyTop' from the viewport top.
+                // NavWrapper's natural position is: PrevBottom + Gap.
+                // So: ScrollY + stickyTop = PrevBottom + Gap
+                // Therefore: ScrollY = PrevBottom + Gap - stickyTop
+                const targetScroll = prevAbsoluteBottom + gap - stickyTop + 50;
+
+                // 5. Perform Scroll
+                // We remove all conditional checks (isSticky) to ensure consistent behavior.
+                // Clicking a tab ALWAYS attempts to align the view to the optimal reading position.
+                window.scrollTo({
+                    top: targetScroll,
+                    behavior: 'smooth'
+                });
+            }
+        }
+    }, 10);
 }
 
 
