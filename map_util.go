@@ -448,10 +448,6 @@ func defaultHasher[K comparable, V any]() (
 	default:
 		// for types like integers
 		kType := reflect.TypeFor[K]()
-		if kType == nil {
-			// Handle nil interface types
-			return keyHash, valEqual, false
-		}
 		switch kType.Kind() {
 		case reflect.Uint, reflect.Int, reflect.Uintptr:
 			return hashUintptr, valEqual, true

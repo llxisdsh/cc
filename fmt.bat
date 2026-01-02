@@ -14,12 +14,12 @@ if "%GOBIN%"=="" (
 )
 set "PATH=%GOBIN%;%PATH%"
 
-where gofumpt >nul 2>nul
-if %errorlevel% neq 0 (
-  echo Installing gofumpt...
+::where gofumpt >nul 2>nul
+::if %errorlevel% neq 0 (
+::  echo Installing gofumpt...
   go install mvdan.cc/gofumpt@latest
   if %errorlevel% neq 0 exit /b %errorlevel%
-)
+::)
 
 gofumpt -l -w .
 if %errorlevel% neq 0 exit /b %errorlevel%

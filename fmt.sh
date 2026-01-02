@@ -17,10 +17,10 @@ if [ -z "$GOBIN" ]; then
 fi
 export PATH="$GOBIN:$PATH"
 
-if ! command -v gofumpt &> /dev/null; then
-    echo "Installing gofumpt..."
+#if ! command -v gofumpt &> /dev/null; then
+#    echo "Installing gofumpt..."
     go install mvdan.cc/gofumpt@latest
-fi
+#fi
 
 gofumpt -l -w .
 gofmt -s -w .

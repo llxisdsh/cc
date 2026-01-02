@@ -30,7 +30,7 @@ const (
 	numCPU  = 8
 )
 
-func TestColdStart_pb_FlatMapOf(t *testing.T) {
+func TestColdStart_cc_FlatMap(t *testing.T) {
 	t.Logf("初始化 %d 个实例...", numMaps)
 
 	// 创建100万个map实例的指针数组
@@ -112,7 +112,7 @@ func TestColdStart_pb_FlatMapOf(t *testing.T) {
 	}
 }
 
-func TestColdStart_pb_MapOf(t *testing.T) {
+func TestColdStart_cc_Map(t *testing.T) {
 	t.Logf("初始化 %d 个实例...", numMaps)
 
 	// 创建100万个map实例的指针数组

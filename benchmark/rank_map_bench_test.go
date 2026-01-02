@@ -14,7 +14,6 @@ import (
 	"github.com/alphadose/haxmap"
 	"github.com/fufuok/cmap"
 	"github.com/llxisdsh/cc"
-	"github.com/llxisdsh/pb"
 	csmap "github.com/mhmtszr/concurrent-swiss-map"
 	orcaman_map "github.com/orcaman/concurrent-map/v2"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -34,7 +33,7 @@ func mixRand(i int) int {
 
 // ------------------------------------------------------
 
-func BenchmarkStore_pb_FlatMapOf(b *testing.B) {
+func BenchmarkStore_cc_FlatMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewFlatMap[int, int]()
 	runtime.GC()
@@ -51,7 +50,7 @@ func BenchmarkStore_pb_FlatMapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkLoadOrStore_pb_FlatMapOf(b *testing.B) {
+func BenchmarkLoadOrStore_cc_FlatMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewFlatMap[int, int]()
 	runtime.GC()
@@ -68,7 +67,7 @@ func BenchmarkLoadOrStore_pb_FlatMapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkLoad_pb_FlatMapOf(b *testing.B) {
+func BenchmarkLoad_cc_FlatMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewFlatMap[int, int]()
 	for i := 0; i < countLoad; i++ {
@@ -88,7 +87,7 @@ func BenchmarkLoad_pb_FlatMapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_pb_FlatMapOf(b *testing.B) {
+func BenchmarkMixed_cc_FlatMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewFlatMap[int, int]()
 	for i := 0; i < countLoad; i++ {
@@ -120,7 +119,7 @@ func BenchmarkMixed_pb_FlatMapOf(b *testing.B) {
 
 // ------------------------------------------------------
 
-func BenchmarkStore_pb_MapOf(b *testing.B) {
+func BenchmarkStore_cc_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewMap[int, int]()
 	runtime.GC()
@@ -137,7 +136,7 @@ func BenchmarkStore_pb_MapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkLoadOrStore_pb_MapOf(b *testing.B) {
+func BenchmarkLoadOrStore_cc_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewMap[int, int]()
 	runtime.GC()
@@ -154,7 +153,7 @@ func BenchmarkLoadOrStore_pb_MapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkLoad_pb_MapOf(b *testing.B) {
+func BenchmarkLoad_cc_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewMap[int, int]()
 
@@ -175,7 +174,7 @@ func BenchmarkLoad_pb_MapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_pb_MapOf(b *testing.B) {
+func BenchmarkMixed_cc_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewMap[int, int]()
 	for i := 0; i < countLoad; i++ {
@@ -207,7 +206,7 @@ func BenchmarkMixed_pb_MapOf(b *testing.B) {
 
 // --------------------------------------------------------------
 
-func BenchmarkStore_xsync_MapOf(b *testing.B) {
+func BenchmarkStore_xsync_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := xsync.NewMap[int, int]()
 	runtime.GC()
@@ -224,7 +223,7 @@ func BenchmarkStore_xsync_MapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkLoadOrStore_xsync_MapOf(b *testing.B) {
+func BenchmarkLoadOrStore_xsync_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := xsync.NewMap[int, int]()
 	runtime.GC()
@@ -241,7 +240,7 @@ func BenchmarkLoadOrStore_xsync_MapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkLoad_xsync_MapOf(b *testing.B) {
+func BenchmarkLoad_xsync_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := xsync.NewMap[int, int]()
 	for i := 0; i < countLoad; i++ {
@@ -261,7 +260,7 @@ func BenchmarkLoad_xsync_MapOf(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_xsync_MapOf(b *testing.B) {
+func BenchmarkMixed_xsync_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := xsync.NewMap[int, int]()
 	for i := 0; i < countLoad; i++ {
@@ -1432,7 +1431,7 @@ func (gm *RWLockMap[K, V]) Range(f func(K, V) bool) {
 type RWLockShardedMap[K comparable, V any] struct {
 	shards    []shard[K, V] // 分段锁数组
 	shardMask uintptr       // 分段数量
-	hashFunc  pb.HashFunc
+	hashFunc  cc.HashFunc
 	seed      uintptr
 }
 
@@ -1457,7 +1456,7 @@ func NewRWLockShardedMap[K comparable, V any](
 	return &RWLockShardedMap[K, V]{
 		shards:    shards,
 		shardMask: uintptr(shardCnt) - 1,
-		hashFunc:  pb.GetBuiltInHasher[K](),
+		hashFunc:  cc.GetBuiltInHasher[K](),
 		seed:      uintptr(rand.Uint64()),
 	}
 }

@@ -18,18 +18,11 @@ set "PATH=%GOBIN%;%PATH%"
 
 set "GOLANGCI_LINT=%GOBIN%\\golangci-lint.exe"
 
-if not exist "%GOLANGCI_LINT%" (
-  echo Installing golangci-lint v2...
+::if not exist "%GOLANGCI_LINT%" (
+::  echo Installing golangci-lint v2...
   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
   if %errorlevel% neq 0 exit /b %errorlevel%
-)
-
-"%GOLANGCI_LINT%" version | findstr /C:"version 2." >nul 2>nul
-if %errorlevel% neq 0 (
-  echo Upgrading golangci-lint to v2...
-  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-  if %errorlevel% neq 0 exit /b %errorlevel%
-)
+::)
 
 "%GOLANGCI_LINT%" run ./...
 set res=%errorlevel%

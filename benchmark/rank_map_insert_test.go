@@ -15,22 +15,22 @@ import (
 
 const total = 100_000_000
 
-func TestInsert_pb_FlatMapOf(t *testing.T) {
+func TestInsert_cc_FlatMap(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsert_pb_FlatMapOf(t, total, 1, false, true, true)
+		testInsert_cc_FlatMap(t, total, 1, false, true, true)
 	})
 	t.Run("64 no_pre_size", func(t *testing.T) {
-		testInsert_pb_FlatMapOf(t, total, runtime.GOMAXPROCS(0), false, true, false)
+		testInsert_cc_FlatMap(t, total, runtime.GOMAXPROCS(0), false, true, false)
 	})
 	t.Run("1 pre_size", func(t *testing.T) {
-		testInsert_pb_FlatMapOf(t, total, 1, true, false, false)
+		testInsert_cc_FlatMap(t, total, 1, true, false, false)
 	})
 	t.Run("64 pre_size", func(t *testing.T) {
-		testInsert_pb_FlatMapOf(t, total, runtime.GOMAXPROCS(0), true, false, false)
+		testInsert_cc_FlatMap(t, total, runtime.GOMAXPROCS(0), true, false, false)
 	})
 }
 
-func testInsert_pb_FlatMapOf(
+func testInsert_cc_FlatMap(
 	t *testing.T,
 	total int,
 	numCPU int,
@@ -166,18 +166,18 @@ func testInsert_pb_FlatMapOf(
 	}
 }
 
-func TestInsert_pb_MapOf(t *testing.T) {
+func TestInsert_cc_Map(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsert_pb_MapOf(t, total, 1, false, true, true)
+		testInsert_cc_Map(t, total, 1, false, true, true)
 	})
 	t.Run("64 no_pre_size", func(t *testing.T) {
-		testInsert_pb_MapOf(t, total, runtime.GOMAXPROCS(0), false, true, false)
+		testInsert_cc_Map(t, total, runtime.GOMAXPROCS(0), false, true, false)
 	})
 	t.Run("1 pre_size", func(t *testing.T) {
-		testInsert_pb_MapOf(t, total, 1, true, false, false)
+		testInsert_cc_Map(t, total, 1, true, false, false)
 	})
 	t.Run("64 pre_size", func(t *testing.T) {
-		testInsert_pb_MapOf(t, total, runtime.GOMAXPROCS(0), true, false, false)
+		testInsert_cc_Map(t, total, runtime.GOMAXPROCS(0), true, false, false)
 	})
 }
 
@@ -193,7 +193,7 @@ type Int int
 //	return []pb.HashOptimization{pb.LinearDistribution}
 // }
 
-func testInsert_pb_MapOf(
+func testInsert_cc_Map(
 	t *testing.T,
 	total int,
 	numCPU int,
@@ -325,12 +325,12 @@ func testInsert_pb_MapOf(
 	}
 }
 
-func TestInsertString_pb_FlatMapOf(t *testing.T) {
+func TestInsertString_cc_FlatMap(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsertString_pb_FlatMapOf(t, total, 1, false, true)
+		testInsertString_cc_FlatMap(t, total, 1, false, true)
 	})
 	t.Run("64 no_pre_size", func(t *testing.T) {
-		testInsertString_pb_FlatMapOf(
+		testInsertString_cc_FlatMap(
 			t,
 			total,
 			runtime.GOMAXPROCS(0),
@@ -339,10 +339,10 @@ func TestInsertString_pb_FlatMapOf(t *testing.T) {
 		)
 	})
 	t.Run("1 pre_size", func(t *testing.T) {
-		testInsertString_pb_FlatMapOf(t, total, 1, true, false)
+		testInsertString_cc_FlatMap(t, total, 1, true, false)
 	})
 	t.Run("64 pre_size", func(t *testing.T) {
-		testInsertString_pb_FlatMapOf(
+		testInsertString_cc_FlatMap(
 			t,
 			total,
 			runtime.GOMAXPROCS(0),
@@ -352,7 +352,7 @@ func TestInsertString_pb_FlatMapOf(t *testing.T) {
 	})
 }
 
-func testInsertString_pb_FlatMapOf(
+func testInsertString_cc_FlatMap(
 	t *testing.T,
 	total int,
 	numCPU int,
@@ -462,18 +462,18 @@ func testInsertString_pb_FlatMapOf(
 	}
 }
 
-func TestInsertString_pb_MapOf(t *testing.T) {
+func TestInsertString_cc_Map(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsertString_pb_MapOf(t, total, 1, false, true)
+		testInsertString_cc_Map(t, total, 1, false, true)
 	})
 	t.Run("64 no_pre_size", func(t *testing.T) {
-		testInsertString_pb_MapOf(t, total, runtime.GOMAXPROCS(0), false, true)
+		testInsertString_cc_Map(t, total, runtime.GOMAXPROCS(0), false, true)
 	})
 	t.Run("1 pre_size", func(t *testing.T) {
-		testInsertString_pb_MapOf(t, total, 1, true, false)
+		testInsertString_cc_Map(t, total, 1, true, false)
 	})
 	t.Run("64 pre_size", func(t *testing.T) {
-		testInsertString_pb_MapOf(t, total, runtime.GOMAXPROCS(0), true, false)
+		testInsertString_cc_Map(t, total, runtime.GOMAXPROCS(0), true, false)
 	})
 }
 
@@ -498,7 +498,7 @@ type String string
 //	// return buildInStringHasher(value, seed)
 // }
 
-func testInsertString_pb_MapOf(
+func testInsertString_cc_Map(
 	t *testing.T,
 	total int,
 	numCPU int,

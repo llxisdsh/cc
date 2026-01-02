@@ -18,21 +18,14 @@ fi
 export PATH="$GOBIN:$PATH"
 
 install_linter() {
-    echo "Installing golangci-lint v2..."
+#    echo "Installing golangci-lint v2..."
     go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 }
 
 # Check if golangci-lint is installed
-if ! command -v golangci-lint &> /dev/null; then
+#if ! command -v golangci-lint &> /dev/null; then
     install_linter
-fi
-
-# Check version
-# The batch file checks for "version 2.". If not found, it upgrades/reinstalls.
-if ! golangci-lint version | grep -q "version 2."; then
-    echo "Upgrading golangci-lint to v2..."
-    install_linter
-fi
+#fi
 
 # Run linter
 if golangci-lint run ./...; then

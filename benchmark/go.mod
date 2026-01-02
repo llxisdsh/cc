@@ -7,12 +7,11 @@ require (
 	github.com/alphadose/haxmap v1.4.1
 	github.com/fufuok/cmap v1.19.3
 	github.com/llxisdsh/cc v0.0.0
-	github.com/llxisdsh/pb v1.5.14
 	github.com/mhmtszr/concurrent-swiss-map v1.0.9
 	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/puzpuzpuz/xsync/v4 v4.2.0
 	github.com/zhangyunhao116/skipmap v0.10.1
-	golang.org/x/sync v0.18.0
+	golang.org/x/sync v0.19.0
 )
 
 require (

@@ -36,7 +36,7 @@ func Test_MemoryPeakReduction(t *testing.T) {
 
 		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
 
-		t.Logf("pb_MapOf memory usage: %d bytes, items: %d", peak, m.Size())
+		t.Logf("cc_Map memory usage: %d bytes, items: %d", peak, m.Size())
 	}
 
 	{
@@ -54,7 +54,7 @@ func Test_MemoryPeakReduction(t *testing.T) {
 
 		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
 
-		t.Logf("pb_FlatMapOf memory usage: %d bytes, items: %d", peak, m.Size())
+		t.Logf("cc_FlatMap memory usage: %d bytes, items: %d", peak, m.Size())
 	}
 
 	{
