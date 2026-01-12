@@ -18,22 +18,21 @@ func BitLockUint64(addr *uint64, mask uint64) {
 
 func slowBitLockUint64(addr *uint64, mask uint64) {
 	var spins int
-	for !tryBitLockUint64(addr, mask) {
+	for !TryBitLockUint64(addr, mask) {
 		delay(&spins)
 	}
 }
 
+// TryBitLockUint64 attempts to acquire a bit-lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+//
 //go:nosplit
-func tryBitLockUint64(addr *uint64, mask uint64) bool {
-	for {
-		cur := atomic.LoadUint64(addr)
-		if cur&mask != 0 {
-			return false
-		}
-		if atomic.CompareAndSwapUint64(addr, cur, cur|mask) {
-			return true
-		}
+func TryBitLockUint64(addr *uint64, mask uint64) bool {
+	cur := atomic.LoadUint64(addr)
+	if cur&mask != 0 {
+		return false
 	}
+	return atomic.CompareAndSwapUint64(addr, cur, cur|mask)
 }
 
 // BitUnlockUint64 releases the bit-lock by clearing the specified bit mask.
@@ -64,22 +63,21 @@ func BitLockUint32(addr *uint32, mask uint32) {
 
 func slowBitLockUint32(addr *uint32, mask uint32) {
 	var spins int
-	for !tryBitLockUint32(addr, mask) {
+	for !TryBitLockUint32(addr, mask) {
 		delay(&spins)
 	}
 }
 
+// TryBitLockUint32 attempts to acquire a bit-lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+//
 //go:nosplit
-func tryBitLockUint32(addr *uint32, mask uint32) bool {
-	for {
-		cur := atomic.LoadUint32(addr)
-		if cur&mask != 0 {
-			return false
-		}
-		if atomic.CompareAndSwapUint32(addr, cur, cur|mask) {
-			return true
-		}
+func TryBitLockUint32(addr *uint32, mask uint32) bool {
+	cur := atomic.LoadUint32(addr)
+	if cur&mask != 0 {
+		return false
 	}
+	return atomic.CompareAndSwapUint32(addr, cur, cur|mask)
 }
 
 // BitUnlockUint32 releases the bit-lock by clearing the specified bit mask.
@@ -107,22 +105,21 @@ func BitLockUintptr(addr *uintptr, mask uintptr) {
 
 func slowBitLockUintptr(addr *uintptr, mask uintptr) {
 	var spins int
-	for !tryBitLockUintptr(addr, mask) {
+	for !TryBitLockUintptr(addr, mask) {
 		delay(&spins)
 	}
 }
 
+// TryBitLockUintptr attempts to acquire a bit-lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+//
 //go:nosplit
-func tryBitLockUintptr(addr *uintptr, mask uintptr) bool {
-	for {
-		cur := atomic.LoadUintptr(addr)
-		if cur&mask != 0 {
-			return false
-		}
-		if atomic.CompareAndSwapUintptr(addr, cur, cur|mask) {
-			return true
-		}
+func TryBitLockUintptr(addr *uintptr, mask uintptr) bool {
+	cur := atomic.LoadUintptr(addr)
+	if cur&mask != 0 {
+		return false
 	}
+	return atomic.CompareAndSwapUintptr(addr, cur, cur|mask)
 }
 
 // BitUnlockUintptr releases the bit-lock by clearing the specified bit mask.

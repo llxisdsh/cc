@@ -502,6 +502,48 @@ func TestPLocalCounter64_Basic(t *testing.T) {
 	}
 }
 
+func TestPLocalCounter_Reset(t *testing.T) {
+	c := NewPLocalCounter()
+	c.Add(100)
+	c.Add(200)
+
+	val := c.Reset()
+	if val != 300 {
+		t.Errorf("Expected reset to return 300, got %d", val)
+	}
+
+	if c.Value() != 0 {
+		t.Errorf("Expected 0 after reset, got %d", c.Value())
+	}
+
+	// Add again after reset
+	c.Add(50)
+	if c.Value() != 50 {
+		t.Errorf("Expected 50, got %d", c.Value())
+	}
+}
+
+func TestPLocalCounter64_Reset(t *testing.T) {
+	c := NewPLocalCounter64()
+	c.Add(100)
+	c.Add(200)
+
+	val := c.Reset()
+	if val != 300 {
+		t.Errorf("Expected reset to return 300, got %d", val)
+	}
+
+	if c.Value() != 0 {
+		t.Errorf("Expected 0 after reset, got %d", c.Value())
+	}
+
+	// Add again after reset
+	c.Add(50)
+	if c.Value() != 50 {
+		t.Errorf("Expected 50, got %d", c.Value())
+	}
+}
+
 // =============================================================================
 // Benchmark
 // =============================================================================

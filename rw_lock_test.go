@@ -144,3 +144,63 @@ func TestRWLock32_ReadersAndWriters(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestRWLock_TryLock(t *testing.T) {
+	var rw RWLock
+
+	// TryLock should succeed on free lock
+	if !rw.TryLock() {
+		t.Error("TryLock should succeed on free lock")
+	}
+	rw.Unlock()
+
+	// TryRLock should succeed on free lock
+	if !rw.TryRLock() {
+		t.Error("TryRLock should succeed on free lock")
+	}
+	rw.RUnlock()
+
+	// TryLock should fail when read locked
+	rw.RLock()
+	if rw.TryLock() {
+		t.Error("TryLock should fail when read locked")
+	}
+	rw.RUnlock()
+
+	// TryRLock should fail when write locked
+	rw.Lock()
+	if rw.TryRLock() {
+		t.Error("TryRLock should fail when write locked")
+	}
+	rw.Unlock()
+}
+
+func TestRWLock32_TryLock(t *testing.T) {
+	var rw RWLock32
+
+	// TryLock should succeed on free lock
+	if !rw.TryLock() {
+		t.Error("TryLock should succeed on free lock")
+	}
+	rw.Unlock()
+
+	// TryRLock should succeed on free lock
+	if !rw.TryRLock() {
+		t.Error("TryRLock should succeed on free lock")
+	}
+	rw.RUnlock()
+
+	// TryLock should fail when read locked
+	rw.RLock()
+	if rw.TryLock() {
+		t.Error("TryLock should fail when read locked")
+	}
+	rw.RUnlock()
+
+	// TryRLock should fail when write locked
+	rw.Lock()
+	if rw.TryRLock() {
+		t.Error("TryRLock should fail when write locked")
+	}
+	rw.Unlock()
+}

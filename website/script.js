@@ -10,8 +10,8 @@ const translations = {
         "features.subtitle": "Engineered for extreme performance and reliability.",
         "features.map.title": "Map & FlatMap",
         "features.map.desc": "State-of-the-art concurrent maps. 10x the throughput and 50% less memory than sync.Map for latency-critical paths.",
-        "features.once.title": "High-Level Primitives",
-        "features.once.desc": "Orchestrate complex tasks with OnceGroup, WaitGroup, and Fair Semaphores for peak efficiency.",
+        "features.execution.title": "Execution Patterns",
+        "features.execution.desc": "Orchestrate complex tasks with WorkerPool and OnceGroup for peak efficiency and safety.",
         "features.locks.title": "Advanced Primitives",
         "features.locks.desc": "Latch, Gate, Rally, Phaser, Epoch, and more. Atomic coordination tools built directly on runtime semaphores.",
         "features.plocal.title": "PLocal Storage",
@@ -25,7 +25,7 @@ const translations = {
         "knowledge.title": "Deep Dive Center",
         "knowledge.subtitle": "Understand the soul of concurrent programming through vivid analogies and rigorous principles.",
         "doc.nav.map": "Map & FlatMap",
-        "doc.nav.once": "OnceGroup",
+        "doc.nav.execution": "Execution Patterns",
         "doc.nav.gate": "Gate & Latch",
         "doc.nav.phaser": "Phaser & Rally",
         "doc.nav.locks": "Basic Locks",
@@ -67,8 +67,8 @@ const translations = {
         "features.subtitle": "为极致性能和可靠性而生。",
         "features.map.title": "Map & FlatMap",
         "features.map.desc": "最前沿的并发 Map 实现。相比 sync.Map 提供 10 倍吞吐量并节省 50% 内存，专为关键路径设计。",
-        "features.once.title": "高级调度原语",
-        "features.once.desc": "利用 OnceGroup、WaitGroup 和公平信号量协调复杂任务，实现极致的协作效率。",
+        "features.execution.title": "执行模式",
+        "features.execution.desc": "利用 WorkerPool 和 OnceGroup 协调复杂任务，实现极致的协作效率与安全性。",
         "features.locks.title": "高级并发原语",
         "features.locks.desc": "包含 Latch, Gate, Rally, Phaser, Epoch 等。基于 Go 运行时信号量的原子级协作工具。",
         "features.plocal.title": "PLocal 处理器本地存储",
@@ -82,7 +82,7 @@ const translations = {
         "knowledge.title": "深度探索中心",
         "knowledge.subtitle": "通过生动的比喻和严谨的原理，领悟并发编程的灵魂。",
         "doc.nav.map": "Map 与内存布局",
-        "doc.nav.once": "请求去重 OnceGroup",
+        "doc.nav.execution": "执行模式",
         "doc.nav.gate": "门控 Gate/Latch",
         "doc.nav.phaser": "分层同步 Phaser/Rally",
         "doc.nav.locks": "基础轻量锁",
@@ -173,6 +173,55 @@ m.Delete(<span class="token string">"key"</span>)`
                 }
             ]
         },
+        execution: {
+            title: "Execution Patterns: WorkerPool & OnceGroup",
+            desc: "Sophisticated tools for managing task execution, lifecycle, and duplicate suppression.",
+            analogy: "<b>The Construction Crew & The Bulk Order:</b> <br><code>WorkerPool</code> is like a construction crew where a fixed number of workers pick up tasks from a pile, ensuring the site isn't overcrowded. <code>OnceGroup</code> is like a restaurant kitchen that merges 50 identical orders for 'Filet Mignon' into a single cooking task, serving everyone with one effort.",
+            main: "This section covers execution flow control. <code>WorkerPool</code> provides a zero-allocation, crash-safe worker pool that reuses goroutines to relieve GC pressure. <code>OnceGroup</code> acts as a smart valve, coalescing duplicate requests (singleflight) while correctly propagating panics to all waiters—something standard libraries often miss.",
+            principles: [
+                { title: "Zero Allocation", desc: "WorkerPool reuses standard structures and channels to avoid heap allocations on the hot submit path." },
+                { title: "Panic Propagation", desc: "OnceGroup captures panics from the single executor and replays them to all waiting goroutines, ensuring system stability." },
+                { title: "Lazy Scaling", desc: "WorkerPool workers are started lazily only when needed, up to the maximum limit." }
+            ],
+            examples: [
+                {
+                    title: "Worker Pool (Basic Usage)",
+                    code: `<span class="token comment">// Pool with 10 workers, 100 capacity queue</span>
+wp := cc.NewWorkerPool(<span class="token number">10</span>, <span class="token number">100</span>)
+
+<span class="token comment">// Submit non-blocking task</span>
+wp.Submit(<span class="token keyword">func</span>() {
+    processTask()
+})
+
+<span class="token comment">// Safety: Hooks for panic recovery</span>
+wp.OnPanic = <span class="token keyword">func</span>(r <span class="token type">any</span>) {
+    log.Println(<span class="token string">"Worker recovered:"</span>, r)
+}
+
+wp.Wait() <span class="token comment">// Wait for completion</span>
+wp.Close() <span class="token comment">// Shutdown</span>`
+                },
+                {
+                    title: "Request Coalescing (OnceGroup)",
+                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, <span class="token type">string</span>]
+
+<span class="token comment">// 100 goroutines calling this for "key" result in ONE execution</span>
+val, err, shared := g.Do(<span class="token string">"key"</span>, <span class="token keyword">func</span>() (<span class="token type">string</span>, <span class="token type">error</span>) {
+    <span class="token keyword">return</span> heavyDBQuery(), <span class="token boolean">nil</span>
+})`
+                },
+                {
+                    title: "Async Result Channel (DoChan)",
+                    code: `<span class="token comment">// Non-blocking singleflight</span>
+ch := g.DoChan(<span class="token string">"key"</span>, <span class="token keyword">func</span>() (<span class="token type">string</span>, <span class="token type">error</span>) {
+    <span class="token keyword">return</span> <span class="token string">"async-result"</span>, <span class="token boolean">nil</span>
+})
+<span class="token comment">// ... do other work ...</span>
+result := <-ch`
+                }
+            ]
+        },
         plocal: {
             title: "PLocal: Scaling with Cores",
             desc: "Per-processor storage for extreme scalability on multi-core systems.",
@@ -218,9 +267,8 @@ p.ForEach(<span class="token keyword">func</span>(s *Stats) {
             title: "Advanced Concurrency Primitives",
             desc: "A suite of sophisticated primitives for complex orchestration and performance-critical safety.",
             analogy: "<b>The Orchestral Conductor:</b> <br>While basic locks are like simple traffic lights, these primitives are the conductor of an orchestra, ensuring multiple sections work in perfect harmony, handling failures gracefully, and optimizing for the fairest resource distribution.",
-            main: "This section covers high-level tools designed for sophisticated coordination. <code>OnceGroup</code> handles request coalescing with full panic/Goexit propagation. <code>WaitGroup</code> is <b>fully reusable</b>—unlike sync.WaitGroup, it can start a new batch immediately after the previous batch completes without waiting for Wait() calls to return. <code>FairSemaphore</code> guarantees strict FIFO permit acquisition. <code>Epoch</code> provides version-based coordination without thundering herd problems. <code>LockGroups</code> offer dynamic, auto-cleanup key-based locking.",
+            main: "This section covers high-level tools designed for sophisticated coordination. <code>WaitGroup</code> is <b>fully reusable</b>—unlike sync.WaitGroup, it can start a new batch immediately after the previous batch completes without waiting for Wait() calls to return. <code>FairSemaphore</code> guarantees strict FIFO permit acquisition. <code>Epoch</code> provides version-based coordination without thundering herd problems. <code>LockGroups</code> offer dynamic, auto-cleanup key-based locking.",
             principles: [
-                { title: "Panic & Goexit Propagation", desc: "OnceGroup correctly propagates panics and Goexits to ALL waiters, a critical safety guarantee that standard singleflights often fail to achieve." },
                 { title: "Instant Reusability", desc: "WaitGroup can be reused immediately after Done()—no need to wait for Wait() calls to return. Double-buffered semaphores prevent signal stealing across generations." },
                 { title: "Anti-Thundering Herd", desc: "Epoch uses an ordered waiter list to wake only those whose target is met, avoiding the broadcast storms of condition variables." },
                 { title: "Dynamic Lock Cleanup", desc: "LockGroups use reference counting to automatically remove unused locks from memory when no goroutines are waiting." },
@@ -239,26 +287,6 @@ p.ForEach(<span class="token keyword">func</span>(s *Stats) {
 }
 <span class="token comment">// Introspection: Count() and Waiters() for debugging</span>
 fmt.Printf(<span class="token string">"Tasks: %d, Waiters: %d"</span>, wg.Count(), wg.Waiters())`
-                },
-                {
-                    title: "Async Singleflight (DoChan)",
-                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, *User]
-<span class="token comment">// DoChan: returns channel immediately for async result</span>
-ch := g.DoChan(<span class="token string">"user-123"</span>, <span class="token keyword">func</span>() (*User, <span class="token type">error</span>) {
-    <span class="token keyword">return</span> fetchUser(<span class="token string">"123"</span>)
-})
-doOtherWork() <span class="token comment">// Continue working while loading...</span>
-result := <-ch <span class="token comment">// Receive result when ready</span>
-user, err, shared := result.Val, result.Err, result.Shared`
-                },
-                {
-                    title: "Cache Invalidation (Forget)",
-                    code: `<span class="token keyword">var</span> cache cc.OnceGroup[<span class="token type">string</span>, *Data]
-data, err, _ := cache.Do(<span class="token string">"key"</span>, loadFromDB)
-<span class="token comment">// Invalidate: next call will re-execute the function</span>
-cache.Forget(<span class="token string">"key"</span>)
-<span class="token comment">// ForgetUnshared: only invalidate if no duplicates joined</span>
-<span class="token keyword">if</span> cache.ForgetUnshared(<span class="token string">"key"</span>) { log.Println(<span class="token string">"Removed"</span>) }`
                 },
                 {
                     title: "Version Coordination (Epoch)",
@@ -445,6 +473,55 @@ m.Delete(<span class="token string">"key"</span>)`
                 }
             ]
         },
+        execution: {
+            title: "执行模式: WorkerPool 与 OnceGroup",
+            desc: "用于管理任务执行、生命周期和重复抑制的高级工具。",
+            analogy: "<b>施工队与团购订单：</b> <br><code>WorkerPool</code> 就像一支施工队，固定数量的工人从任务堆中领取工作，防止工地拥堵。<code>OnceGroup</code> 就像餐厅后厨将 50 个完全相同的菲力牛排订单合并为一次烹饪任务，一次出餐服务所有客人。",
+            main: "本部分涵盖执行流控制。<code>WorkerPool</code> 提供零分配、防崩溃的工作池，复用 Goroutine 以缓解 GC 压力。<code>OnceGroup</code> 充当智能阀门，合并重复请求（singleflight），同时正确地将 panic 传播给所有等待者——这是标准库经常缺失的功能。",
+            principles: [
+                { title: "零内存分配", desc: "WorkerPool 在热提交路径上复用标准结构和通道，避免堆分配。" },
+                { title: "Panic 传播", desc: "OnceGroup 捕获执行过程中的 panic 并回放给所有等待的 Goroutine，确保系统稳定性。" },
+                { title: "惰性扩展", desc: "WorkerPool 的工人仅在需要时惰性启动，直到达到最大限制。" }
+            ],
+            examples: [
+                {
+                    title: "工作池 (基础用法)",
+                    code: `<span class="token comment">// 10 个工人，100 容量的队列</span>
+wp := cc.NewWorkerPool(<span class="token number">10</span>, <span class="token number">100</span>)
+
+<span class="token comment">// 提交非阻塞任务</span>
+wp.Submit(<span class="token keyword">func</span>() {
+    processTask()
+})
+
+<span class="token comment">// 安全: Panic 恢复钩子</span>
+wp.OnPanic = <span class="token keyword">func</span>(r <span class="token type">any</span>) {
+    log.Println(<span class="token string">"工人恢复:"</span>, r)
+}
+
+wp.Wait() <span class="token comment">// 等待完成</span>
+wp.Close() <span class="token comment">// 关闭</span>`
+                },
+                {
+                    title: "请求合并 (OnceGroup)",
+                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, <span class="token type">string</span>]
+
+<span class="token comment">// 100 个协程调用此 Key 只会产生 1 次执行</span>
+val, err, shared := g.Do(<span class="token string">"key"</span>, <span class="token keyword">func</span>() (<span class="token type">string</span>, <span class="token type">error</span>) {
+    <span class="token keyword">return</span> heavyDBQuery(), <span class="token boolean">nil</span>
+})`
+                },
+                {
+                    title: "异步结果通道 (DoChan)",
+                    code: `<span class="token comment">// 非阻塞 singleflight</span>
+ch := g.DoChan(<span class="token string">"key"</span>, <span class="token keyword">func</span>() (<span class="token type">string</span>, <span class="token type">error</span>) {
+    <span class="token keyword">return</span> <span class="token string">"async-result"</span>, <span class="token boolean">nil</span>
+})
+<span class="token comment">// ... 做其他工作 ...</span>
+result := <-ch`
+                }
+            ]
+        },
         plocal: {
             title: "PLocal: 随核心数线性扩展",
             desc: "为多核系统设计的每处理器独立存储，实现极致的水平扩展能力。",
@@ -490,9 +567,9 @@ p.ForEach(<span class="token keyword">func</span>(s *Stats) {
             title: "高级并发原语",
             desc: "一组专为复杂调度和性能关键路径设计的精密原语。",
             analogy: "<b>交响乐指挥：</b> <br>如果基础锁是简单的红绿灯，这些原语就是交响乐团的指挥，确保各个声部协同工作，优雅处理异常，并优化资源分配的绝对公平性。",
-            main: "该部分涵盖了专为复杂协作设计的高级工具。<code>OnceGroup</code> 处理请求合并，自动传播 panic/Goexit。<code>WaitGroup</code> 是<b>完全可重用</b>的——与 sync.WaitGroup 不同，前一批任务完成后可立即启动新批次，无需等待所有 Wait() 调用返回。<code>FairSemaphore</code> 保证严格 FIFO 许可获取。<code>Epoch</code> 提供基于版本的协调，无惊群效应。<code>LockGroups</code> 提供动态、自动清理的 Key 级锁。",
+            main: "该部分涵盖了专为复杂协作设计的高级工具。<code>WaitGroup</code> 是<b>完全可重用</b>的。<code>FairSemaphore</code> 保证严格 FIFO 许可获取。<code>Epoch</code> 提供基于版本的协调，无惊群效应。<code>LockGroups</code> 提供动态、自动清理的 Key 级锁。",
             principles: [
-                { title: "异常自动传播", desc: "OnceGroup 能将 panic 和 Goexit 正确传播给所有等待者，这是许多 singleflight 实现无法企及的稳健性。" },
+                { title: "即时复用", desc: "WaitGroup 可在 Done() 后立即复用——无需等待 Wait() 调用返回。" },
                 { title: "动态锁清理", desc: "TicketLockGroup 和 RWLockGroup 在没有协程等待时会自动从内存中释放未使用的锁对象。" },
                 { title: "严格 FIFO 公平性", desc: "FairSemaphore 保证许可按照申请顺序发放，彻底消除“冒领”和饥饿现象。" }
             ],
@@ -509,26 +586,6 @@ p.ForEach(<span class="token keyword">func</span>(s *Stats) {
 }
 <span class="token comment">// 内省: Count() 返回活跃任务数，Waiters() 返回阻塞的 Wait() 调用数</span>
 fmt.Printf(<span class="token string">"Tasks: %d, Waiters: %d"</span>, wg.Count(), wg.Waiters())`
-                },
-                {
-                    title: "异步单飞 (DoChan)",
-                    code: `<span class="token keyword">var</span> g cc.OnceGroup[<span class="token type">string</span>, *User]
-<span class="token comment">// DoChan: 立即返回通道，异步获取结果</span>
-ch := g.DoChan(<span class="token string">"user-123"</span>, <span class="token keyword">func</span>() (*User, <span class="token type">error</span>) {
-    <span class="token keyword">return</span> fetchUser(<span class="token string">"123"</span>)
-})
-doOtherWork() <span class="token comment">// 加载期间继续其他工作...</span>
-result := <-ch <span class="token comment">// 结果就绪时接收</span>
-user, err, shared := result.Val, result.Err, result.Shared`
-                },
-                {
-                    title: "缓存失效 (Forget)",
-                    code: `<span class="token keyword">var</span> cache cc.OnceGroup[<span class="token type">string</span>, *Data]
-data, err, _ := cache.Do(<span class="token string">"key"</span>, loadFromDB)
-<span class="token comment">// Forget: 使缓存失效，下次调用将重新执行函数</span>
-cache.Forget(<span class="token string">"key"</span>)
-<span class="token comment">// ForgetUnshared: 仅在没有其他等待者时失效</span>
-<span class="token keyword">if</span> cache.ForgetUnshared(<span class="token string">"key"</span>) { log.Println(<span class="token string">"已移除"</span>) }`
                 },
                 {
                     title: "版本协调 (Epoch)",
@@ -662,7 +719,7 @@ ready.Open() <span class="token comment">// 所有等待者释放，后续 Wait(
 
 let currentLang = 'en';
 
-const docOrder = ['map', 'plocal', 'gate', 'phaser', 'locks', 'advanced'];
+const docOrder = ['map', 'plocal', 'execution', 'gate', 'phaser', 'locks', 'advanced'];
 
 function showDoc(type) {
     const container = document.getElementById('doc-container');

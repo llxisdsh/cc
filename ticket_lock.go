@@ -46,3 +46,17 @@ func (m *TicketLock) Lock() {
 func (m *TicketLock) Unlock() {
 	m.serving.Add(1)
 }
+
+// TryLock attempts to acquire the lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+// Note: Unlike Lock(), TryLock() does not take a ticket, so it may
+// break FIFO ordering if used alongside Lock().
+func (m *TicketLock) TryLock() bool {
+	serving := m.serving.Load()
+	next := m.next.Load()
+	if serving != next {
+		return false
+	}
+	// Try to take the next ticket and immediately check if it's being served
+	return m.next.CompareAndSwap(next, next+1)
+}

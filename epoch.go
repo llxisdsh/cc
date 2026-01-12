@@ -52,12 +52,13 @@ func (e *Epoch) Add(delta uint64) uint64 {
 
 	// 1. Atomic increment (fast path for writers)
 	// We return the NEW value.
-	newVal := e.state.Add(delta)
-
-	if newVal < delta {
-		// Overflowed 64-bit.
+	// Check/Predict overflow before adding
+	oldVal := e.state.Load()
+	if oldVal > ^uint64(0)-delta {
 		panic("cc: Epoch counter overflow")
 	}
+
+	newVal := e.state.Add(delta)
 
 	// 2. Wake waiters (slow path)
 	// Only acquire lock if we need to wake someone.

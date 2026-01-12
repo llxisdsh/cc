@@ -89,6 +89,27 @@ func (l *RWLock) RUnlock() {
 	atomic.AddUintptr((*uintptr)(l), ^uintptr(rwReadUnit-1))
 }
 
+// TryLock attempts to acquire the write lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+func (l *RWLock) TryLock() bool {
+	s := atomic.LoadUintptr((*uintptr)(l))
+	// Check if lock is free (no writer, no readers)
+	if s&rwWriteLockMask != 0 || s>>rwReadShift != 0 {
+		return false
+	}
+	return atomic.CompareAndSwapUintptr((*uintptr)(l), s, s|rwWriteLockMask)
+}
+
+// TryRLock attempts to acquire a read lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+func (l *RWLock) TryRLock() bool {
+	s := atomic.LoadUintptr((*uintptr)(l))
+	if s&rwWriteLockMask != 0 {
+		return false
+	}
+	return atomic.CompareAndSwapUintptr((*uintptr)(l), s, s+rwReadUnit)
+}
+
 // RWLock32 is a spin-based Reader-Writer lock backed by an uint32.
 // It is writer-preferred to prevent reader starvation.
 type RWLock32 uint32
@@ -158,4 +179,25 @@ func (l *RWLock32) RUnlock() {
 func (l *RWLock32) Ready() bool {
 	s := atomic.LoadUint32((*uint32)(l))
 	return s != 0 && s&rwWriteLockMask == 0
+}
+
+// TryLock attempts to acquire the write lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+func (l *RWLock32) TryLock() bool {
+	s := atomic.LoadUint32((*uint32)(l))
+	// Check if lock is free (no writer, no readers)
+	if s&rwWriteLockMask != 0 || s>>rwReadShift != 0 {
+		return false
+	}
+	return atomic.CompareAndSwapUint32((*uint32)(l), s, s|rwWriteLockMask)
+}
+
+// TryRLock attempts to acquire a read lock without blocking.
+// Returns true if the lock was acquired, false otherwise.
+func (l *RWLock32) TryRLock() bool {
+	s := atomic.LoadUint32((*uint32)(l))
+	if s&rwWriteLockMask != 0 {
+		return false
+	}
+	return atomic.CompareAndSwapUint32((*uint32)(l), s, s+rwReadUnit)
 }

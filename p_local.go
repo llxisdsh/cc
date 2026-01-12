@@ -309,6 +309,20 @@ func (p *PLocalCounter) Value() uintptr {
 	return sum
 }
 
+// Reset atomically reads the current value and resets all shards to zero.
+// This is useful for periodic metric collection cycles.
+func (p *PLocalCounter) Reset() uintptr {
+	shards := p.shards.Load()
+	var sum uintptr
+	if shards != nil {
+		for i := range shards.len {
+			s := *shards.slice.At(i)
+			sum += s.val.Swap(0)
+		}
+	}
+	return sum
+}
+
 // =============================================================================
 // PLocalCounter64
 // =============================================================================
@@ -354,6 +368,20 @@ func (p *PLocalCounter64) Value() uint64 {
 		for i := range shards.len {
 			s := *shards.slice.At(i)
 			sum += s.val.Load()
+		}
+	}
+	return sum
+}
+
+// Reset atomically reads the current value and resets all shards to zero.
+// This is useful for periodic metric collection cycles.
+func (p *PLocalCounter64) Reset() uint64 {
+	shards := p.shards.Load()
+	var sum uint64
+	if shards != nil {
+		for i := range shards.len {
+			s := *shards.slice.At(i)
+			sum += s.val.Swap(0)
 		}
 	}
 	return sum

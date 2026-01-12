@@ -12,7 +12,7 @@ go get github.com/llxisdsh/cc
 
 ## Core Components
 
-### 🚀 Map & FlatMap
+### 🚀 Concurrent Maps
 
 State-of-the-art concurrent map implementations, streamlined from [**llxisdsh/pb**](https://github.com/llxisdsh/pb).
 
@@ -23,33 +23,37 @@ State-of-the-art concurrent map implementations, streamlined from [**llxisdsh/pb
 
 > **Note**: These components retain the core high-performance logic of `llxisdsh/pb` but are packaged here for lightweight integration. For comprehensive benchmarks and advanced architectural details, please refer to the [upstream repository](https://github.com/llxisdsh/pb).
 
-### ⚡ PLocal & OnceGroup
+### ⚡ Processor Local
 
-Generic, high-performance concurrency tools.
+- **`PLocal[T]`**: Processor-local storage. Shards data by P (GOMAXPROCS) to minimize lock contention. Ideal for high-throughput counters or temporary buffers.
 
-- **`PLocal[T]`**: Processor-local storage. Shards data by P (GOMAXPROCS) to minimize lock contention.
+### 🧵 Execution Patterns
+
+Tools to manage task execution and flow.
+
+- **`WorkerPool`**: Robust, high-performance worker pool with zero-allocation on happy path.
 - **`OnceGroup[K, V]`**: Coalesces duplicate requests (singleflight). ~20× faster than `singleflight` with panic propagation.
 
 ### 🔒 Synchronization Primitives
 
 Atomic, low-overhead coordination tools built on runtime semaphores.
 
-| Primitive | Metaphor | Behavior | Key Usage |
-|:---|:---|:---|:---|
-| **`Latch`** | **One-time Door** | Starts closed. Once `Open()`, stays open forever. | Initialization, Shutdown signal. |
-| **`Gate`** | **Manual Door** | `Open()`/`Close()`/`Pulse()`. Supports broadcast wakeups. | Pausing/Resuming, Cond-like signals. |
-| **`Rally`** | **Meeting Point** | `Meet(n)` waits until n parties arrive, then releases all. | CyclicBarrier, MapReduce stages. |
-| **`Phaser`** | **Dynamic Barrier** | Dynamic party registration with split-phase `Arrive()`/`AwaitAdvance()`. | Java-style Phaser, Pipeline stages. |
-| **`Epoch`** | **Milestone** | `WaitAtLeast(n)` blocks until counter reaches n. No thundering herd. | Phase coordination, Version gates. |
-| **`Barter`** | **Exchanger** | Two goroutines swap values at a sync point. | Producer-Consumer handoff. |
-| **`RWLock`** | **Read-Write Lock** | Spin-based R/W lock, writer-preferred. | Low-latency, writer-priority. |
-| **`TicketLock`** | **Ticket Queue** | FIFO spin-lock with ticket algorithm. | Fair mutex, Latency-sensitive paths. |
-| **`BitLock`** | **Bit Lock** | Spins on a specific bit mask. | Fine-grained, memory-constrained locks. |
-| **`SeqLock`** | **Sequence Lock** | Optimistic reads with version counting. | Tear-free snapshots, Read-heavy. |
-| **`FairSemaphore`**| **FIFO Queue** | Strict FIFO ordering for permit acquisition. | Anti-starvation scenarios. |
-| **`TicketLockGroup`** | **Keyed Lock** | Per-key locking with auto-cleanup. | User/Resource isolation. |
-| **`RWLockGroup`** | **Keyed R/W Lock** | Per-key R/W locking with auto-cleanup. | Config/Data partitioning. |
-| **`WaitGroup`** | **Reusable WG** | Supports `TryWait()` & `Waiters()`. Reusable immediately. | Batch processing. |
+| Primitive             | Metaphor            | Behavior                                                                 | Key Usage                               |
+|:----------------------|:--------------------|:-------------------------------------------------------------------------|:----------------------------------------|
+| **`Latch`**           | **One-time Door**   | Starts closed. Once `Open()`, stays open forever.                        | Initialization, Shutdown signal.        |
+| **`Gate`**            | **Manual Door**     | `Open()`/`Close()`/`Pulse()`. Supports broadcast wakeups.                | Pausing/Resuming, Cond-like signals.    |
+| **`Rally`**           | **Meeting Point**   | `Meet(n)` waits until n parties arrive, then releases all.               | CyclicBarrier, MapReduce stages.        |
+| **`Phaser`**          | **Dynamic Barrier** | Dynamic party registration with split-phase `Arrive()`/`AwaitAdvance()`. | Java-style Phaser, Pipeline stages.     |
+| **`Epoch`**           | **Milestone**       | `WaitAtLeast(n)` blocks until counter reaches n. No thundering herd.     | Phase coordination, Version gates.      |
+| **`Barter`**          | **Exchanger**       | Two goroutines swap values at a sync point.                              | Producer-Consumer handoff.              |
+| **`RWLock`**          | **Read-Write Lock** | Spin-based R/W lock, writer-preferred.                                   | Low-latency, writer-priority.           |
+| **`TicketLock`**      | **Ticket Queue**    | FIFO spin-lock with ticket algorithm.                                    | Fair mutex, Latency-sensitive paths.    |
+| **`BitLock`**         | **Bit Lock**        | Spins on a specific bit mask.                                            | Fine-grained, memory-constrained locks. |
+| **`SeqLock`**         | **Sequence Lock**   | Optimistic reads with version counting.                                  | Tear-free snapshots, Read-heavy.        |
+| **`FairSemaphore`**   | **FIFO Queue**      | Strict FIFO ordering for permit acquisition.                             | Anti-starvation scenarios.              |
+| **`TicketLockGroup`** | **Keyed Lock**      | Per-key locking with auto-cleanup.                                       | User/Resource isolation.                |
+| **`RWLockGroup`**     | **Keyed R/W Lock**  | Per-key R/W locking with auto-cleanup.                                   | Config/Data partitioning.               |
+| **`WaitGroup`**       | **Reusable WG**     | Supports `TryWait()` & `Waiters()`. Reusable immediately.                | Batch processing.                       |
 
 > **Design Philosophy**: Minimal footprint, direct `runtime_semacquire` integration. Most primitives are zero-alloc on hot paths.
 
@@ -142,6 +146,29 @@ p.With(func(buf **bytes.Buffer) {
     if *buf == nil { *buf = new(bytes.Buffer) }
     (*buf).WriteString("data")
 })
+```
+
+### WorkerPool
+
+```go
+// Create a pool with 10 workers and queue size of 100
+wp := cc.NewWorkerPool(10, 100)
+
+// Optional: Handle panics from workers
+wp.OnPanic = func(r any) {
+    log.Printf("Worker panicked: %v", r)
+}
+
+// Submit non-blocking task (blocks if queue full)
+wp.Submit(func() {
+    process()
+})
+
+// Wait for all tasks to complete without closing
+wp.Wait()
+
+// Graceful shutdown
+wp.Close()
 ```
 
 ### OnceGroup

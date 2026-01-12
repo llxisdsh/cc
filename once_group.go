@@ -45,11 +45,7 @@ func (g *OnceGroup[K, V]) Do(
 	c, loaded := g.m.LoadOrStore(key, primary)
 	if loaded {
 		// mark duplication under lock to ensure shared=true visibility
-		_, _ = g.m.Compute(key, func(it *MapEntry[K, *call[V]]) {
-			if it.Loaded() {
-				atomic.AddInt32(&it.Value().dups, 1)
-			}
-		})
+		atomic.AddInt32(&c.dups, 1)
 
 		c.latch.Wait()
 		var e *panicError
@@ -91,11 +87,7 @@ func (g *OnceGroup[K, V]) DoChan(
 			return ch
 		}
 		// Mark duplication for shared flag visibility
-		_, _ = g.m.Compute(key, func(it *MapEntry[K, *call[V]]) {
-			if it.Loaded() {
-				atomic.AddInt32(&it.Value().dups, 1)
-			}
-		})
+		atomic.AddInt32(&c.dups, 1)
 		go func(c *call[V], ch chan<- OnceGroupResult[V]) {
 			c.latch.Wait()
 			var e *panicError

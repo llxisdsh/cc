@@ -123,7 +123,7 @@ func (e *Gate) Pulse() {
 			if cnt > 0 {
 				// Wake up waters from the OLD generation.
 				semaPtr := &e.sema[gen%2]
-				for i := 0; i < int(cnt); i++ {
+				for range cnt {
 					semaPtr.Release()
 				}
 			}

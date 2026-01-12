@@ -130,6 +130,10 @@ func Parallel(ctx context.Context, n int, action func(context.Context, int) erro
 		return ctx.Err()
 	}
 
+	// Create a cancellable context to stop other goroutines on error
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg WaitGroup // Use cc.WaitGroup for efficiency
 	wg.Add(n)
 
@@ -138,7 +142,7 @@ func Parallel(ctx context.Context, n int, action func(context.Context, int) erro
 	errCh := make(chan error, 1)
 	var failed atomic.Bool
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(idx int) {
 			defer wg.Done()
 
@@ -146,12 +150,18 @@ func Parallel(ctx context.Context, n int, action func(context.Context, int) erro
 			if failed.Load() {
 				return
 			}
+			// Check context before starting action (double check)
+			if ctx.Err() != nil {
+				return
+			}
 
 			if err := action(ctx, idx); err != nil {
-				failed.Store(true)
-				select {
-				case errCh <- err:
-				default:
+				if failed.CompareAndSwap(false, true) {
+					select {
+					case errCh <- err:
+					default:
+					}
+					cancel() // Cancel other workers
 				}
 			}
 		}(i)
