@@ -18,16 +18,16 @@ func BitLockUint64(addr *uint64, mask uint64) {
 
 func slowBitLockUint64(addr *uint64, mask uint64) {
 	var spins int
-	for !TryBitLockUint64(addr, mask) {
+	for !BitTryLockUint64(addr, mask) {
 		delay(&spins)
 	}
 }
 
-// TryBitLockUint64 attempts to acquire a bit-lock without blocking.
+// BitTryLockUint64 attempts to acquire a bit-lock without blocking.
 // Returns true if the lock was acquired, false otherwise.
 //
 //go:nosplit
-func TryBitLockUint64(addr *uint64, mask uint64) bool {
+func BitTryLockUint64(addr *uint64, mask uint64) bool {
 	cur := atomic.LoadUint64(addr)
 	if cur&mask != 0 {
 		return false
@@ -63,16 +63,16 @@ func BitLockUint32(addr *uint32, mask uint32) {
 
 func slowBitLockUint32(addr *uint32, mask uint32) {
 	var spins int
-	for !TryBitLockUint32(addr, mask) {
+	for !BitTryLockUint32(addr, mask) {
 		delay(&spins)
 	}
 }
 
-// TryBitLockUint32 attempts to acquire a bit-lock without blocking.
+// BitTryLockUint32 attempts to acquire a bit-lock without blocking.
 // Returns true if the lock was acquired, false otherwise.
 //
 //go:nosplit
-func TryBitLockUint32(addr *uint32, mask uint32) bool {
+func BitTryLockUint32(addr *uint32, mask uint32) bool {
 	cur := atomic.LoadUint32(addr)
 	if cur&mask != 0 {
 		return false
@@ -105,16 +105,16 @@ func BitLockUintptr(addr *uintptr, mask uintptr) {
 
 func slowBitLockUintptr(addr *uintptr, mask uintptr) {
 	var spins int
-	for !TryBitLockUintptr(addr, mask) {
+	for !BitTryLockUintptr(addr, mask) {
 		delay(&spins)
 	}
 }
 
-// TryBitLockUintptr attempts to acquire a bit-lock without blocking.
+// BitTryLockUintptr attempts to acquire a bit-lock without blocking.
 // Returns true if the lock was acquired, false otherwise.
 //
 //go:nosplit
-func TryBitLockUintptr(addr *uintptr, mask uintptr) bool {
+func BitTryLockUintptr(addr *uintptr, mask uintptr) bool {
 	cur := atomic.LoadUintptr(addr)
 	if cur&mask != 0 {
 		return false

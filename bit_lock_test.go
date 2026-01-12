@@ -83,13 +83,13 @@ func TestTryBitLockUint64(t *testing.T) {
 	const mask uint64 = 1 << 63
 
 	// TryBitLock should succeed on free lock
-	if !TryBitLockUint64(&val, mask) {
-		t.Error("TryBitLockUint64 should succeed on free lock")
+	if !BitTryLockUint64(&val, mask) {
+		t.Error("BitTryLockUint64 should succeed on free lock")
 	}
 
 	// TryBitLock should fail when locked
-	if TryBitLockUint64(&val, mask) {
-		t.Error("TryBitLockUint64 should fail when locked")
+	if BitTryLockUint64(&val, mask) {
+		t.Error("BitTryLockUint64 should fail when locked")
 	}
 
 	BitUnlockUint64(&val, mask)
@@ -100,13 +100,13 @@ func TestTryBitLockUint32(t *testing.T) {
 	const mask uint32 = 1 << 31
 
 	// TryBitLock should succeed on free lock
-	if !TryBitLockUint32(&val, mask) {
-		t.Error("TryBitLockUint32 should succeed on free lock")
+	if !BitTryLockUint32(&val, mask) {
+		t.Error("BitTryLockUint32 should succeed on free lock")
 	}
 
 	// TryBitLock should fail when locked
-	if TryBitLockUint32(&val, mask) {
-		t.Error("TryBitLockUint32 should fail when locked")
+	if BitTryLockUint32(&val, mask) {
+		t.Error("BitTryLockUint32 should fail when locked")
 	}
 
 	BitUnlockUint32(&val, mask)
@@ -117,13 +117,13 @@ func TestTryBitLockUintptr(t *testing.T) {
 	const mask uintptr = 1 << (bits.UintSize - 1)
 
 	// TryBitLock should succeed on free lock
-	if !TryBitLockUintptr(&val, mask) {
-		t.Error("TryBitLockUintptr should succeed on free lock")
+	if !BitTryLockUintptr(&val, mask) {
+		t.Error("BitTryLockUintptr should succeed on free lock")
 	}
 
 	// TryBitLock should fail when locked
-	if TryBitLockUintptr(&val, mask) {
-		t.Error("TryBitLockUintptr should fail when locked")
+	if BitTryLockUintptr(&val, mask) {
+		t.Error("BitTryLockUintptr should fail when locked")
 	}
 
 	BitUnlockUintptr(&val, mask)
