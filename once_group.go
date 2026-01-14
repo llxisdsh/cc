@@ -67,6 +67,11 @@ func (g *OnceGroup[K, V]) Do(
 // results when they are ready.
 //
 // The returned channel will not be closed.
+//
+// If the primary execution panics, DoChan will propagate the panic to the
+// caller's goroutine. To ensure the panic is not lost and is observed, the
+// goroutine handling the channel will panic and then block forever (select {}),
+// matching x/sync/singleflight behavior.
 func (g *OnceGroup[K, V]) DoChan(
 	key K,
 	fn func() (V, error),

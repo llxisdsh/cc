@@ -22,6 +22,8 @@ type WorkerPool struct {
 	OnPanic func(r any)
 }
 
+// NewWorkerPool creates a new pool with the given number of workers and queue size.
+// The workers are started lazily as tasks are submitted.
 func NewWorkerPool(workers int, queueSize int) *WorkerPool {
 	return &WorkerPool{
 		jobs:      make(chan func(), queueSize),
@@ -29,6 +31,16 @@ func NewWorkerPool(workers int, queueSize int) *WorkerPool {
 	}
 }
 
+// Submit sends a task to the pool.
+//
+// Blocking Behavior:
+//   - If the queue is full, this method blocks until a slot becomes available.
+//   - If the pool is closed, it returns ErrPoolClosed immediately.
+//
+// Notes:
+//   - If Close() is called while Submit is blocked waiting for queue space,
+//     Close() will also block waiting for the read-lock held by Submit to be released.
+//     This can delay shutdown if workers are slow to process tasks.
 func (p *WorkerPool) Submit(task func()) error {
 	// Protected by RLock to ensure we don't send on closed channel
 	p.mu.RLock()
@@ -84,7 +96,8 @@ func (p *WorkerPool) startWorker() {
 }
 
 // Close gracefully shuts down the pool.
-// It waits for all submitted tasks to complete.
+// It waits for all submitted tasks to complete before returning.
+// Using p.jobs <- task after Close will panic or return ErrPoolClosed.
 func (p *WorkerPool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -99,6 +112,7 @@ func (p *WorkerPool) Close() {
 }
 
 // Wait blocks until all submitted tasks complete, without closing the pool.
+// It checks if both the queue is empty and active workers are idle.
 // This is useful for batch synchronization while keeping the pool alive.
 func (p *WorkerPool) Wait() {
 	for {

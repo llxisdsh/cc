@@ -42,6 +42,9 @@ func WaitTimeout(timeout time.Duration, fn func()) error {
 //	err := cc.Do(ctx, func() error {
 //	    return expensiveOp()
 //	})
+//
+// Notes: The function fn must return eventually. If fn blocks indefinitely
+// (e.g. deadlock), the internal goroutine will leak even if the context is canceled.
 func Do(ctx context.Context, fn func() error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -63,6 +66,9 @@ func Do(ctx context.Context, fn func() error) error {
 
 // DoTimeout executes fn and waits for it to return or for the timeout to elapse.
 // It returns fn's error if it completes, or context.DeadlineExceeded if timed out.
+//
+// Notes: The function fn must return eventually. If fn blocks indefinitely
+// (e.g. deadlock), the internal goroutine will leak even if the timeout expires.
 func DoTimeout(timeout time.Duration, fn func() error) error {
 	if timeout <= 0 {
 		return context.DeadlineExceeded
