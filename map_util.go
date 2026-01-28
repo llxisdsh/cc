@@ -477,35 +477,67 @@ func defaultHasher[K comparable, V any]() (
 	}
 }
 
+// Integer Hash Strategy (Hybrid Bit-Mask)
+//
+// We use a specialized hash function for integers to balance two conflicting goals:
+//
+//  1. Monotonicity for Performance (h1):
+//     The map's bucket selection (h1) for integers uses division: `hash / entriesPerBucket`.
+//     This allows sequential keys (1, 2, 3...) to fill buckets optimally (100% density),
+//     maximizing CPU cache efficiency during range loops and inserts.
+//     To preserve this, the HIGH bits of the hash must strictly follow the key's monotonicity.
+//
+//  2. Entropy for Collision Resolution (h2):
+//     The map's in-bucket slot selection (h2) relies on low-bit entropy.
+//     Pointers often have stride-8 or stride-16 alignment, meaning their low bits are always 0.
+//     If we just return the key (Identity), these pointers will collide in h2, degrading performance.
+//
+// Solution (Hybrid Bit-Mask):
+//   - High Bits: `v & ^mask` -> Preserved exactly. Keeps the "sequential" property for h1.
+//   - Low Bits:  `mixed & mask` -> Scrambled using XOR+MUL. Provides entropy for h2.
+//   - Mask:      `entriesPerBucket - 1` (e.g., 5 for 6 entries).
+//
 //go:nosplit
-func hashUintptr(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return *(*uintptr)(ptr)
+func hashUintptr(ptr unsafe.Pointer, seed uintptr) uintptr {
+	v := *(*uintptr)(ptr)
+	x := v ^ seed
+	return (v & ^uintptr(entriesPerBucket-1)) | ((x * opt.HashPrime) & uintptr(entriesPerBucket-1))
 }
 
 //go:nosplit
-func hashUint64On32Bit(ptr unsafe.Pointer, _ uintptr) uintptr {
+func hashUint64On32Bit(ptr unsafe.Pointer, seed uintptr) uintptr {
 	v := *(*uint64)(ptr)
-	return uintptr(v) ^ uintptr(v>>32)
+	h := uintptr(v) ^ uintptr(v>>32)
+	x := h ^ seed
+	return (h & ^uintptr(entriesPerBucket-1)) | ((x * opt.HashPrime) & uintptr(entriesPerBucket-1))
 }
 
 //go:nosplit
-func hashUint64(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return uintptr(*(*uint64)(ptr))
+func hashUint64(ptr unsafe.Pointer, seed uintptr) uintptr {
+	v := uintptr(*(*uint64)(ptr))
+	x := v ^ seed
+	return (v & ^uintptr(entriesPerBucket-1)) | ((x * opt.HashPrime) & uintptr(entriesPerBucket-1))
 }
 
 //go:nosplit
-func hashUint32(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return uintptr(*(*uint32)(ptr))
+func hashUint32(ptr unsafe.Pointer, seed uintptr) uintptr {
+	v := uintptr(*(*uint32)(ptr))
+	x := v ^ seed
+	return (v & ^uintptr(entriesPerBucket-1)) | ((x * opt.HashPrime) & uintptr(entriesPerBucket-1))
 }
 
 //go:nosplit
-func hashUint16(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return uintptr(*(*uint16)(ptr))
+func hashUint16(ptr unsafe.Pointer, seed uintptr) uintptr {
+	v := uintptr(*(*uint16)(ptr))
+	x := v ^ seed
+	return (v & ^uintptr(entriesPerBucket-1)) | ((x * opt.HashPrime) & uintptr(entriesPerBucket-1))
 }
 
 //go:nosplit
-func hashUint8(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return uintptr(*(*uint8)(ptr))
+func hashUint8(ptr unsafe.Pointer, seed uintptr) uintptr {
+	v := uintptr(*(*uint8)(ptr))
+	x := v ^ seed
+	return (v & ^uintptr(entriesPerBucket-1)) | ((x * opt.HashPrime) & uintptr(entriesPerBucket-1))
 }
 
 //go:nosplit

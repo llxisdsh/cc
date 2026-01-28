@@ -1332,20 +1332,30 @@ func TestFlatMap_RangeProcess_CancelAndEarlyStop(t *testing.T) {
 		}
 		return true
 	})
-	// we cannot assert exact count, but state should be consistent
-	// First 9 updated, others unchanged
+	// Verify that exactly 9 keys were updated (value incremented by 1)
+	// and the rest remain unchanged. We cannot predict WHICH keys were updated
+	// because hash map iteration order is not guaranteed.
+	updatedCount := 0
+	unchangedCount := 0
 	for i := range 100 {
 		v, ok := m.Load(i)
 		if !ok {
 			t.Fatalf("missing key %d", i)
 		}
-		if i < 9 {
-			if v != i+1 {
-				t.Fatalf("key %d expected %d got %d", i, i+1, v)
-			}
-		} else if v != i {
-			t.Fatalf("key %d expected %d got %d", i, i, v)
+		switch v {
+		case i + 1:
+			updatedCount++
+		case i:
+			unchangedCount++
+		default:
+			t.Fatalf("key %d has unexpected value %d (expected %d or %d)", i, v, i, i+1)
 		}
+	}
+	if updatedCount != 9 {
+		t.Fatalf("expected 9 updated keys, got %d", updatedCount)
+	}
+	if unchangedCount != 91 {
+		t.Fatalf("expected 91 unchanged keys, got %d", unchangedCount)
 	}
 }
 
