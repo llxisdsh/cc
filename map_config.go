@@ -39,14 +39,6 @@ type MapConfig struct {
 	// which provides better performance but may use more memory.
 	// When true, the map will shrink when occupancy < 1/shrinkFraction.
 	autoShrink bool
-
-	// intKey specifies the hash distribution optimization strategies to use.
-	// These options control how hash values are converted to bucket indices
-	// in the h1 function. Different strategies work better for different
-	// key patterns and distributions.
-	// If true, linear distribution will be used (optimal for sequential keys).
-	// If false, auto distribution will be used (recommended for most cases).
-	intKey bool
 }
 
 // WithCapacity configuring new Map instance with capacity enough
@@ -76,9 +68,6 @@ func WithAutoShrink() func(*MapConfig) {
 // Parameters:
 //   - keyHash: custom hash function that takes a key and seed,
 //     returns hash value. Pass nil to use the default built-in hasher
-//   - intKey: optional hash distribution optimization strategies.
-//     true:  use linear distribution (optimal for sequential keys)
-//     false or omitted: auto-detection is used if this parameter is omitted.
 //
 // Usage:
 //
@@ -99,15 +88,11 @@ func WithAutoShrink() func(*MapConfig) {
 //   - Combine with distribution strategies for optimal performance
 func WithKeyHasher[K comparable](
 	keyHash func(key K, seed uintptr) uintptr,
-	intKey ...bool,
 ) func(*MapConfig) {
 	return func(c *MapConfig) {
 		if keyHash != nil {
 			c.keyHash = func(pointer unsafe.Pointer, u uintptr) uintptr {
 				return keyHash(*(*K)(pointer), u)
-			}
-			if len(intKey) != 0 {
-				c.intKey = intKey[0]
 			}
 		}
 	}
@@ -122,9 +107,6 @@ func WithKeyHasher[K comparable](
 //   - hs: unsafe hash function that operates on raw unsafe.Pointer.
 //     The pointer points to the key data in memory.
 //     Pass nil to use the default built-in hasher
-//   - intKey: optional hash distribution optimization strategies.
-//     true:  use linear distribution (optimal for sequential keys)
-//     false or omitted: auto-detection is used if this parameter is omitted.
 //
 // Usage:
 //
@@ -146,13 +128,9 @@ func WithKeyHasher[K comparable](
 //   - Distribution strategies still apply to the hash output
 func WithKeyHasherUnsafe(
 	hs HashFunc,
-	intKey ...bool,
 ) func(*MapConfig) {
 	return func(c *MapConfig) {
 		c.keyHash = hs
-		if len(intKey) != 0 {
-			c.intKey = intKey[0]
-		}
 	}
 }
 
@@ -283,14 +261,6 @@ type IHashFunc interface {
 	HashFunc(seed uintptr) uintptr
 }
 
-// IIntKey optional interface for key types to signal hash distribution
-// optimization strategies.
-//   - true:  use linear distribution (optimal for sequential keys)
-//   - false or omitted: auto-detection is used if this parameter is omitted.
-type IIntKey interface {
-	IntKey() bool
-}
-
 // IEqualFunc defines a custom equality comparison interface for value types.
 // Value types implementing this interface can provide their own equality logic,
 // serving as an alternative to WithValueEqual for type-specific comparison.
@@ -314,15 +284,11 @@ type IEqualFunc[T any] interface {
 	EqualFunc(other T) bool
 }
 
-func parseKeyInterface[K comparable]() (keyHash HashFunc, intKey bool) {
+func parseKeyInterface[K comparable]() (keyHash HashFunc) {
 	var k *K
 	if _, ok := any(k).(IHashFunc); ok {
 		keyHash = func(ptr unsafe.Pointer, seed uintptr) uintptr {
 			return any((*K)(ptr)).(IHashFunc).HashFunc(seed)
-		}
-
-		if _, ok = any(k).(IIntKey); ok {
-			intKey = any(*new(K)).(IIntKey).IntKey()
 		}
 	}
 	return

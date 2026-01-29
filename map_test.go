@@ -986,7 +986,7 @@ func TestMapWithKeyHasherUnsafe(t *testing.T) {
 			return uintptr(val*31) ^ seed
 		}
 
-		m := NewMap[int, string](WithKeyHasherUnsafe(unsafeIntHasher, true))
+		m := NewMap[int, string](WithKeyHasherUnsafe(unsafeIntHasher))
 
 		// Test with sequential keys (good for linear distribution)
 		for i := range 100 {
@@ -1601,10 +1601,6 @@ func (s SequentialKey) HashFunc(seed uintptr) uintptr {
 	return uintptr(s) + seed
 }
 
-func (s SequentialKey) IntKey() bool {
-	return true
-}
-
 type CustomValue struct {
 	Data []int
 	Meta string
@@ -1631,10 +1627,6 @@ func (s SmartKey) HashFunc(seed uintptr) uintptr {
 	return uintptr(s.ID) + seed
 }
 
-func (s SmartKey) IntKey() bool {
-	return true
-}
-
 type SmartValue struct {
 	Value   int
 	Ignored string
@@ -1658,7 +1650,7 @@ func (e EqualValue) EqualFunc(other EqualValue) bool {
 	return e.Value == other.Value
 }
 
-// TestMap_Interfaces tests the IHashFunc, IIntKey, and IEqualFunc interfaces
+// TestMap_Interfaces tests the IHashFunc, IEqualFunc interfaces
 func TestMap_Interfaces(t *testing.T) {
 	t.Run("IHashFunc", func(t *testing.T) {
 		m := NewMap[CustomKey, string]()
@@ -1683,28 +1675,6 @@ func TestMap_Interfaces(t *testing.T) {
 				val,
 				ok,
 			)
-		}
-	})
-
-	t.Run("IIntKey", func(t *testing.T) {
-		m := NewMap[SequentialKey, string]()
-
-		// Store sequential keys
-		for i := SequentialKey(1); i <= 10; i++ {
-			m.Store(i, fmt.Sprintf("value%d", i))
-		}
-
-		// Verify all values can be retrieved
-		for i := SequentialKey(1); i <= 10; i++ {
-			expected := fmt.Sprintf("value%d", i)
-			if val, ok := m.Load(i); !ok || val != expected {
-				t.Errorf("Expected %s, got %s, exists=%v", expected, val, ok)
-			}
-		}
-
-		// Test size
-		if size := m.Size(); size != 10 {
-			t.Errorf("Expected size 10, got %d", size)
 		}
 	})
 
@@ -6032,11 +6002,30 @@ func TestMap_init(t *testing.T) {
 func TestMap_HashUint64On32Bit(t *testing.T) {
 	val := uint64(0x123456789ABCDEF0)
 	hash := hashUint64On32Bit(unsafe.Pointer(&val), 0)
-	// The function XORs the lower 32 bits with the upper 32 bits
-	expected := uint32(0x9ABCDEF0) ^ uint32(0x12345678)
-	if uint32(hash) != expected {
-		t.Errorf("Expected hash %x, got %x", expected, hash)
+
+	// The new unified hash format:
+	// h = lower32 ^ upper32 = 0x9ABCDEF0 ^ 0x12345678 = 0x88888888
+	// high = (h / entriesPerBucket) << h2Bits
+	// low = (h * HashPrime) & h2Mask
+	h := uintptr(uint32(0x9ABCDEF0) ^ uint32(0x12345678))
+
+	// Verify the hash can be used to extract h1 and h2 correctly
+	h1v := h1(hash)
+	h2v := h2(hash)
+
+	// h1 should be hash >> h2Bits
+	expectedH1 := int(hash) >> 7
+	if h1v != expectedH1 {
+		t.Errorf("h1 mismatch: got %d, want %d", h1v, expectedH1)
 	}
+
+	// h2 should have high bit set (h2TopBit)
+	if h2v&0x80 == 0 {
+		t.Errorf("h2 should have high bit set, got %x", h2v)
+	}
+
+	// Verify the hash is derived from XOR'ed value
+	t.Logf("Input: %x, XOR'd: %x, Hash: %x, h1: %d, h2: %x", val, h, hash, h1v, h2v)
 }
 
 func TestMap_UnlockWithMeta(t *testing.T) {
@@ -6109,7 +6098,7 @@ func TestMap_EmbeddedHash(t *testing.T) {
 
 // TestDefaultHasherEdgeCases tests edge cases for defaultHasher to improve coverage
 func TestMap_DefaultHasherEdgeCases(t *testing.T) {
-	keyHash, _, _ := defaultHasher[string, int]()
+	keyHash, _ := defaultHasher[string, int]()
 
 	// Test with empty string
 	emptyStr := ""

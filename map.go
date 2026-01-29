@@ -36,7 +36,6 @@ type Map[K comparable, V any] struct {
 	valEqual EqualFunc // WithValueEqual
 	minLen   int       // WithCapacity
 	shrinkOn bool      // WithAutoShrink
-	intKey   bool
 }
 
 // rebuildState represents the current state of a resizing operation
@@ -87,7 +86,7 @@ func NewMap[K comparable, V any](
 //
 // Configuration Priority (highest to lowest):
 //   - Explicit With* functions (WithKeyHasher, WithValueEqual)
-//   - Interface implementations (IHashFunc, IIntKey, IEqualFunc)
+//   - Interface implementations (IHashFunc, IEqualFunc)
 //   - Default built-in implementations (defaultHasher) - fallback
 //
 // Parameters:
@@ -120,18 +119,15 @@ func (m *Map[K, V]) init(
 ) *mapTable {
 	// parse interface
 	if cfg.keyHash == nil {
-		cfg.keyHash, cfg.intKey = parseKeyInterface[K]()
+		cfg.keyHash = parseKeyInterface[K]()
 	}
 	if cfg.valEqual == nil {
 		cfg.valEqual = parseValueInterface[V]()
 	}
 	// perform initialization
-	m.keyHash, m.valEqual, m.intKey = defaultHasher[K, V]()
+	m.keyHash, m.valEqual = defaultHasher[K, V]()
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
-		if cfg.intKey {
-			m.intKey = true
-		}
 	}
 	if cfg.valEqual != nil {
 		m.valEqual = cfg.valEqual
@@ -801,7 +797,6 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	clone.valEqual = m.valEqual
 	clone.minLen = m.minLen
 	clone.shrinkOn = m.shrinkOn
-	clone.intKey = m.intKey
 	atomic.StorePointer(&clone.table,
 		unsafe.Pointer(newMapTable(clone.minLen, runtime.GOMAXPROCS(0))),
 	)
@@ -829,7 +824,7 @@ func (m *Map[K, V]) loadEntry_(
 ) *entry_[K, V] {
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
-	idx := table.mask & h1(hash, m.intKey)
+	idx := table.mask & h1(hash)
 	for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
 		meta := loadUint64(&b.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
@@ -891,7 +886,7 @@ func (m *Map[K, V]) computeEntry_(
 	fn func(e *entry_[K, V]) (*entry_[K, V], V, bool),
 	ignoreHint bool,
 ) (V, bool) {
-	h1v := h1(hash, m.intKey)
+	h1v := h1(hash)
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
 
@@ -998,7 +993,7 @@ func (m *Map[K, V]) computeEntry_(
 			}
 			// Delete
 			storePtr(oldB.At(oldIdx), nil)
-			newMeta := setByte(oldMeta, slotEmpty, oldIdx)
+			newMeta := setByte(oldMeta, h2Empty, oldIdx)
 			if oldB == root {
 				root.UnlockWithMeta(newMeta)
 			} else {
@@ -1166,7 +1161,7 @@ func (m *Map[K, V]) computeRangeEntry_(
 							}
 						} else {
 							storePtr(b.At(j), nil)
-							meta = setByte(meta, slotEmpty, j)
+							meta = setByte(meta, h2Empty, j)
 							storeUint64(&b.meta, meta)
 							table.AddSize(i, -1)
 						}
@@ -1364,7 +1359,6 @@ func (m *Map[K, V]) copyBucket(
 	mask := newTable.mask
 	seed := m.seed
 	keyHash := m.keyHash
-	intKey := m.intKey
 	copied := 0
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
@@ -1383,7 +1377,7 @@ func (m *Map[K, V]) copyBucket(
 						} else {
 							hash = keyHash(noescape(unsafe.Pointer(&e.Key)), seed)
 						}
-						idx := mask & h1(hash, intKey)
+						idx := mask & h1(hash)
 						destB := newTable.buckets.At(idx)
 						// Append entry to the destination bucket
 						h2v := h2(hash)

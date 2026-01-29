@@ -32,7 +32,6 @@ type FlatMap[K comparable, V any] struct {
 	keyHash  HashFunc
 	tableSeq SeqLock32 // seqlock of table
 	shrinkOn bool      // WithAutoShrink
-	intKey   bool
 	rs       flatRebuildState[K, V]
 }
 
@@ -99,15 +98,12 @@ func (m *FlatMap[K, V]) init(
 ) {
 	// parse interface
 	if cfg.keyHash == nil {
-		cfg.keyHash, cfg.intKey = parseKeyInterface[K]()
+		cfg.keyHash = parseKeyInterface[K]()
 	}
 	// perform initialization
-	m.keyHash, _, m.intKey = defaultHasher[K, V]()
+	m.keyHash, _ = defaultHasher[K, V]()
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
-		if cfg.intKey {
-			m.intKey = true
-		}
 	}
 
 	m.seed = uintptr(rand.Uint64())
@@ -152,7 +148,7 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 	hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
-	idx := table.mask & h1(hash, m.intKey)
+	idx := table.mask & h1(hash)
 	for b := table.buckets.At(idx); b != nil; b = (*flatBucket[K, V])(loadPtr(&b.next)) {
 		var spins int
 	retry:
@@ -356,7 +352,7 @@ func (m *FlatMap[K, V]) compute(
 			continue
 		}
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h1v := h1(hash, m.intKey)
+		h1v := h1(hash)
 		h2v := h2(hash)
 		h2w := broadcast(h2v)
 		idx := table.mask & h1v
@@ -479,7 +475,7 @@ func (m *FlatMap[K, V]) compute(
 			}
 			// Delete: update meta first so new Readers skip this slot immediately.
 			// Active Readers will see seq change and retry, then see h2=0.
-			newMeta := setByte(oldMeta, slotEmpty, oldIdx)
+			newMeta := setByte(oldMeta, h2Empty, oldIdx)
 			storeUint64(&oldB.meta, newMeta)
 			oldB.seq.BeginWriteLocked()
 			oldB.At(oldIdx).WriteUnfenced(entry_[K, V]{})
@@ -615,7 +611,7 @@ func (m *FlatMap[K, V]) ComputeRange(
 						e.WriteUnfenced(it.entry)
 						b.seq.EndWriteLocked()
 					case deleteOp:
-						meta = setByte(meta, slotEmpty, j)
+						meta = setByte(meta, h2Empty, j)
 						storeUint64(&b.meta, meta)
 						b.seq.BeginWriteLocked()
 						e.WriteUnfenced(entry_[K, V]{})
@@ -874,7 +870,6 @@ func (m *FlatMap[K, V]) copyBucket(
 	mask := newTable.mask
 	seed := m.seed
 	keyHash := m.keyHash
-	intKey := m.intKey
 	copied := 0
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
@@ -893,7 +888,7 @@ func (m *FlatMap[K, V]) copyBucket(
 					} else {
 						hash = keyHash(noescape(unsafe.Pointer(&e.Key)), seed)
 					}
-					idx := mask & h1(hash, intKey)
+					idx := mask & h1(hash)
 					destB := newTable.buckets.At(idx)
 					// Append entry to the destination bucket
 					h2v := h2(hash)
