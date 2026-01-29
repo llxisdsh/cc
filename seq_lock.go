@@ -264,12 +264,8 @@ func (slot *SeqLockSlot[T]) ReadUnfenced() (v T) {
 			default:
 				for i := range n {
 					off := i * ws
-					src := (*uintptr)(unsafe.Pointer(
-						uintptr(unsafe.Pointer(&slot.buf)) + off,
-					))
-					dst := (*uintptr)(unsafe.Pointer(
-						uintptr(unsafe.Pointer(&v)) + off,
-					))
+					src := (*uintptr)(unsafe.Add(unsafe.Pointer(&slot.buf), off))
+					dst := (*uintptr)(unsafe.Add(unsafe.Pointer(&v), off))
 					*dst = atomic.LoadUintptr(src)
 				}
 			}
