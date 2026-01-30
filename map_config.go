@@ -71,21 +71,13 @@ func WithAutoShrink() func(*MapConfig) {
 //
 // Usage:
 //
-//	// Basic custom hasher
 //	m := NewMap[string, int](WithKeyHasher(myCustomHashFunc))
-//
-//	// Custom hasher with linear distribution for sequential keys
-//	m := NewMap[int, string](WithKeyHasher(myIntHasher, true))
-//
-//	// Custom hasher with shift distribution for random keys
-//	m := NewMap[string, int](WithKeyHasher(myStringHasher, false))
 //
 // Use cases:
 //   - Optimize hash distribution for specific data patterns
 //   - Implement case-insensitive string hashing
 //   - Custom hashing for complex key types
 //   - Performance tuning for known key distributions
-//   - Combine with distribution strategies for optimal performance
 func WithKeyHasher[K comparable](
 	keyHash func(key K, seed uintptr) uintptr,
 ) func(*MapConfig) {
@@ -118,14 +110,12 @@ func WithKeyHasher[K comparable](
 //	}
 //	m := NewMap[string, int](WithKeyHasherUnsafe(unsafeHasher))
 //
-//	// Unsafe hasher with specific distribution strategy
-//	m := NewMap[int, string](WithKeyHasherUnsafe(fastIntHasher,true))
+// See [hashUint64] for reference implementation.
 //
 // Notes:
 //   - You must correctly cast unsafe.Pointer to the actual key type
 //   - Incorrect pointer operations will cause crashes or memory corruption
 //   - Only use if you understand Go's unsafe package
-//   - Distribution strategies still apply to the hash output
 func WithKeyHasherUnsafe(
 	hs HashFunc,
 ) func(*MapConfig) {
