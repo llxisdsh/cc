@@ -3,6 +3,7 @@ package cc
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -176,5 +177,48 @@ func TestParallel(t *testing.T) {
 	})
 	if err != context.Canceled {
 		t.Errorf("expected Canceled, got %v", err)
+	}
+}
+
+func TestParallelStress(t *testing.T) {
+	// High iteration count to catch the race
+	iterations := 10000
+	expectedErr := errors.New("worker error")
+
+	var contextCanceledCount int32
+	var successCount int32
+
+	var wg sync.WaitGroup
+	wg.Add(iterations)
+
+	for i := 0; i < iterations; i++ {
+		go func() {
+			defer wg.Done()
+			// We use a clean background context so only Parallel's internal cancellation is at play
+			err := Parallel(context.Background(), 5, func(ctx context.Context, idx int) error {
+				if idx == 0 {
+					return expectedErr
+				}
+				return nil
+			})
+
+			if err == nil {
+				t.Error("expected error, got nil")
+			} else if errors.Is(err, context.Canceled) {
+				atomic.AddInt32(&contextCanceledCount, 1)
+			} else if errors.Is(err, expectedErr) {
+				atomic.AddInt32(&successCount, 1)
+			} else {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if contextCanceledCount > 0 {
+		t.Errorf("Failed: Got context.Canceled %d times out of %d. The race condition is present.", contextCanceledCount, iterations)
+	} else {
+		t.Logf("Success: Got expected error %d times. No context.Canceled observed.", successCount)
 	}
 }

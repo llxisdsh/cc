@@ -58,7 +58,12 @@ func Do(ctx context.Context, fn func() error) error {
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case err := <-done:
+			return err
+		default:
+			return ctx.Err()
+		}
 	case err := <-done:
 		return err
 	}
@@ -182,7 +187,12 @@ func Parallel(ctx context.Context, n int, action func(context.Context, int) erro
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case err := <-errCh:
+			return err
+		default:
+			return ctx.Err()
+		}
 	case err := <-errCh:
 		return err
 	case <-waitDone:
