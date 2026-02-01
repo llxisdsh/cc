@@ -700,6 +700,16 @@ func storeUintptr(addr *uintptr, val uintptr) {
 	}
 }
 
+//nolint:unused
+//go:nosplit
+func addUintptr(addr *uintptr, delta uintptr) {
+	if noRaceTSO_ {
+		*addr += delta
+	} else {
+		atomic.AddUintptr(addr, delta)
+	}
+}
+
 // loadUint64Fast performs a non-atomic read, safe only when the caller holds
 // a relevant lock or is within a seqlock read window.
 //

@@ -1428,7 +1428,7 @@ func newMapTable(tableLen, cpus int) *mapTable {
 //
 //go:nosplit
 func (t *mapTable) AddSize(idx, delta int) {
-	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, uintptr(delta))
+	addUintptr(&t.size.At(t.sizeMask&idx).c, uintptr(delta))
 }
 
 // SumSize calculates the total number of entries in the table
