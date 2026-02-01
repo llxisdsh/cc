@@ -59,12 +59,17 @@ const (
 	metaEmpty uint64 = 0
 	metaMask  uint64 = 0x8080808080808080 >>
 		(64 - min(entriesPerBucket*8, 64))
+	// swar7F is used in the addition-based SWAR non-zero byte detection.
+	// It targets bytes 0 to (entriesPerBucket-1).
+	swar7F uint64 = 0x7F7F7F7F7F7F7F7F >>
+		(64 - min(entriesPerBucket*8, 64))
 
-	// h2 byte format: [1-bit: non-empty flag][7-bit: entropy]
-	h2Empty   = 0
-	h2Bits    = 7
-	h2TopBit  = 1 << h2Bits  // 0x80, non-empty marker
-	h2LowMask = h2TopBit - 1 // 0x7F, entropy mask
+	// h2 byte format: 0 = empty, 1-255 = h2 value (8-bit entropy)
+	// This provides ~255 possible values vs 128 with the old 7-bit scheme,
+	// reducing false positive matches by approximately 50%.
+	h2Empty = 0
+	h2Bits  = 8
+	h2Mask  = 0xFF // 8-bit entropy mask
 )
 
 const (
@@ -236,11 +241,12 @@ func h1(h uintptr) int {
 }
 
 // h2 extracts the byte-level hash for in-bucket lookups.
-// Uses the low h2Bits of the hash value.
+// Returns low 8 bits of hash, guaranteed to be 1-255 (never 0).
+// Zero is reserved as the "empty slot" marker in metadata.
 //
 //go:nosplit
 func h2(h uintptr) uint8 {
-	return uint8(h) | h2TopBit
+	return max(uint8(h), 1)
 }
 
 // broadcast replicates a byte value across all bytes of an uint64.
@@ -271,17 +277,24 @@ func firstMarkedByteIndex(w uint64) int {
 // that byte is zero.
 //
 // Notes:
-//   - This SWAR algorithm identifies byte positions containing zero values.
-//   - The operation (w - 0x0101010101010101) triggers underflow for zero-value
-//     bytes, causing their most significant bit (MSB) to flip to 1.
-//   - The subsequent &^ operation isolates the MSB markers specifically for
-//     bytes, that were originally zero.
-//   - Finally, & metaMask filters to only consider relevant data slots,
-//     using the mask-defined marker bits (MSB of each byte).
+// markZeroBytes implements SWAR (SIMD Within A Register) byte search.
+// Returns an uint64 with the most significant bit of each byte set if
+// that byte is zero.
 //
 //go:nosplit
 func markZeroBytes(w uint64) uint64 {
-	return (w - 0x0101010101010101) &^ w & metaMask
+	return markNonZeroBytes(w) ^ metaMask
+}
+
+// markNonZeroBytes finds bytes that are NOT zero (occupied slots).
+// Returns an uint64 with the MSB of each non-zero byte set.
+// Uses the addition-based algorithm: ((x & 0x7F) + 0x7F) | x
+// This avoids borrow propagation issues present in subtraction-based SWAR
+// when dealing with values like 0x01.
+//
+//go:nosplit
+func markNonZeroBytes(w uint64) uint64 {
+	return (((w & swar7F) + swar7F) | w) & metaMask
 }
 
 // setByte sets the byte at index idx in the uint64 w to the value b.
@@ -442,12 +455,12 @@ func defaultHasher[K comparable, V any]() (
 //
 // All hash functions output a unified format:
 //
-//	[high bits: bucket index] [low h2Bits: h2 entropy]
+//	[high bits: bucket index] [low 8 bits: h2 entropy]
 //
 // This enables branch-free h1/h2 extraction:
 //
 //	h1(h) = h >> h2Bits
-//	h2(h) = uint8(h) | h2TopBit
+//	h2(h) = max(uint8(h), 1)  // guaranteed non-zero by h2()
 //
 // For integers, we preserve sequential key distribution:
 //   - High bits: (v / entriesPerBucket) << h2Bits - maintains bucket ordering
@@ -461,7 +474,7 @@ func defaultHasher[K comparable, V any]() (
 //go:nosplit
 func mixUintptr(v uintptr, seed uintptr) uintptr {
 	h := (v / uintptr(entriesPerBucket)) << h2Bits
-	l := (v ^ seed*opt.HashPrime) & h2LowMask
+	l := (v ^ seed*opt.HashPrime) & h2Mask
 	return h | l
 }
 

@@ -416,7 +416,7 @@ func (m *FlatMap[K, V]) compute(
 				}
 			}
 			if emptyB == nil {
-				if empty := (^meta) & metaMask; empty != 0 {
+				if empty := markZeroBytes(meta); empty != 0 {
 					emptyB = b
 					emptyIdx = firstMarkedByteIndex(empty)
 					emptyMeta = meta
@@ -530,7 +530,7 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 			}
 			meta = loadUint64Fast(&b.meta)
 			cacheCount = 0
-			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+			for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				cache[cacheCount] = b.At(j).ReadUnfenced()
 				cacheCount++
@@ -599,7 +599,7 @@ func (m *FlatMap[K, V]) ComputeRange(
 			root.Lock()
 			for b := root; b != nil; b = (*flatBucket[K, V])(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
 					e := b.At(j)
 					it.entry = *e.Ptr()
@@ -879,7 +879,7 @@ func (m *FlatMap[K, V]) copyBucket(
 			srcB.Lock()
 			for b := srcB; b != nil; b = (*flatBucket[K, V])(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
 					e := b.At(j).Ptr()
 					var hash uintptr
@@ -894,7 +894,7 @@ func (m *FlatMap[K, V]) copyBucket(
 					h2v := h2(hash)
 					for {
 						meta := loadUint64Fast(&destB.meta)
-						empty := (^meta) & metaMask
+						empty := markZeroBytes(meta)
 						if empty != 0 {
 							emptyIdx := firstMarkedByteIndex(empty)
 							storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))

@@ -960,7 +960,7 @@ func (m *Map[K, V]) computeEntry_(
 				}
 			}
 			if emptyB == nil {
-				if empty := (^meta) & metaMask; empty != 0 {
+				if empty := markZeroBytes(meta); empty != 0 {
 					emptyB = b
 					emptyIdx = firstMarkedByteIndex(empty)
 					emptyMeta = meta
@@ -1088,7 +1088,7 @@ func (m *Map[K, V]) rangeEntry_(yield func(e *entry_[K, V]) bool) {
 	for i := 0; i <= table.mask; i++ {
 		for b := table.buckets.At(i); b != nil; b = (*bucket)(loadPtr(&b.next)) {
 			meta := loadUint64(&b.meta)
-			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+			for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
 					if !yield(e) {
@@ -1146,7 +1146,7 @@ func (m *Map[K, V]) computeRangeEntry_(
 			root.Lock()
 			for b := root; b != nil; b = (*bucket)(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
 					if e := (*entry_[K, V])(*b.At(j)); e != nil {
 						newEntry, shouldContinue := fn(e)
@@ -1368,7 +1368,7 @@ func (m *Map[K, V]) copyBucket(
 			srcB.Lock()
 			for b := srcB; b != nil; b = (*bucket)(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
 					if e := (*entry_[K, V])(*b.At(j)); e != nil {
 						var hash uintptr
@@ -1383,7 +1383,7 @@ func (m *Map[K, V]) copyBucket(
 						h2v := h2(hash)
 						for {
 							meta := loadUint64Fast(&destB.meta)
-							empty := (^meta) & metaMask
+							empty := markZeroBytes(meta)
 							if empty != 0 {
 								emptyIdx := firstMarkedByteIndex(empty)
 								storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
