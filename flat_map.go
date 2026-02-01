@@ -938,7 +938,7 @@ func newFlatTable[K comparable, V any](
 
 //go:nosplit
 func (t *flatTable[K, V]) AddSize(idx, delta int) {
-	addUintptr(&t.size.At(t.sizeMask&idx).c, uintptr(delta))
+	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, uintptr(delta))
 }
 
 //go:nosplit
