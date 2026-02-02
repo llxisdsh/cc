@@ -11,7 +11,7 @@ func calcEntriesSim(ps, cl int) int {
 	if target <= overhead {
 		return 0
 	}
-	e := max(min((target-overhead)/ps, 7), 0)
+	e := max(min((target-overhead)/ps, 6), 0)
 	return e
 }
 

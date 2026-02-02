@@ -22,10 +22,8 @@ const (
 )
 
 const (
-	// opByteIdx reserves the highest byte of meta for extended status flags
-	opByteIdx    = 7
-	opLockMask   = uint64(1) << (opByteIdx*8 + 7)
-	metaDataMask = uint64(0x00ffffffffffffff)
+	// opLockMask reserves the highest bit of meta for the lock
+	opLockMask = uint64(1) << 63
 
 	// entriesPerBucket defines the number of per-bucket entry pointers.
 	// Computed at compile time to avoid padding while packing buckets
@@ -36,7 +34,7 @@ const (
 	//   overhead = 8(meta) + ptrSize(next)
 	//   target   = min(CacheLineSize, base)
 	//   base     = 32 on 32-bit, 64 on 64-bit
-	//   entries  = min(7, (target - overhead) / ptrSize)
+	//   entries  = min(6, (target - overhead) / ptrSize)
 	//
 	// Rationale:
 	//   - 64-bit: bucket size becomes 64B → 1/2/4 buckets per
@@ -53,23 +51,40 @@ const (
 		next unsafe.Pointer
 	}{}))
 	maxBucketBytes   = min(int(cacheLineSize), 32+32*(pointerSize/8))
-	entriesPerBucket = min(opByteIdx, (maxBucketBytes-bucketOverhead)/pointerSize)
+	entriesPerBucket = min(6, (maxBucketBytes-bucketOverhead)/pointerSize)
 
-	// Metadata constants for bucket entry management
-	metaEmpty uint64 = 0
-	metaMask  uint64 = 0x8080808080808080 >>
-		(64 - min(entriesPerBucket*8, 64))
-	// swar7F is used in the addition-based SWAR non-zero byte detection.
-	// It targets bytes 0 to (entriesPerBucket-1).
-	swar7F uint64 = 0x7F7F7F7F7F7F7F7F >>
-		(64 - min(entriesPerBucket*8, 64))
-
-	// h2 byte format: 0 = empty, 1-255 = h2 value (8-bit entropy)
-	// This provides ~255 possible values vs 128 with the old 7-bit scheme,
-	// reducing false positive matches by approximately 50%.
+	// h2 slot configuration:
+	// - h2Bits defines the size of each slot in bits.
+	// - h2Mask is the bitmask for extracting the h2 value.
+	// - h2Empty (0) is reserved to mark empty slots.
+	// Values 1 to (1<<h2Bits - 1) are valid hash entropy.
+	// Larger h2Bits reduces collision chance (false positives).
 	h2Empty = 0
-	h2Bits  = 8
-	h2Mask  = 0xFF // 8-bit entropy mask
+	h2Bits  = 8 // Adjustable: 8, 9, 10
+	h2Mask  = (1 << h2Bits) - 1
+
+	// Metadata constants
+	metaEmpty = uint64(0)
+	// metaMask covers all valid slots, ensuring we don't access out-of-bounds
+	// slots on 32-bit systems (where entriesPerBucket might be < 6).
+	metaMask = uint64(1)<<(entriesPerBucket*h2Bits) - 1
+
+	// SWAR (SIMD Within A Register) constants
+	//
+	// swarLO:     LSB of each slot (1 at bit 0, h2Bits, 2*h2Bits...)
+	// swarHI:     MSB of each slot (1 at bit h2Bits-1, 2*h2Bits-1...)
+	// swarVAL:    Value bits mask (all 1s within slot except MSB)
+	// swarSafeHI: swarHI masked by metaMask (ensures 32-bit safety)
+	//
+	// Example (h2Bits=8):
+	//  swarLO:     0x01... (LSB of each byte)
+	//  swarHI:     0x80... (MSB of each byte)
+	//  swarVAL:    0x7F... (Value bits mask, all 1s except MSB)
+	swarLO = 1 | (1 << (1 * h2Bits)) | (1 << (2 * h2Bits)) |
+		(1 << (3 * h2Bits)) | (1 << (4 * h2Bits)) | (1 << (5 * h2Bits))
+	swarHI     = swarLO << (h2Bits - 1)
+	swarVAL    = swarHI - swarLO
+	swarSafeHI = swarHI & metaMask
 )
 
 const (
@@ -237,73 +252,77 @@ func noEscape[T any](p *T) *T {
 //
 //go:nosplit
 func h1(h uintptr) int {
-	return int(h) >> h2Bits
+	return int(h >> h2Bits)
 }
 
-// h2 extracts the byte-level hash for in-bucket lookups.
-// Returns low 8 bits of hash, guaranteed to be 1-255 (never 0).
+type h2Type = uint16
+
+// h2 extracts the h2 entropy for in-bucket lookups.
+// Returns low h2Bits of hash, guaranteed to be 1 to (1<<h2Bits - 1) (never 0).
+// Example (h2Bits=8): Returns 1..255. 0 is reserved.
 // Zero is reserved as the "empty slot" marker in metadata.
 //
 //go:nosplit
-func h2(h uintptr) uint8 {
-	return max(uint8(h), 1)
+func h2(h uintptr) h2Type {
+	return h2Type(max(h&h2Mask, 1))
 }
 
-// broadcast replicates a byte value across all bytes of an uint64.
+// broadcast replicates a h2Bits value across all 6 slots of an uint64.
+// Example (h2Bits=8): 0x01 -> 0x01010101010101...
 //
 //go:nosplit
-func broadcast(b uint8) uint64 {
-	return 0x101010101010101 * uint64(b)
+func broadcast(val h2Type) uint64 {
+	return uint64(val) * swarLO
 }
 
-// firstMarkedByteIndex finds the index of the first marked byte in an uint64.
+// firstMarkedSlotIndex finds the index of the first marked slot in an uint64.
 // It uses the trailing zeros count to determine the position of the first set
-// bit, then converts that bit position to a byte index (dividing by 8).
+// bit, then converts that bit position to a slot index (dividing by h2Bits).
 //
 // Parameters:
-//   - w: A uint64 value with bits set to mark specific bytes
+//   - w: A uint64 value with bits set to mark specific slots (at guards)
 //
 // Returns:
-//   - The index (0-7) of the first marked byte in the uint64
+//   - The index (0-5) of the first marked slot in the uint64
 //
 //go:nosplit
-func firstMarkedByteIndex(w uint64) int {
-	return bits.TrailingZeros64(w) >> 3
+func firstMarkedSlotIndex(w uint64) int {
+	return bits.TrailingZeros64(w) / h2Bits
 }
 
-// markZeroBytes implements SWAR (SIMD Within A Register) byte search.
-// It may produce false positives (e.g., for 0x0100), so results should be
-// verified. Returns an uint64 with the most significant bit of each byte set if
-// that byte is zero.
-//
-// Notes:
-// markZeroBytes implements SWAR (SIMD Within A Register) byte search.
-// Returns an uint64 with the most significant bit of each byte set if
-// that byte is zero.
+// markZeroSlots (SWAR) detects empty slots (value 0).
+// Returns an uint64 with the guard bit of each zero slot set.
 //
 //go:nosplit
-func markZeroBytes(w uint64) uint64 {
-	return markNonZeroBytes(w) ^ metaMask
+func markZeroSlots(w uint64) uint64 {
+	return markNonZeroSlots(w) ^ swarSafeHI
 }
 
-// markNonZeroBytes finds bytes that are NOT zero (occupied slots).
-// Returns an uint64 with the MSB of each non-zero byte set.
-// Uses the addition-based algorithm: ((x & 0x7F) + 0x7F) | x
-// This avoids borrow propagation issues present in subtraction-based SWAR
-// when dealing with values like 0x01.
+// markNonZeroSlots (SWAR) detects occupied slots (value > 0).
+// Returns an uint64 with the MSB of each non-zero slot set.
+//
+// Algorithm (Example h2Bits=8):
+//
+//	Uses ((x & 0x7F...) + 0x7F...) | x
+//	- If x=0:    (0 + 0x7F) | 0    = 0x7F (MSB is 0)
+//	- If x=1:    (1 + 0x7F) | 1    = 0x80... (MSB becomes 1)
+//	- If x=0x80: (0 + 0x7F) | 0x80 = 0xFF... (MSB starts as 1, stays 1)
+//
+// Uses addition-based algorithm: ((x & swarVAL) + swarVAL) | x
+// where swarVAL has 1s in value bits (low h2Bits-1) of each slot.
 //
 //go:nosplit
-func markNonZeroBytes(w uint64) uint64 {
-	return (((w & swar7F) + swar7F) | w) & metaMask
+func markNonZeroSlots(w uint64) uint64 {
+	return (((w & swarVAL) + swarVAL) | w) & swarSafeHI
 }
 
-// setByte sets the byte at index idx in the uint64 w to the value b.
+// setSlot sets the slot at index idx in the uint64 w to value.
 // Returns the modified uint64 value.
 //
 //go:nosplit
-func setByte(w uint64, b uint8, idx int) uint64 {
-	shift := idx << 3
-	return (w &^ (0xff << shift)) | (uint64(b) << shift)
+func setSlot(w uint64, value h2Type, idx int) uint64 {
+	shift := idx * h2Bits
+	return (w &^ (h2Mask << shift)) | (uint64(value) << shift)
 }
 
 // ============================================================================
@@ -460,7 +479,7 @@ func defaultHasher[K comparable, V any]() (
 // This enables branch-free h1/h2 extraction:
 //
 //	h1(h) = h >> h2Bits
-//	h2(h) = max(uint8(h), 1)  // guaranteed non-zero by h2()
+//	h2(h) = max(h&h2Mask, 1)  // guaranteed non-zero by h2()
 //
 // For integers, we preserve sequential key distribution:
 //   - High bits: (v / entriesPerBucket) << h2Bits - maintains bucket ordering

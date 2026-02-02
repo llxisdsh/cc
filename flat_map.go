@@ -160,8 +160,8 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 		meta := loadUint64Fast(&b.meta)
 		//goland:noinspection GoBoolExpressions
 		if !opt.Race_ {
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
+			for marked := markZeroSlots(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedSlotIndex(marked)
 				e := b.At(j).ReadUnfenced()
 				if !b.seq.EndRead(s1) {
 					goto retry
@@ -183,8 +183,8 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 			// that occurred with the previous iterative loop.
 			var cache [entriesPerBucket]entry_[K, V]
 			var cacheCount int
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
+			for marked := markZeroSlots(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedSlotIndex(marked)
 				cache[cacheCount] = b.At(j).ReadUnfenced()
 				cacheCount++
 			}
@@ -400,8 +400,8 @@ func (m *FlatMap[K, V]) compute(
 	findLoop:
 		for b := root; b != nil; b = (*flatBucket[K, V])(b.next) {
 			meta := loadUint64Fast(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
+			for marked := markZeroSlots(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedSlotIndex(marked)
 				e := b.At(j).Ptr()
 				if opt.EmbeddedHash_ {
 					if e.GetHash() == hash && e.Key == key {
@@ -416,9 +416,9 @@ func (m *FlatMap[K, V]) compute(
 				}
 			}
 			if emptyB == nil {
-				if empty := markZeroBytes(meta); empty != 0 {
+				if empty := markZeroSlots(meta); empty != 0 {
 					emptyB = b
-					emptyIdx = firstMarkedByteIndex(empty)
+					emptyIdx = firstMarkedSlotIndex(empty)
 					emptyMeta = meta
 				}
 			}
@@ -442,7 +442,7 @@ func (m *FlatMap[K, V]) compute(
 				// StoreBarrier ensures Entry is visible before meta update on ARM.
 				emptyB.At(emptyIdx).WriteUnfenced(it.entry)
 				// emptyB.seq.WriteBarrier()
-				newMeta := setByte(emptyMeta, h2v, emptyIdx)
+				newMeta := setSlot(emptyMeta, h2v, emptyIdx)
 				storeUint64(&emptyB.meta, newMeta)
 
 				root.Unlock()
@@ -451,7 +451,7 @@ func (m *FlatMap[K, V]) compute(
 			}
 			// append new bucket
 			storePtr(&lastB.next, unsafe.Pointer(&flatBucket[K, V]{
-				meta: setByte(emptyMeta, h2v, 0),
+				meta: setSlot(emptyMeta, h2v, 0),
 				entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
 					{buf: it.entry},
 				},
@@ -475,7 +475,7 @@ func (m *FlatMap[K, V]) compute(
 			}
 			// Delete: update meta first so new Readers skip this slot immediately.
 			// Active Readers will see seq change and retry, then see h2=0.
-			newMeta := setByte(oldMeta, h2Empty, oldIdx)
+			newMeta := setSlot(oldMeta, h2Empty, oldIdx)
 			storeUint64(&oldB.meta, newMeta)
 			oldB.seq.BeginWriteLocked()
 			oldB.At(oldIdx).WriteUnfenced(entry_[K, V]{})
@@ -484,7 +484,7 @@ func (m *FlatMap[K, V]) compute(
 			root.Unlock()
 			table.AddSize(idx, -1)
 			// Check if table shrinking is needed
-			if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
+			if m.shrinkOn && newMeta&metaMask == metaEmpty &&
 				mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
 				tableLen := table.mask + 1
 				if minTableLen < tableLen {
@@ -530,8 +530,8 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 			}
 			meta = loadUint64Fast(&b.meta)
 			cacheCount = 0
-			for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
+			for marked := markNonZeroSlots(meta); marked != 0; marked &= marked - 1 {
+				j := firstMarkedSlotIndex(marked)
 				cache[cacheCount] = b.At(j).ReadUnfenced()
 				cacheCount++
 			}
@@ -599,8 +599,8 @@ func (m *FlatMap[K, V]) ComputeRange(
 			root.Lock()
 			for b := root; b != nil; b = (*flatBucket[K, V])(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
+				for marked := markNonZeroSlots(meta); marked != 0; marked &= marked - 1 {
+					j := firstMarkedSlotIndex(marked)
 					e := b.At(j)
 					it.entry = *e.Ptr()
 					it.op = cancelOp
@@ -611,7 +611,7 @@ func (m *FlatMap[K, V]) ComputeRange(
 						e.WriteUnfenced(it.entry)
 						b.seq.EndWriteLocked()
 					case deleteOp:
-						meta = setByte(meta, h2Empty, j)
+						meta = setSlot(meta, h2Empty, j)
 						storeUint64(&b.meta, meta)
 						b.seq.BeginWriteLocked()
 						e.WriteUnfenced(entry_[K, V]{})
@@ -879,8 +879,8 @@ func (m *FlatMap[K, V]) copyBucket(
 			srcB.Lock()
 			for b := srcB; b != nil; b = (*flatBucket[K, V])(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
+				for marked := markNonZeroSlots(meta); marked != 0; marked &= marked - 1 {
+					j := firstMarkedSlotIndex(marked)
 					e := b.At(j).Ptr()
 					var hash uintptr
 					if opt.EmbeddedHash_ {
@@ -894,17 +894,16 @@ func (m *FlatMap[K, V]) copyBucket(
 					h2v := h2(hash)
 					for {
 						meta := loadUint64Fast(&destB.meta)
-						empty := markZeroBytes(meta)
-						if empty != 0 {
-							emptyIdx := firstMarkedByteIndex(empty)
-							storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
+						if empty := markZeroSlots(meta); empty != 0 {
+							emptyIdx := firstMarkedSlotIndex(empty)
+							storeUint64Fast(&destB.meta, setSlot(meta, h2v, emptyIdx))
 							*destB.At(emptyIdx).Ptr() = *e
 							break
 						}
 						next := (*flatBucket[K, V])(destB.next)
 						if next == nil {
 							destB.next = unsafe.Pointer(&flatBucket[K, V]{
-								meta: setByte(metaEmpty, h2v, 0),
+								meta: setSlot(metaEmpty, h2v, 0),
 								entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
 									{buf: *e},
 								},

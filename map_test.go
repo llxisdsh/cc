@@ -106,8 +106,8 @@ func (m *Map[K, V]) stats() *mapStats {
 			stats.Capacity += entriesPerBucket
 
 			meta := loadUint64(&b.meta)
-			for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
+			for marked := markNonZeroSlots(meta); marked != 0; marked &= marked - 1 {
+				j := firstMarkedSlotIndex(marked)
 				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
 					stats.Size++
 					entriesLocal++

@@ -827,8 +827,8 @@ func (m *Map[K, V]) loadEntry_(
 	idx := table.mask & h1(hash)
 	for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
 		meta := loadUint64(&b.meta)
-		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-			j := firstMarkedByteIndex(marked)
+		for marked := markZeroSlots(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j := firstMarkedSlotIndex(marked)
 			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
 				if opt.EmbeddedHash_ {
 					if e.GetHash() == hash && e.Key == *key {
@@ -943,8 +943,8 @@ func (m *Map[K, V]) computeEntry_(
 	findLoop:
 		for b := root; b != nil; b = (*bucket)(b.next) {
 			meta := loadUint64Fast(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
+			for marked := markZeroSlots(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedSlotIndex(marked)
 				if e := (*entry_[K, V])(*b.At(j)); e != nil {
 					if opt.EmbeddedHash_ {
 						if e.GetHash() == hash && e.Key == *key {
@@ -960,9 +960,9 @@ func (m *Map[K, V]) computeEntry_(
 				}
 			}
 			if emptyB == nil {
-				if empty := markZeroBytes(meta); empty != 0 {
+				if empty := markZeroSlots(meta); empty != 0 {
 					emptyB = b
-					emptyIdx = firstMarkedByteIndex(empty)
+					emptyIdx = firstMarkedSlotIndex(empty)
 					emptyMeta = meta
 				}
 			}
@@ -993,7 +993,7 @@ func (m *Map[K, V]) computeEntry_(
 			}
 			// Delete
 			storePtr(oldB.At(oldIdx), nil)
-			newMeta := setByte(oldMeta, h2Empty, oldIdx)
+			newMeta := setSlot(oldMeta, h2Empty, oldIdx)
 			if oldB == root {
 				root.UnlockWithMeta(newMeta)
 			} else {
@@ -1003,7 +1003,7 @@ func (m *Map[K, V]) computeEntry_(
 			table.AddSize(idx, -1)
 
 			// Check if table shrinking is needed
-			if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
+			if m.shrinkOn && newMeta&metaMask == metaEmpty &&
 				loadPtr(&m.rs) == nil {
 				tableLen := table.mask + 1
 				if m.minLen < tableLen {
@@ -1033,7 +1033,7 @@ func (m *Map[K, V]) computeEntry_(
 			// and this reduces the window where meta is visible but pointer is
 			// still nil
 			storePtr(emptyB.At(emptyIdx), unsafe.Pointer(newEntry))
-			newMeta := setByte(emptyMeta, h2v, emptyIdx)
+			newMeta := setSlot(emptyMeta, h2v, emptyIdx)
 			if emptyB == root {
 				root.UnlockWithMeta(newMeta)
 			} else {
@@ -1046,7 +1046,7 @@ func (m *Map[K, V]) computeEntry_(
 
 		// No empty slot, create new bucket and insert
 		storePtr(&lastB.next, unsafe.Pointer(&bucket{
-			meta: setByte(metaEmpty, h2v, 0),
+			meta: setSlot(metaEmpty, h2v, 0),
 			entries: [entriesPerBucket]unsafe.Pointer{
 				unsafe.Pointer(newEntry),
 			},
@@ -1088,8 +1088,8 @@ func (m *Map[K, V]) rangeEntry_(yield func(e *entry_[K, V]) bool) {
 	for i := 0; i <= table.mask; i++ {
 		for b := table.buckets.At(i); b != nil; b = (*bucket)(loadPtr(&b.next)) {
 			meta := loadUint64(&b.meta)
-			for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
+			for marked := markNonZeroSlots(meta); marked != 0; marked &= marked - 1 {
+				j := firstMarkedSlotIndex(marked)
 				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
 					if !yield(e) {
 						return
@@ -1146,8 +1146,8 @@ func (m *Map[K, V]) computeRangeEntry_(
 			root.Lock()
 			for b := root; b != nil; b = (*bucket)(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
+				for marked := markNonZeroSlots(meta); marked != 0; marked &= marked - 1 {
+					j := firstMarkedSlotIndex(marked)
 					if e := (*entry_[K, V])(*b.At(j)); e != nil {
 						newEntry, shouldContinue := fn(e)
 
@@ -1161,7 +1161,7 @@ func (m *Map[K, V]) computeRangeEntry_(
 							}
 						} else {
 							storePtr(b.At(j), nil)
-							meta = setByte(meta, h2Empty, j)
+							meta = setSlot(meta, h2Empty, j)
 							storeUint64(&b.meta, meta)
 							table.AddSize(i, -1)
 						}
@@ -1368,8 +1368,8 @@ func (m *Map[K, V]) copyBucket(
 			srcB.Lock()
 			for b := srcB; b != nil; b = (*bucket)(b.next) {
 				meta := loadUint64Fast(&b.meta)
-				for marked := markNonZeroBytes(meta); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
+				for marked := markNonZeroSlots(meta); marked != 0; marked &= marked - 1 {
+					j := firstMarkedSlotIndex(marked)
 					if e := (*entry_[K, V])(*b.At(j)); e != nil {
 						var hash uintptr
 						if opt.EmbeddedHash_ {
@@ -1383,17 +1383,16 @@ func (m *Map[K, V]) copyBucket(
 						h2v := h2(hash)
 						for {
 							meta := loadUint64Fast(&destB.meta)
-							empty := markZeroBytes(meta)
-							if empty != 0 {
-								emptyIdx := firstMarkedByteIndex(empty)
-								storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
+							if empty := markZeroSlots(meta); empty != 0 {
+								emptyIdx := firstMarkedSlotIndex(empty)
+								storeUint64Fast(&destB.meta, setSlot(meta, h2v, emptyIdx))
 								*destB.At(emptyIdx) = unsafe.Pointer(e)
 								break
 							}
 							next := (*bucket)(destB.next)
 							if next == nil {
 								destB.next = unsafe.Pointer(&bucket{
-									meta:    setByte(metaEmpty, h2v, 0),
+									meta:    setSlot(metaEmpty, h2v, 0),
 									entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
 								})
 								break
