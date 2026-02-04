@@ -4299,8 +4299,8 @@ func benchmarkMapStringKeys(
 		storeThreshold := 10 * readPercentage
 		deleteThreshold := 10*readPercentage + ((1000 - 10*readPercentage) / 2)
 		for pb.Next() {
-			op := rand.IntN(1000)
-			i := rand.IntN(benchmarkNumEntries)
+			op := int(runtime_cheaprand()) % 1000
+			i := int(runtime_cheaprand()) % benchmarkNumEntries
 			if op >= deleteThreshold {
 				deleteFn(benchmarkKeys[i])
 			} else if op >= storeThreshold {
@@ -4434,8 +4434,8 @@ func benchmarkMapIntKeys(
 		storeThreshold := 10 * readPercentage
 		deleteThreshold := 10*readPercentage + ((1000 - 10*readPercentage) / 2)
 		for pb.Next() {
-			op := rand.IntN(1000)
-			i := rand.IntN(benchmarkNumEntries)
+			op := int(runtime_cheaprand()) % 1000
+			i := int(runtime_cheaprand()) % benchmarkNumEntries
 			if op >= deleteThreshold {
 				deleteFn(i)
 			} else if op >= storeThreshold {

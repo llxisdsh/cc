@@ -9,7 +9,7 @@ require (
 	github.com/llxisdsh/cc v0.0.0
 	github.com/mhmtszr/concurrent-swiss-map v1.0.9
 	github.com/orcaman/concurrent-map/v2 v2.0.1
-	github.com/puzpuzpuz/xsync/v4 v4.2.0
+	github.com/puzpuzpuz/xsync/v4 v4.4.0
 	github.com/zhangyunhao116/skipmap v0.10.1
 	golang.org/x/sync v0.19.0
 )
@@ -20,7 +20,7 @@ require (
 	github.com/dolthub/maphash v0.1.0 // indirect
 	github.com/zhangyunhao116/fastrand v0.3.0 // indirect
 	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
-	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
 )
 
 replace github.com/llxisdsh/cc => ../
