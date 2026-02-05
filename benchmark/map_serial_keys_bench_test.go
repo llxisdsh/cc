@@ -70,7 +70,7 @@ func BenchmarkLoadOrStore_cc_FlatMap(b *testing.B) {
 func BenchmarkLoad_cc_FlatMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewFlatMap[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -90,7 +90,7 @@ func BenchmarkLoad_cc_FlatMap(b *testing.B) {
 func BenchmarkMixed_cc_FlatMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewFlatMap[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -157,7 +157,7 @@ func BenchmarkLoad_cc_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewMap[int, int]()
 
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -177,7 +177,7 @@ func BenchmarkLoad_cc_Map(b *testing.B) {
 func BenchmarkMixed_cc_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewMap[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -243,7 +243,7 @@ func BenchmarkLoadOrStore_xsync_Map(b *testing.B) {
 func BenchmarkLoad_xsync_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := xsync.NewMap[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -263,7 +263,7 @@ func BenchmarkLoad_xsync_Map(b *testing.B) {
 func BenchmarkMixed_xsync_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := xsync.NewMap[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -329,7 +329,7 @@ func BenchmarkLoadOrStore_RWLockShardedMap(b *testing.B) {
 func BenchmarkLoad_RWLockShardedMap(b *testing.B) {
 	b.ReportAllocs()
 	m := NewRWLockShardedMap[int, int](runtime.GOMAXPROCS(0) * 4)
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -349,7 +349,7 @@ func BenchmarkLoad_RWLockShardedMap(b *testing.B) {
 func BenchmarkMixed_RWLockShardedMap(b *testing.B) {
 	b.ReportAllocs()
 	m := NewRWLockShardedMap[int, int](runtime.GOMAXPROCS(0) * 4)
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -414,7 +414,7 @@ func BenchmarkLoadOrStore_original_syncMap(b *testing.B) {
 func BenchmarkLoad_original_syncMap(b *testing.B) {
 	b.ReportAllocs()
 	var m sync.Map
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -434,7 +434,7 @@ func BenchmarkLoad_original_syncMap(b *testing.B) {
 func BenchmarkMixed_original_syncMap(b *testing.B) {
 	b.ReportAllocs()
 	var m sync.Map
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -500,7 +500,7 @@ func BenchmarkLoadOrStore_alphadose_haxmap(b *testing.B) {
 func BenchmarkLoad_alphadose_haxmap(b *testing.B) {
 	b.ReportAllocs()
 	m := haxmap.New[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -520,7 +520,7 @@ func BenchmarkLoad_alphadose_haxmap(b *testing.B) {
 func BenchmarkMixed_alphadose_haxmap(b *testing.B) {
 	b.ReportAllocs()
 	m := haxmap.New[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -586,7 +586,7 @@ func BenchmarkLoadOrStore_zhangyunhao116_skipmap(b *testing.B) {
 func BenchmarkLoad_zhangyunhao116_skipmap(b *testing.B) {
 	b.ReportAllocs()
 	m := skipmap.New[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -606,7 +606,7 @@ func BenchmarkLoad_zhangyunhao116_skipmap(b *testing.B) {
 func BenchmarkMixed_zhangyunhao116_skipmap(b *testing.B) {
 	b.ReportAllocs()
 	m := skipmap.New[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -757,7 +757,7 @@ func BenchmarkLoadOrStore_fufuok_cmap(b *testing.B) {
 func BenchmarkLoad_fufuok_cmap(b *testing.B) {
 	b.ReportAllocs()
 	m := cmap.NewOf[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -777,7 +777,7 @@ func BenchmarkLoad_fufuok_cmap(b *testing.B) {
 func BenchmarkMixed_fufuok_cmap(b *testing.B) {
 	b.ReportAllocs()
 	m := cmap.NewOf[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -832,7 +832,7 @@ func BenchmarkLoadOrStore_mhmtszr_concurrent_swiss_map(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			if !m.Has(i) {
-				m.Store(i, i) // 没有LoadOrStore
+				m.Store(i, i) // no LoadOrStore
 			}
 			i++
 			if i >= countLoadOrStore {
@@ -845,7 +845,7 @@ func BenchmarkLoadOrStore_mhmtszr_concurrent_swiss_map(b *testing.B) {
 func BenchmarkLoad_mhmtszr_concurrent_swiss_map(b *testing.B) {
 	b.ReportAllocs()
 	m := csmap.New(csmap.WithShardCount[int, int](32))
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -865,7 +865,7 @@ func BenchmarkLoad_mhmtszr_concurrent_swiss_map(b *testing.B) {
 func BenchmarkMixed_mhmtszr_concurrent_swiss_map(b *testing.B) {
 	b.ReportAllocs()
 	m := csmap.New(csmap.WithShardCount[int, int](32))
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -999,7 +999,7 @@ func BenchmarkLoad_orcaman_concurrent_map(b *testing.B) {
 			return uint32(key)
 		},
 	)
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -1023,7 +1023,7 @@ func BenchmarkMixed_orcaman_concurrent_map(b *testing.B) {
 			return uint32(key)
 		},
 	)
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -1147,7 +1147,7 @@ func BenchmarkLoadOrStore_snawoot_lfmap(b *testing.B) {
 func BenchmarkLoad_snawoot_lfmap(b *testing.B) {
 	b.ReportAllocs()
 	m := lfmap.New[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -1167,7 +1167,7 @@ func BenchmarkLoad_snawoot_lfmap(b *testing.B) {
 func BenchmarkMixed_snawoot_lfmap(b *testing.B) {
 	b.ReportAllocs()
 	m := lfmap.New[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Set(i, i)
 	}
 	runtime.GC()
@@ -1236,7 +1236,7 @@ func BenchmarkLoadOrStore_RWLockMap(b *testing.B) {
 func BenchmarkLoad_RWLockMap(b *testing.B) {
 	b.ReportAllocs()
 	m := NewRWLockMap[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -1256,7 +1256,7 @@ func BenchmarkLoad_RWLockMap(b *testing.B) {
 func BenchmarkMixed_RWLockMap(b *testing.B) {
 	b.ReportAllocs()
 	m := NewRWLockMap[int, int]()
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m.Store(i, i)
 	}
 	runtime.GC()
@@ -1288,9 +1288,9 @@ func BenchmarkStore_stdMap(b *testing.B) {
 	b.ReportAllocs()
 	m := make(map[int]int)
 	runtime.GC()
-	b.ResetTimer()
+
 	var i int
-	for range b.N {
+	for b.Loop() {
 		m[i] = i
 		i++
 		if i >= countStore {
@@ -1303,9 +1303,9 @@ func BenchmarkLoadOrStore_stdMap(b *testing.B) {
 	b.ReportAllocs()
 	m := make(map[int]int)
 	runtime.GC()
-	b.ResetTimer()
+
 	var i int
-	for range b.N {
+	for b.Loop() {
 		if _, ok := m[i]; !ok {
 			m[i] = i
 		}
@@ -1320,13 +1320,13 @@ func BenchmarkLoadOrStore_stdMap(b *testing.B) {
 func BenchmarkLoad_stdMap(b *testing.B) {
 	b.ReportAllocs()
 	m := make(map[int]int)
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m[i] = i
 	}
 	runtime.GC()
-	b.ResetTimer()
+
 	var i int
-	for range b.N {
+	for b.Loop() {
 		_, _ = m[i]
 		i++
 		if i >= countLoad {
@@ -1338,15 +1338,13 @@ func BenchmarkLoad_stdMap(b *testing.B) {
 func BenchmarkMixed_stdMap(b *testing.B) {
 	b.ReportAllocs()
 	m := make(map[int]int)
-	for i := 0; i < countLoad; i++ {
+	for i := range countLoad {
 		m[i] = i
 	}
 	runtime.GC()
 
-	b.ResetTimer()
-
 	var i int
-	for range b.N {
+	for b.Loop() {
 		switch mixRand(i) {
 		case 0:
 			m[i] = i
@@ -1368,20 +1366,20 @@ func BenchmarkMixed_stdMap(b *testing.B) {
 
 // ------------------------------------------------------
 
-// RWLockMap 是一个泛型化的线程安全的键值存储。
+// RWLockMap is a generic thread-safe key-value store.
 type RWLockMap[K comparable, V any] struct {
 	mu sync.RWMutex
 	m  map[K]V
 }
 
-// NewGenericMap 创建一个新的 RWLockMap 实例。
+// NewRWLockMap creates a new RWLockMap instance.
 func NewRWLockMap[K comparable, V any]() *RWLockMap[K, V] {
 	return &RWLockMap[K, V]{
 		m: make(map[K]V),
 	}
 }
 
-// Load 返回键对应的值，如果键不存在则返回零值。
+// Load returns the value for the key, or zero value if key does not exist.
 func (gm *RWLockMap[K, V]) Load(key K) (V, bool) {
 	gm.mu.RLock()
 	v, ok := gm.m[key]
@@ -1389,14 +1387,14 @@ func (gm *RWLockMap[K, V]) Load(key K) (V, bool) {
 	return v, ok
 }
 
-// Store 将值存储到指定的键中。
+// Store stores the value for the specified key.
 func (gm *RWLockMap[K, V]) Store(key K, value V) {
 	gm.mu.Lock()
 	gm.m[key] = value
 	gm.mu.Unlock()
 }
 
-// LoadOrStore 如果键不存在，则存储值并返回 false；如果键已存在，则返回现有值和 true。
+// LoadOrStore stores the value if the key does not exist and returns false; if the key exists, returns the existing value and true.
 func (gm *RWLockMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
@@ -1407,14 +1405,14 @@ func (gm *RWLockMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
 	return value, false
 }
 
-// Delete 删除指定键的值。
+// Delete deletes the value for the specified key.
 func (gm *RWLockMap[K, V]) Delete(key K) {
 	gm.mu.Lock()
 	delete(gm.m, key)
 	gm.mu.Unlock()
 }
 
-// Range 遍历所有键值对，执行指定的函数。
+// Range iterates over all key-value pairs and executes the specified function.
 func (gm *RWLockMap[K, V]) Range(f func(K, V) bool) {
 	gm.mu.RLock()
 	defer gm.mu.RUnlock()
@@ -1427,26 +1425,26 @@ func (gm *RWLockMap[K, V]) Range(f func(K, V) bool) {
 
 // ------------------------------------------------------
 
-// RWLockShardedMap 是一个使用分段锁（RWMutex）的泛型化线程安全的键值存储。
+// RWLockShardedMap is a generic thread-safe key-value store using sharded locks (RWMutex).
 type RWLockShardedMap[K comparable, V any] struct {
-	shards    []shard[K, V] // 分段锁数组
-	shardMask uintptr       // 分段数量
+	shards    []shard[K, V] // shard array
+	shardMask uintptr       // shard count
 	hashFunc  cc.HashFunc
 	seed      uintptr
 }
 
-// shard 是每个分段的内部结构，包含一个 RWMutex 和一个普通 map。
+// shard is the internal structure for each shard, containing an RWMutex and a regular map.
 type shard[K comparable, V any] struct {
 	mu sync.RWMutex
 	m  map[K]V
 }
 
-// NewRWLockShardedMap 创建一个新的 RWLockShardedMap 实例。
+// NewRWLockShardedMap creates a new RWLockShardedMap instance.
 func NewRWLockShardedMap[K comparable, V any](
 	shardCnt int,
 ) *RWLockShardedMap[K, V] {
 	if shardCnt <= 0 {
-		shardCnt = 1 // 默认至少有一个分段
+		shardCnt = 1 // default to at least one shard
 	}
 	shardCnt = nextPowOf2(shardCnt)
 	shards := make([]shard[K, V], shardCnt)
@@ -1483,12 +1481,12 @@ func nextPowOf2(n int) int {
 	return v + 1
 }
 
-// shardIndex 根据键的哈希值计算分段索引。
+// shardIndex calculates the shard index based on the hash of the key.
 func (sm *RWLockShardedMap[K, V]) shardIndex(key K) uintptr {
 	return (sm.shardMask - 1) & sm.hashFunc(noescape(unsafe.Pointer(&key)), 0)
 }
 
-// Load 返回键对应的值，如果键不存在则返回零值。
+// Load returns the value for the key, or zero value if key does not exist.
 func (sm *RWLockShardedMap[K, V]) Load(key K) (V, bool) {
 	shard := &sm.shards[sm.shardIndex(key)]
 	shard.mu.RLock()
@@ -1497,7 +1495,7 @@ func (sm *RWLockShardedMap[K, V]) Load(key K) (V, bool) {
 	return val, ok
 }
 
-// Store 将值存储到指定的键中。
+// Store stores the value for the specified key.
 func (sm *RWLockShardedMap[K, V]) Store(key K, value V) {
 	shard := &sm.shards[sm.shardIndex(key)]
 	shard.mu.Lock()
@@ -1505,7 +1503,7 @@ func (sm *RWLockShardedMap[K, V]) Store(key K, value V) {
 	shard.m[key] = value
 }
 
-// LoadOrStore 如果键不存在，则存储值并返回 false；如果键已存在，则返回现有值和 true。
+// LoadOrStore stores the value if the key does not exist and returns false; if the key exists, returns the existing value and true.
 func (sm *RWLockShardedMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
 	shard := &sm.shards[sm.shardIndex(key)]
 	shard.mu.Lock()
@@ -1517,7 +1515,7 @@ func (sm *RWLockShardedMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
 	return value, false
 }
 
-// Delete 删除指定键的值。
+// Delete deletes the value for the specified key.
 func (sm *RWLockShardedMap[K, V]) Delete(key K) {
 	shard := &sm.shards[sm.shardIndex(key)]
 	shard.mu.Lock()
@@ -1525,7 +1523,7 @@ func (sm *RWLockShardedMap[K, V]) Delete(key K) {
 	delete(shard.m, key)
 }
 
-// Range 遍历所有键值对，执行指定的函数。
+// Range iterates over all key-value pairs and executes the specified function.
 func (sm *RWLockShardedMap[K, V]) Range(f func(K, V) bool) {
 	for i := range sm.shards {
 		shard := &sm.shards[i]

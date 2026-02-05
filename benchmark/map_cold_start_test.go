@@ -17,7 +17,7 @@ import (
 //go:linkname runtime_cheaprand runtime.cheaprand
 func runtime_cheaprand() uint32
 
-// getMemUsage 获取当前内存使用量(MB)
+// getMemUsage gets current memory usage (MB)
 func getMemUsage() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -25,25 +25,25 @@ func getMemUsage() uint64 {
 }
 
 const (
-	numMaps = 1024 * 1024 // map输得, 必须2的幂
-	testOps = 10_000_000  // 测试操作次数
+	numMaps = 1024 * 1024 // map count, must be power of 2
+	testOps = 10_000_000  // test operation count
 	numCPU  = 8
 )
 
 func TestColdStart_cc_FlatMap(t *testing.T) {
-	t.Logf("初始化 %d 个实例...", numMaps)
+	t.Logf("Initializing %d instances...", numMaps)
 
-	// 创建100万个map实例的指针数组
+	// create array of 1 million map instance pointers
 	maps := make([]*cc.FlatMap[int, int], numMaps)
 	for i := 0; i < numMaps; i++ {
 		maps[i] = cc.NewFlatMap[int, int]()
 	}
 
-	// 强制GC，确保冷缓存
+	// force GC to ensure cold cache
 	runtime.GC()
 	runtime.GC()
 
-	t.Logf("开始正式测试 %d 次 Compute 操作...", testOps)
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
 	var wg sync.WaitGroup
 	wg.Add(numCPU)
 
@@ -67,19 +67,19 @@ func TestColdStart_cc_FlatMap(t *testing.T) {
 	avgNs := elapsed.Nanoseconds() / testOps
 	opsPerSec := float64(testOps) / elapsed.Seconds()
 
-	t.Logf("Compute 操作结果:")
-	t.Logf("  总操作数: %d", testOps)
-	t.Logf("  总耗时: %v", elapsed)
-	t.Logf("  平均延迟: %d ns/op", avgNs)
-	t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-	t.Logf("  内存使用: %d MB", getMemUsage())
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
 
-	t.Logf("开始正式测试 %d 次 Load 操作...", testOps)
+	t.Logf("Starting formal test of %d Load operations...", testOps)
 
-	// Load测试
+	// Load test
 	{
 		time.Sleep(2 * time.Second)
-		// 强制GC，确保冷缓存
+		// force GC to ensure cold cache
 		runtime.GC()
 		runtime.GC()
 
@@ -103,29 +103,29 @@ func TestColdStart_cc_FlatMap(t *testing.T) {
 		avgNs := elapsed.Nanoseconds() / testOps
 		opsPerSec := float64(testOps) / elapsed.Seconds()
 
-		t.Logf("Load 操作结果:")
-		t.Logf("  总操作数: %d", testOps)
-		t.Logf("  总耗时: %v", elapsed)
-		t.Logf("  平均延迟: %d ns/op", avgNs)
-		t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-		t.Logf("  内存使用: %d MB", getMemUsage())
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
 	}
 }
 
 func TestColdStart_cc_Map(t *testing.T) {
-	t.Logf("初始化 %d 个实例...", numMaps)
+	t.Logf("Initializing %d instances...", numMaps)
 
-	// 创建100万个map实例的指针数组
+	// create array of 1 million map instance pointers
 	maps := make([]*cc.Map[int, int], numMaps)
 	for i := 0; i < numMaps; i++ {
 		maps[i] = cc.NewMap[int, int]()
 	}
 
-	// 强制GC，确保冷缓存
+	// force GC to ensure cold cache
 	runtime.GC()
 	runtime.GC()
 
-	t.Logf("开始正式测试 %d 次 Compute 操作...", testOps)
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
 	var wg sync.WaitGroup
 	wg.Add(numCPU)
 
@@ -149,19 +149,19 @@ func TestColdStart_cc_Map(t *testing.T) {
 	avgNs := elapsed.Nanoseconds() / testOps
 	opsPerSec := float64(testOps) / elapsed.Seconds()
 
-	t.Logf("Compute 操作结果:")
-	t.Logf("  总操作数: %d", testOps)
-	t.Logf("  总耗时: %v", elapsed)
-	t.Logf("  平均延迟: %d ns/op", avgNs)
-	t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-	t.Logf("  内存使用: %d MB", getMemUsage())
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
 
-	t.Logf("开始正式测试 %d 次 Load 操作...", testOps)
+	t.Logf("Starting formal test of %d Load operations...", testOps)
 
-	// Load测试
+	// Load test
 	{
 		time.Sleep(2 * time.Second)
-		// 强制GC，确保冷缓存
+		// force GC to ensure cold cache
 		runtime.GC()
 		runtime.GC()
 
@@ -185,29 +185,29 @@ func TestColdStart_cc_Map(t *testing.T) {
 		avgNs := elapsed.Nanoseconds() / testOps
 		opsPerSec := float64(testOps) / elapsed.Seconds()
 
-		t.Logf("Load 操作结果:")
-		t.Logf("  总操作数: %d", testOps)
-		t.Logf("  总耗时: %v", elapsed)
-		t.Logf("  平均延迟: %d ns/op", avgNs)
-		t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-		t.Logf("  内存使用: %d MB", getMemUsage())
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
 	}
 }
 
 func TestColdStart_RWLockShardedMap(t *testing.T) {
-	t.Logf("初始化 %d 个实例...", numMaps)
+	t.Logf("Initializing %d instances...", numMaps)
 
-	// 创建100万个map实例的指针数组
+	// create array of 1 million map instance pointers
 	maps := make([]*RWLockShardedMap[int, int], numMaps)
 	for i := 0; i < numMaps; i++ {
 		maps[i] = NewRWLockShardedMap[int, int](256)
 	}
 
-	// 强制GC，确保冷缓存
+	// force GC to ensure cold cache
 	runtime.GC()
 	runtime.GC()
 
-	t.Logf("开始正式测试 %d 次 Compute 操作...", testOps)
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
 	var wg sync.WaitGroup
 	wg.Add(numCPU)
 
@@ -231,19 +231,19 @@ func TestColdStart_RWLockShardedMap(t *testing.T) {
 	avgNs := elapsed.Nanoseconds() / testOps
 	opsPerSec := float64(testOps) / elapsed.Seconds()
 
-	t.Logf("Compute 操作结果:")
-	t.Logf("  总操作数: %d", testOps)
-	t.Logf("  总耗时: %v", elapsed)
-	t.Logf("  平均延迟: %d ns/op", avgNs)
-	t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-	t.Logf("  内存使用: %d MB", getMemUsage())
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
 
-	t.Logf("开始正式测试 %d 次 Load 操作...", testOps)
+	t.Logf("Starting formal test of %d Load operations...", testOps)
 
-	// Load测试
+	// Load test
 	{
 		time.Sleep(2 * time.Second)
-		// 强制GC，确保冷缓存
+		// force GC to ensure cold cache
 		runtime.GC()
 		runtime.GC()
 
@@ -267,29 +267,29 @@ func TestColdStart_RWLockShardedMap(t *testing.T) {
 		avgNs := elapsed.Nanoseconds() / testOps
 		opsPerSec := float64(testOps) / elapsed.Seconds()
 
-		t.Logf("Load 操作结果:")
-		t.Logf("  总操作数: %d", testOps)
-		t.Logf("  总耗时: %v", elapsed)
-		t.Logf("  平均延迟: %d ns/op", avgNs)
-		t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-		t.Logf("  内存使用: %d MB", getMemUsage())
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
 	}
 }
 
 func TestColdStart_xsync_Map(t *testing.T) {
-	t.Logf("初始化 %d 个实例...", numMaps)
+	t.Logf("Initializing %d instances...", numMaps)
 
-	// 创建100万个map实例的指针数组
+	// create array of 1 million map instance pointers
 	maps := make([]*xsync.Map[int, int], numMaps)
 	for i := 0; i < numMaps; i++ {
 		maps[i] = xsync.NewMap[int, int]()
 	}
 
-	// 强制GC，确保冷缓存
+	// force GC to ensure cold cache
 	runtime.GC()
 	runtime.GC()
 
-	t.Logf("开始正式测试 %d 次 Compute 操作...", testOps)
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
 	var wg sync.WaitGroup
 	wg.Add(numCPU)
 
@@ -313,19 +313,19 @@ func TestColdStart_xsync_Map(t *testing.T) {
 	avgNs := elapsed.Nanoseconds() / testOps
 	opsPerSec := float64(testOps) / elapsed.Seconds()
 
-	t.Logf("Compute 操作结果:")
-	t.Logf("  总操作数: %d", testOps)
-	t.Logf("  总耗时: %v", elapsed)
-	t.Logf("  平均延迟: %d ns/op", avgNs)
-	t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-	t.Logf("  内存使用: %d MB", getMemUsage())
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
 
-	t.Logf("开始正式测试 %d 次 Load 操作...", testOps)
+	t.Logf("Starting formal test of %d Load operations...", testOps)
 
-	// Load测试
+	// Load test
 	{
 		time.Sleep(2 * time.Second)
-		// 强制GC，确保冷缓存
+		// force GC to ensure cold cache
 		runtime.GC()
 		runtime.GC()
 
@@ -349,29 +349,29 @@ func TestColdStart_xsync_Map(t *testing.T) {
 		avgNs := elapsed.Nanoseconds() / testOps
 		opsPerSec := float64(testOps) / elapsed.Seconds()
 
-		t.Logf("Load 操作结果:")
-		t.Logf("  总操作数: %d", testOps)
-		t.Logf("  总耗时: %v", elapsed)
-		t.Logf("  平均延迟: %d ns/op", avgNs)
-		t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-		t.Logf("  内存使用: %d MB", getMemUsage())
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
 	}
 }
 
 func TestColdStart_sync_Map(t *testing.T) {
-	t.Logf("初始化 %d 个实例...", numMaps)
+	t.Logf("Initializing %d instances...", numMaps)
 
-	// 创建100万个map实例的指针数组
+	// create array of 1 million map instance pointers
 	maps := make([]*sync.Map, numMaps)
 	for i := 0; i < numMaps; i++ {
 		maps[i] = &sync.Map{}
 	}
 
-	// 强制GC，确保冷缓存
+	// force GC to ensure cold cache
 	runtime.GC()
 	runtime.GC()
 
-	t.Logf("开始正式测试 %d 次 Compute 操作...", testOps)
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
 	var wg sync.WaitGroup
 	wg.Add(numCPU)
 
@@ -395,19 +395,19 @@ func TestColdStart_sync_Map(t *testing.T) {
 	avgNs := elapsed.Nanoseconds() / testOps
 	opsPerSec := float64(testOps) / elapsed.Seconds()
 
-	t.Logf("Compute 操作结果:")
-	t.Logf("  总操作数: %d", testOps)
-	t.Logf("  总耗时: %v", elapsed)
-	t.Logf("  平均延迟: %d ns/op", avgNs)
-	t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-	t.Logf("  内存使用: %d MB", getMemUsage())
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
 
-	t.Logf("开始正式测试 %d 次 Load 操作...", testOps)
+	t.Logf("Starting formal test of %d Load operations...", testOps)
 
-	// Load测试
+	// Load test
 	{
 		time.Sleep(2 * time.Second)
-		// 强制GC，确保冷缓存
+		// force GC to ensure cold cache
 		runtime.GC()
 		runtime.GC()
 
@@ -417,7 +417,7 @@ func TestColdStart_sync_Map(t *testing.T) {
 		start = time.Now()
 		for range numCPU {
 			go func() {
-				for i := 0; i < testOps; i++ {
+				for range testOps {
 					mapIdx := runtime_cheaprand() & (numMaps - 1)
 					key := int(runtime_cheaprand())
 					_, _ = maps[mapIdx].Load(key)
@@ -431,29 +431,29 @@ func TestColdStart_sync_Map(t *testing.T) {
 		avgNs := elapsed.Nanoseconds() / testOps
 		opsPerSec := float64(testOps) / elapsed.Seconds()
 
-		t.Logf("Load 操作结果:")
-		t.Logf("  总操作数: %d", testOps)
-		t.Logf("  总耗时: %v", elapsed)
-		t.Logf("  平均延迟: %d ns/op", avgNs)
-		t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-		t.Logf("  内存使用: %d MB", getMemUsage())
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
 	}
 }
 
 func TestColdStart_zhangyunhao116_skipmap(t *testing.T) {
-	t.Logf("初始化 %d 个实例...", numMaps)
+	t.Logf("Initializing %d instances...", numMaps)
 
-	// 创建100万个map实例的指针数组
+	// create array of 1 million map instance pointers
 	maps := make([]*skipmap.OrderedMap[int, int], numMaps)
 	for i := 0; i < numMaps; i++ {
 		maps[i] = skipmap.New[int, int]()
 	}
 
-	// 强制GC，确保冷缓存
+	// force GC to ensure cold cache
 	runtime.GC()
 	runtime.GC()
 
-	t.Logf("开始正式测试 %d 次 Compute 操作...", testOps)
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
 	var wg sync.WaitGroup
 	wg.Add(numCPU)
 
@@ -477,19 +477,19 @@ func TestColdStart_zhangyunhao116_skipmap(t *testing.T) {
 	avgNs := elapsed.Nanoseconds() / testOps
 	opsPerSec := float64(testOps) / elapsed.Seconds()
 
-	t.Logf("Compute 操作结果:")
-	t.Logf("  总操作数: %d", testOps)
-	t.Logf("  总耗时: %v", elapsed)
-	t.Logf("  平均延迟: %d ns/op", avgNs)
-	t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-	t.Logf("  内存使用: %d MB", getMemUsage())
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
 
-	t.Logf("开始正式测试 %d 次 Load 操作...", testOps)
+	t.Logf("Starting formal test of %d Load operations...", testOps)
 
-	// Load测试
+	// Load test
 	{
 		time.Sleep(2 * time.Second)
-		// 强制GC，确保冷缓存
+		// force GC to ensure cold cache
 		runtime.GC()
 		runtime.GC()
 
@@ -513,29 +513,29 @@ func TestColdStart_zhangyunhao116_skipmap(t *testing.T) {
 		avgNs := elapsed.Nanoseconds() / testOps
 		opsPerSec := float64(testOps) / elapsed.Seconds()
 
-		t.Logf("Load 操作结果:")
-		t.Logf("  总操作数: %d", testOps)
-		t.Logf("  总耗时: %v", elapsed)
-		t.Logf("  平均延迟: %d ns/op", avgNs)
-		t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-		t.Logf("  内存使用: %d MB", getMemUsage())
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
 	}
 }
 
 func TestColdStart_alphadose(t *testing.T) {
-	t.Logf("初始化 %d 个实例...", numMaps)
+	t.Logf("Initializing %d instances...", numMaps)
 
-	// 创建100万个map实例的指针数组
+	// create array of 1 million map instance pointers
 	maps := make([]*haxmap.Map[int, int], numMaps)
-	for i := 0; i < numMaps; i++ {
+	for i := range numMaps {
 		maps[i] = haxmap.New[int, int]()
 	}
 
-	// 强制GC，确保冷缓存
+	// force GC to ensure cold cache
 	runtime.GC()
 	runtime.GC()
 
-	t.Logf("开始正式测试 %d 次 Compute 操作...", testOps)
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
 	var wg sync.WaitGroup
 	wg.Add(numCPU)
 
@@ -559,19 +559,19 @@ func TestColdStart_alphadose(t *testing.T) {
 	avgNs := elapsed.Nanoseconds() / testOps
 	opsPerSec := float64(testOps) / elapsed.Seconds()
 
-	t.Logf("Compute 操作结果:")
-	t.Logf("  总操作数: %d", testOps)
-	t.Logf("  总耗时: %v", elapsed)
-	t.Logf("  平均延迟: %d ns/op", avgNs)
-	t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-	t.Logf("  内存使用: %d MB", getMemUsage())
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
 
-	t.Logf("开始正式测试 %d 次 Load 操作...", testOps)
+	t.Logf("Starting formal test of %d Load operations...", testOps)
 
-	// Load测试
+	// Load test
 	{
 		time.Sleep(2 * time.Second)
-		// 强制GC，确保冷缓存
+		// force GC to ensure cold cache
 		runtime.GC()
 		runtime.GC()
 
@@ -595,11 +595,11 @@ func TestColdStart_alphadose(t *testing.T) {
 		avgNs := elapsed.Nanoseconds() / testOps
 		opsPerSec := float64(testOps) / elapsed.Seconds()
 
-		t.Logf("Load 操作结果:")
-		t.Logf("  总操作数: %d", testOps)
-		t.Logf("  总耗时: %v", elapsed)
-		t.Logf("  平均延迟: %d ns/op", avgNs)
-		t.Logf("  吞吐量: %.0f ops/sec", opsPerSec)
-		t.Logf("  内存使用: %d MB", getMemUsage())
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
 	}
 }

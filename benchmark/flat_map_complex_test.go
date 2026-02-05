@@ -142,7 +142,7 @@ func TestComplexFlatMapScenario(t *testing.T) {
 func BenchmarkComplexFlatMapScenario(b *testing.B) {
 	sm := NewSessionManager()
 	// Pre-populate
-	for i := 0; i < 10000; i++ {
+	for i := range 10000 {
 		sm.Login(fmt.Sprintf("user-%d", i), "data", 3600)
 	}
 

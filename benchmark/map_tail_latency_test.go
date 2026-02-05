@@ -108,10 +108,7 @@ func ms(d time.Duration) string {
 }
 
 func runLatencyTest(workers, keys, opsPerWorker int, m MapInterface) latencyResult {
-	batches := opsPerWorker / batchSize
-	if batches < 1 {
-		batches = 1
-	}
+	batches := max(opsPerWorker/batchSize, 1)
 	totalBatches := workers * batches
 	samples := make([]int64, totalBatches)
 	var sampleIdx atomic.Int64

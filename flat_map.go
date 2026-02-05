@@ -30,6 +30,7 @@ type FlatMap[K comparable, V any] struct {
 	table    SeqLockSlot[flatTable[K, V]]
 	seed     uintptr
 	keyHash  HashFunc
+	valEqual EqualFunc
 	tableSeq SeqLock32 // seqlock of table
 	shrinkOn bool      // WithAutoShrink
 	rs       flatRebuildState[K, V]
@@ -100,10 +101,16 @@ func (m *FlatMap[K, V]) init(
 	if cfg.keyHash == nil {
 		cfg.keyHash = parseKeyInterface[K]()
 	}
+	if cfg.valEqual == nil {
+		cfg.valEqual = parseValueInterface[V]()
+	}
 	// perform initialization
-	m.keyHash, _ = defaultHasher[K, V]()
+	m.keyHash, m.valEqual = defaultHasher[K, V]()
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
+	}
+	if cfg.valEqual != nil {
+		m.valEqual = cfg.valEqual
 	}
 
 	m.seed = uintptr(rand.Uint64())
@@ -252,8 +259,18 @@ func (m *FlatMap[K, V]) LoadOrStoreFn(
 // value. The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
 	if enableFastPath {
-		if v, ok := m.Load(key); !ok {
+		v, ok := m.Load(key)
+		if !ok {
 			return v, ok
+		}
+		// deduplicates identical values
+		if m.valEqual != nil {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&v)),
+				noescape(unsafe.Pointer(&value)),
+			) {
+				return value, true
+			}
 		}
 	}
 	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
@@ -284,6 +301,19 @@ func (m *FlatMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 
 // Store sets the value for a key.
 func (m *FlatMap[K, V]) Store(key K, value V) {
+	if enableFastPath {
+		// deduplicates identical values
+		if m.valEqual != nil {
+			if v, ok := m.Load(key); ok {
+				if m.valEqual(
+					noescape(unsafe.Pointer(&v)),
+					noescape(unsafe.Pointer(&value)),
+				) {
+					return
+				}
+			}
+		}
+	}
 	m.Compute(key, func(e *MapEntry[K, V]) {
 		e.Update(value)
 	})
@@ -292,6 +322,19 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
+	if enableFastPath {
+		// deduplicates identical values
+		if m.valEqual != nil {
+			if v, ok := m.Load(key); ok {
+				if m.valEqual(
+					noescape(unsafe.Pointer(&v)),
+					noescape(unsafe.Pointer(&value)),
+				) {
+					return value, true
+				}
+			}
+		}
+	}
 	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
 		previous = e.Value()
 		e.Update(value)
