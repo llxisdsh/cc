@@ -67,17 +67,17 @@ type mapStats struct {
 func (s *mapStats) String() string {
 	var sb strings.Builder
 	sb.WriteString("mapStats{\n")
-	sb.WriteString(fmt.Sprintf("RootBuckets:  %d\n", s.RootBuckets))
-	sb.WriteString(fmt.Sprintf("TotalBuckets: %d\n", s.TotalBuckets))
-	sb.WriteString(fmt.Sprintf("EmptyBuckets: %d\n", s.EmptyBuckets))
-	sb.WriteString(fmt.Sprintf("Capacity:     %d\n", s.Capacity))
-	sb.WriteString(fmt.Sprintf("Size:         %d\n", s.Size))
-	sb.WriteString(fmt.Sprintf("Counter:      %d\n", s.Counter))
-	sb.WriteString(fmt.Sprintf("CounterLen:   %d\n", s.CounterLen))
-	sb.WriteString(fmt.Sprintf("MinEntries:   %d\n", s.MinEntries))
-	sb.WriteString(fmt.Sprintf("MaxEntries:   %d\n", s.MaxEntries))
-	sb.WriteString(fmt.Sprintf("TotalGrowths: %d\n", s.TotalGrowths))
-	sb.WriteString(fmt.Sprintf("TotalShrinks: %d\n", s.TotalShrinks))
+	_, _ = fmt.Fprintf(&sb, "RootBuckets:  %d\n", s.RootBuckets)
+	_, _ = fmt.Fprintf(&sb, "TotalBuckets: %d\n", s.TotalBuckets)
+	_, _ = fmt.Fprintf(&sb, "EmptyBuckets: %d\n", s.EmptyBuckets)
+	_, _ = fmt.Fprintf(&sb, "Capacity:     %d\n", s.Capacity)
+	_, _ = fmt.Fprintf(&sb, "Size:         %d\n", s.Size)
+	_, _ = fmt.Fprintf(&sb, "Counter:      %d\n", s.Counter)
+	_, _ = fmt.Fprintf(&sb, "CounterLen:   %d\n", s.CounterLen)
+	_, _ = fmt.Fprintf(&sb, "MinEntries:   %d\n", s.MinEntries)
+	_, _ = fmt.Fprintf(&sb, "MaxEntries:   %d\n", s.MaxEntries)
+	_, _ = fmt.Fprintf(&sb, "TotalGrowths: %d\n", s.TotalGrowths)
+	_, _ = fmt.Fprintf(&sb, "TotalShrinks: %d\n", s.TotalShrinks)
 	sb.WriteString("}\n")
 	return sb.String()
 }
@@ -7139,6 +7139,41 @@ func TestMap_ComputeAll_EarlyStop(t *testing.T) {
 	// 早停时，最后一个回调的修改也会被应用
 	if updated != 10 {
 		t.Fatalf("updated=%d, want 10", updated)
+	}
+}
+
+// TestMap_All_DeleteDuringIteration verifies that deleting keys during
+// All() iteration is safe and the deleted keys are actually removed.
+func TestMap_All_DeleteDuringIteration(t *testing.T) {
+	m := NewMap[int, int]()
+	const N = 128
+
+	for i := range N {
+		m.Store(i, i)
+	}
+
+	// Delete even keys during iteration
+	for k, v := range m.All() {
+		if v != k {
+			t.Fatalf("key %d: want value %d, got %d", k, k, v)
+		}
+		if k%2 == 0 {
+			m.Delete(k)
+		}
+	}
+
+	// Verify: even keys deleted, odd keys remain
+	for i := range N {
+		_, ok := m.Load(i)
+		if i%2 == 0 {
+			if ok {
+				t.Fatalf("even key %d: expected deleted", i)
+			}
+		} else {
+			if !ok {
+				t.Fatalf("odd key %d: expected present", i)
+			}
+		}
 	}
 }
 

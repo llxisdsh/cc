@@ -20,7 +20,7 @@ require (
 	github.com/dolthub/maphash v0.1.0 // indirect
 	github.com/zhangyunhao116/fastrand v0.3.0 // indirect
 	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
-	golang.org/x/sys v0.40.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
 )
 
 replace github.com/llxisdsh/cc => ../
