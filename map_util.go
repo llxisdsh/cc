@@ -451,7 +451,7 @@ func defaultHasher[K comparable, V any]() (
 //
 // For integers, we preserve sequential key distribution:
 //   - High bits: (v / entriesPerBucket) << h2Bits - maintains bucket ordering
-//   - Low bits: entropy from (v ^ seed) * HashPrime - provides h2 variety
+//   - Low bits: entropy from v * HashPrime - provides h2 variety
 //
 // This achieves:
 //  1. Sequential keys fill buckets optimally (100% density)
@@ -459,41 +459,41 @@ func defaultHasher[K comparable, V any]() (
 //  3. Zero-branch h1/h2 extraction (14-18% faster in mixed-type scenarios)
 //
 //go:nosplit
-func mixUintptr(v uintptr, seed uintptr) uintptr {
+func mixUintptr(v uintptr) uintptr {
 	h := (v / uintptr(entriesPerBucket)) << h2Bits
-	l := (v ^ seed*opt.HashPrime) & h2LowMask
+	l := (v * opt.HashPrime) & h2LowMask
 	return h | l
 }
 
 //go:nosplit
-func hashUintptr(ptr unsafe.Pointer, seed uintptr) uintptr {
-	return mixUintptr(*(*uintptr)(ptr), seed)
+func hashUintptr(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return mixUintptr(*(*uintptr)(ptr))
 }
 
 //go:nosplit
-func hashUint64On32Bit(ptr unsafe.Pointer, seed uintptr) uintptr {
+func hashUint64On32Bit(ptr unsafe.Pointer, _ uintptr) uintptr {
 	v := *(*uint64)(ptr)
-	return mixUintptr(uintptr(v)^uintptr(v>>32), seed)
+	return mixUintptr(uintptr(v) ^ uintptr(v>>32))
 }
 
 //go:nosplit
-func hashUint64(ptr unsafe.Pointer, seed uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint64)(ptr)), seed)
+func hashUint64(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return mixUintptr(uintptr(*(*uint64)(ptr)))
 }
 
 //go:nosplit
-func hashUint32(ptr unsafe.Pointer, seed uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint32)(ptr)), seed)
+func hashUint32(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return mixUintptr(uintptr(*(*uint32)(ptr)))
 }
 
 //go:nosplit
-func hashUint16(ptr unsafe.Pointer, seed uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint16)(ptr)), seed)
+func hashUint16(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return mixUintptr(uintptr(*(*uint16)(ptr)))
 }
 
 //go:nosplit
-func hashUint8(ptr unsafe.Pointer, seed uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint8)(ptr)), seed)
+func hashUint8(ptr unsafe.Pointer, _ uintptr) uintptr {
+	return mixUintptr(uintptr(*(*uint8)(ptr)))
 }
 
 // hashString computes a hash for short strings optimized for sequential insertion.
