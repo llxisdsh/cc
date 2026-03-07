@@ -104,7 +104,7 @@ func (m *MapRebuild[K, V]) Compute(
 	if m.m != nil {
 		return m.m.compute(key, fn, true)
 	}
-	return m.f.compute(key, fn, true)
+	return m.f.compute_(&key, fn, computeInit|computeIgnoreHint)
 }
 
 // Range calls f sequentially for each key and value present in the map.

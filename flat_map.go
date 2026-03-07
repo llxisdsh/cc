@@ -235,11 +235,7 @@ func (m *FlatMap[K, V]) LoadOrStore(
 	key K,
 	value V,
 ) (actual V, loaded bool) {
-	return m.compute_(key, func(e *MapEntry[K, V]) {
-		if !e.Loaded() {
-			e.Update(value)
-		}
-	}, &value, computeInit|computeSkipIfFound|computeSkipIfValEqual)
+	return m.computeV2_(&key, &value, computeInit|computeSkipIfFound)
 }
 
 // LoadOrStoreFn loads the value for a key if present.
@@ -249,59 +245,39 @@ func (m *FlatMap[K, V]) LoadOrStoreFn(
 	key K,
 	valueFn func() V,
 ) (actual V, loaded bool) {
-	return m.compute_(key, func(e *MapEntry[K, V]) {
+	return m.compute_(&key, func(e *MapEntry[K, V]) {
 		if !e.Loaded() {
 			e.Update(valueFn())
 		}
-	}, nil, computeInit|computeSkipIfFound)
+	}, computeInit|computeSkipIfFound)
 }
 
 // LoadAndUpdate updates the value for key if it exists, returning the previous
 // value. The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	_, loaded = m.compute_(key, func(e *MapEntry[K, V]) {
-		if e.Loaded() {
-			previous = e.Value()
-			e.Update(value)
-		}
-	}, &value, computeSkipIfNotFound|computeSkipIfValEqual)
-	return previous, loaded
+	return m.computeV2_(&key, &value, computeSkipIfNotFound)
 }
 
 // LoadAndDelete deletes the value for a key, returning the previous value.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
-	_, loaded = m.compute_(key, func(e *MapEntry[K, V]) {
-		if e.Loaded() {
-			previous = e.Value()
-			e.Delete()
-		}
-	}, nil, computeSkipIfNotFound)
-	return previous, loaded
+	return m.computeV2_(&key, nil, computeSkipIfNotFound)
 }
 
 // Store sets the value for a key.
 func (m *FlatMap[K, V]) Store(key K, value V) {
-	m.compute_(key, func(e *MapEntry[K, V]) {
-		e.Update(value)
-	}, &value, computeInit|computeSkipIfValEqual)
+	m.computeV2_(&key, &value, computeInit)
 }
 
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	_, loaded = m.compute_(key, func(e *MapEntry[K, V]) {
-		previous = e.Value()
-		e.Update(value)
-	}, &value, computeInit|computeSkipIfValEqual)
-	return previous, loaded
+	return m.computeV2_(&key, &value, computeInit)
 }
 
 // Delete deletes the value for a key.
 func (m *FlatMap[K, V]) Delete(key K) {
-	m.compute_(key, func(e *MapEntry[K, V]) {
-		e.Delete()
-	}, nil, computeSkipIfNotFound)
+	m.computeV2_(&key, nil, computeSkipIfNotFound)
 }
 
 // Compute performs a compute-style, atomic update for the given key.
@@ -330,7 +306,7 @@ func (m *FlatMap[K, V]) Compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
-	return m.compute_(key, fn, nil, computeInit)
+	return m.compute_(&key, fn, computeInit)
 }
 
 const (
@@ -338,25 +314,10 @@ const (
 	computeIgnoreHint                       // skip rebuild cooperation
 	computeSkipIfFound                      // fast path: skip lock if key found
 	computeSkipIfNotFound                   // fast path: skip lock if key not found
-	computeSkipIfValEqual                   // fast path: skip lock if value equal
 )
 
-// compute is a thin wrapper used by MapRebuild to call compute_ with ignoreHint.
-func (m *FlatMap[K, V]) compute(
-	key K,
-	fn func(e *MapEntry[K, V]),
-	ignoreHint bool,
-) (actual V, loaded bool) {
-	flags := computeInit
-	if ignoreHint {
-		flags |= computeIgnoreHint
-	}
-	return m.compute_(key, fn, nil, flags)
-}
-
-func (m *FlatMap[K, V]) compute_(
-	key K,
-	fn func(e *MapEntry[K, V]),
+func (m *FlatMap[K, V]) computeV2_(
+	key *K,
 	newVal *V,
 	flags uint8,
 ) (actual V, loaded bool) {
@@ -372,19 +333,17 @@ func (m *FlatMap[K, V]) compute_(
 	var hash uintptr
 	var h1v int
 	if m.intKey {
-		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = h1IntKey(hash)
 	} else {
-		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
 
 	// Fast path: lock-free seqlock read
-	if flags&(computeSkipIfFound|computeSkipIfNotFound|computeSkipIfValEqual) != 0 {
-		var e entry_[K, V]
-		var match bool
+	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
 		for b := table.buckets.At(idx); b != nil; b = (*flatBucket[K, V])(loadPtr(&b.next)) {
 			// var spins int
@@ -401,18 +360,25 @@ func (m *FlatMap[K, V]) compute_(
 			if !opt.Race_ {
 				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
-					e = b.At(j).ReadUnfenced()
+					e := b.At(j).ReadUnfenced()
 					if !b.seq.EndRead(s1) {
 						// goto fastRetry
 						goto slowPath
 					}
 					if opt.EmbeddedHash_ {
-						match = e.GetHash() == hash && e.Key == key
+						if e.GetHash() == hash && e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
 					} else {
-						match = e.Key == key
-					}
-					if match {
-						break
+						if e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
 					}
 				}
 			} else {
@@ -428,27 +394,23 @@ func (m *FlatMap[K, V]) compute_(
 					goto slowPath
 				}
 				for i := range cacheCount {
-					e = cache[i]
+					e := &cache[i]
 					if opt.EmbeddedHash_ {
-						match = e.GetHash() == hash && e.Key == key
+						if e.GetHash() == hash && e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
 					} else {
-						match = e.Key == key
-					}
-					if match {
-						break
+						if e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
 					}
 				}
-			}
-
-			if match {
-				if flags&computeSkipIfFound != 0 ||
-					flags&computeSkipIfValEqual != 0 && newVal != nil && m.valEqual != nil && m.valEqual(
-						noescape(unsafe.Pointer(&e.Value)),
-						noescape(unsafe.Pointer(newVal)),
-					) {
-					return e.Value, true
-				}
-				goto slowPath
 			}
 		}
 		// Key not found in fast path
@@ -459,15 +421,13 @@ func (m *FlatMap[K, V]) compute_(
 
 slowPath:
 
-	ignoreHint := flags&computeIgnoreHint != 0
-
 	for {
 		idx := table.mask & h1v
 		root := table.buckets.At(idx)
 		root.Lock()
 
 		// Help finishing rebuild if needed
-		if !ignoreHint {
+		if flags&computeIgnoreHint == 0 {
 			if hint := mapRebuildHint(m.rs.hint.Load()); hint != mapNoHint {
 				switch hint {
 				case mapGrowHint, mapShrinkHint:
@@ -487,7 +447,283 @@ slowPath:
 				}
 			}
 		}
+		if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+			root.Unlock()
+			table = newTable
+			continue
+		}
 
+		var (
+			oldB      *flatBucket[K, V]
+			oldIdx    int
+			oldMeta   uint64
+			emptyB    *flatBucket[K, V]
+			emptyIdx  int
+			emptyMeta uint64
+			lastB     *flatBucket[K, V]
+
+			loaded bool
+			oldVal V
+		)
+
+	findLoop:
+		for b := root; b != nil; b = (*flatBucket[K, V])(b.next) {
+			meta := loadUint64Fast(&b.meta)
+			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				e := b.At(j).Ptr()
+				if opt.EmbeddedHash_ {
+					if e.GetHash() == hash && e.Key == *key {
+						oldB, oldIdx, oldMeta, oldVal, loaded = b, j, meta, e.Value, true
+						break findLoop
+					}
+				} else {
+					if e.Key == *key {
+						oldB, oldIdx, oldMeta, oldVal, loaded = b, j, meta, e.Value, true
+						break findLoop
+					}
+				}
+			}
+			if emptyB == nil {
+				if empty := (^meta) & metaMask; empty != 0 {
+					emptyB = b
+					emptyIdx = firstMarkedByteIndex(empty)
+					emptyMeta = meta
+				}
+			}
+			lastB = b
+		}
+
+		if loaded {
+			if flags&computeSkipIfFound != 0 {
+				root.Unlock()
+				return oldVal, true
+			}
+			if newVal != nil {
+				// valEqual: skip seqlock write if value unchanged
+				if m.valEqual != nil && m.valEqual(
+					noescape(unsafe.Pointer(&oldB.At(oldIdx).Ptr().Value)),
+					noescape(unsafe.Pointer(newVal)),
+				) {
+					root.Unlock()
+					return oldVal, true
+				}
+				e := oldB.At(oldIdx)
+				newEnt := entry_[K, V]{Key: *key, Value: *newVal}
+				if opt.EmbeddedHash_ {
+					newEnt.SetHash(hash)
+				}
+				oldB.seq.BeginWriteLocked()
+				e.WriteUnfenced(newEnt)
+				oldB.seq.EndWriteLocked()
+				root.Unlock()
+				return oldVal, true
+			}
+			// Delete: update meta first so new Readers skip this slot immediately.
+			newMeta := setByte(oldMeta, h2Empty, oldIdx)
+			storeUint64(&oldB.meta, newMeta)
+			oldB.seq.BeginWriteLocked()
+			oldB.At(oldIdx).WriteUnfenced(entry_[K, V]{})
+			oldB.seq.EndWriteLocked()
+
+			root.Unlock()
+			table.AddSize(idx, -1)
+			// Check if table shrinking is needed
+			if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
+				mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
+				tableLen := table.mask + 1
+				if minTableLen < tableLen {
+					size := table.SumSize()
+					if size < tableLen*entriesPerBucket/shrinkFraction {
+						m.tryResize(mapShrinkHint, size, 0)
+					}
+				}
+			}
+			return oldVal, true
+		}
+
+		if flags&computeSkipIfNotFound != 0 || newVal == nil {
+			root.Unlock()
+			return *new(V), false
+		}
+
+		newEnt := entry_[K, V]{Key: *key, Value: *newVal}
+		if opt.EmbeddedHash_ {
+			newEnt.SetHash(hash)
+		}
+
+		var retV V
+		if flags&computeSkipIfFound != 0 {
+			retV = *newVal
+		}
+
+		if emptyB != nil {
+			// insert new: no seqlock window needed since slot was empty.
+			// Reader won't access slot until meta is published with valid h2.
+			emptyB.At(emptyIdx).WriteUnfenced(newEnt)
+			newMeta := setByte(emptyMeta, h2v, emptyIdx)
+			storeUint64(&emptyB.meta, newMeta)
+
+			root.Unlock()
+			table.AddSize(idx, 1)
+			return retV, false
+		}
+
+		// append new bucket
+		storePtr(&lastB.next, unsafe.Pointer(&flatBucket[K, V]{
+			meta: setByte(emptyMeta, h2v, 0),
+			entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
+				{buf: newEnt},
+			},
+		}))
+		root.Unlock()
+		table.AddSize(idx, 1)
+
+		// Auto-grow check (parallel resize)
+		if mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
+			tableLen := table.mask + 1
+			size := table.SumSize()
+			const capFactor = float64(entriesPerBucket) * loadFactor
+			if size >= int(float64(tableLen)*capFactor) {
+				m.tryResize(mapGrowHint, size, 0)
+			}
+		}
+		return retV, false
+	}
+}
+
+func (m *FlatMap[K, V]) compute_(
+	key *K,
+	fn func(e *MapEntry[K, V]),
+	// newVal *V,
+	flags uint8,
+) (actual V, loaded bool) {
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		if flags&computeInit == 0 {
+			return *new(V), false
+		}
+		m.slowInit()
+		table = SeqLockRead32(&m.tableSeq, &m.table)
+	}
+
+	var hash uintptr
+	var h1v int
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+		h1v = h1(hash)
+	}
+	h2v := h2(hash)
+	h2w := broadcast(h2v)
+
+	// Fast path: lock-free seqlock read
+	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
+		idx := table.mask & h1v
+		for b := table.buckets.At(idx); b != nil; b = (*flatBucket[K, V])(loadPtr(&b.next)) {
+			// var spins int
+			// fastRetry:
+			s1, ok := b.seq.BeginRead()
+			if !ok {
+				// delay(&spins)
+				// goto fastRetry
+				goto slowPath
+			}
+			meta := loadUint64Fast(&b.meta)
+
+			//goland:noinspection GoBoolExpressions
+			if !opt.Race_ {
+				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+					j := firstMarkedByteIndex(marked)
+					e := b.At(j).ReadUnfenced()
+					if !b.seq.EndRead(s1) {
+						// goto fastRetry
+						goto slowPath
+					}
+					if opt.EmbeddedHash_ {
+						if e.GetHash() == hash && e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					} else {
+						if e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					}
+				}
+			} else {
+				var cache [entriesPerBucket]entry_[K, V]
+				var cacheCount int
+				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+					j := firstMarkedByteIndex(marked)
+					cache[cacheCount] = b.At(j).ReadUnfenced()
+					cacheCount++
+				}
+				if !b.seq.EndRead(s1) {
+					// goto fastRetry
+					goto slowPath
+				}
+				for i := range cacheCount {
+					e := &cache[i]
+					if opt.EmbeddedHash_ {
+						if e.GetHash() == hash && e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					} else {
+						if e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					}
+				}
+			}
+		}
+		// Key not found in fast path
+		if flags&computeSkipIfNotFound != 0 {
+			return *new(V), false
+		}
+	}
+
+slowPath:
+
+	for {
+		idx := table.mask & h1v
+		root := table.buckets.At(idx)
+		root.Lock()
+
+		// Help finishing rebuild if needed
+		if flags&computeIgnoreHint == 0 {
+			if hint := mapRebuildHint(m.rs.hint.Load()); hint != mapNoHint {
+				switch hint {
+				case mapGrowHint, mapShrinkHint:
+					if m.rs.newTableSeq.Ready() {
+						root.Unlock()
+						m.helpCopyAndWait(&m.rs)
+						table = SeqLockRead32(&m.tableSeq, &m.table)
+						continue
+					}
+				case mapRebuildBlockWritersHint:
+					root.Unlock()
+					m.rs.gate.Wait()
+					table = SeqLockRead32(&m.tableSeq, &m.table)
+					continue
+				default:
+					// mapRebuildWithWritersHint: allow concurrent writers
+				}
+			}
+		}
 		if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
 			root.Unlock()
 			table = newTable
@@ -503,7 +739,7 @@ slowPath:
 			emptyMeta uint64
 			lastB     *flatBucket[K, V]
 		)
-		it := MapEntry[K, V]{entry: entry_[K, V]{Key: key}}
+		it := MapEntry[K, V]{entry: entry_[K, V]{Key: *key}}
 		if opt.EmbeddedHash_ {
 			it.entry.SetHash(hash)
 		}
@@ -515,12 +751,12 @@ slowPath:
 				j := firstMarkedByteIndex(marked)
 				e := b.At(j).Ptr()
 				if opt.EmbeddedHash_ {
-					if e.GetHash() == hash && e.Key == key {
+					if e.GetHash() == hash && e.Key == *key {
 						oldB, oldIdx, oldMeta, it.entry.Value, it.loaded = b, j, meta, e.Value, true
 						break findLoop
 					}
 				} else {
-					if e.Key == key {
+					if e.Key == *key {
 						oldB, oldIdx, oldMeta, it.entry.Value, it.loaded = b, j, meta, e.Value, true
 						break findLoop
 					}
@@ -541,13 +777,13 @@ slowPath:
 		case updateOp:
 			if it.loaded {
 				// valEqual: skip seqlock write if value unchanged
-				// if m.valEqual != nil && m.valEqual(
-				// 	noescape(unsafe.Pointer(&oldB.At(oldIdx).Ptr().Value)),
-				// 	noescape(unsafe.Pointer(&it.entry.Value)),
-				// ) {
-				// 	root.Unlock()
-				// 	return it.entry.Value, it.loaded
-				// }
+				if m.valEqual != nil && m.valEqual(
+					noescape(unsafe.Pointer(&oldB.At(oldIdx).Ptr().Value)),
+					noescape(unsafe.Pointer(&it.entry.Value)),
+				) {
+					root.Unlock()
+					return it.entry.Value, it.loaded
+				}
 				e := oldB.At(oldIdx)
 				oldB.seq.BeginWriteLocked()
 				e.WriteUnfenced(it.entry)
