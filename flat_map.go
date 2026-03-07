@@ -33,6 +33,7 @@ type FlatMap[K comparable, V any] struct {
 	valEqual EqualFunc
 	tableSeq SeqLock32 // seqlock of table
 	shrinkOn bool      // WithAutoShrink
+	intKey   bool
 	rs       flatRebuildState[K, V]
 }
 
@@ -105,9 +106,10 @@ func (m *FlatMap[K, V]) init(
 		cfg.valEqual = parseValueInterface[V]()
 	}
 	// perform initialization
-	m.keyHash, m.valEqual = defaultHasher[K, V]()
+	m.keyHash, m.valEqual, m.intKey = defaultHasher[K, V]()
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
+		m.intKey = false
 	}
 	if cfg.valEqual != nil {
 		m.valEqual = cfg.valEqual
@@ -152,10 +154,21 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 
-	hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+	// hash, h1v, h2v := m.hash(noescape(unsafe.Pointer(&key)))
+	var hash uintptr
+	var h1v int
+
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h1v = h1(hash)
+	}
+
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
-	idx := table.mask & h1(hash)
+	idx := table.mask & h1v
 	for b := table.buckets.At(idx); b != nil; b = (*flatBucket[K, V])(loadPtr(&b.next)) {
 		var spins int
 	retry:
@@ -222,17 +235,11 @@ func (m *FlatMap[K, V]) LoadOrStore(
 	key K,
 	value V,
 ) (actual V, loaded bool) {
-	if enableFastPath {
-		if v, ok := m.Load(key); ok {
-			return v, true
+	return m.compute_(key, func(e *MapEntry[K, V]) {
+		if !e.Loaded() {
+			e.Update(value)
 		}
-	}
-	return m.Compute(key, func(e *MapEntry[K, V]) {
-		if e.Loaded() {
-			return
-		}
-		e.Update(value)
-	})
+	}, &value, computeInit|computeSkipIfFound|computeSkipIfValEqual)
 }
 
 // LoadOrStoreFn loads the value for a key if present.
@@ -242,116 +249,59 @@ func (m *FlatMap[K, V]) LoadOrStoreFn(
 	key K,
 	valueFn func() V,
 ) (actual V, loaded bool) {
-	if enableFastPath {
-		if v, ok := m.Load(key); ok {
-			return v, true
+	return m.compute_(key, func(e *MapEntry[K, V]) {
+		if !e.Loaded() {
+			e.Update(valueFn())
 		}
-	}
-	return m.Compute(key, func(e *MapEntry[K, V]) {
-		if e.Loaded() {
-			return
-		}
-		e.Update(valueFn())
-	})
+	}, nil, computeInit|computeSkipIfFound)
 }
 
 // LoadAndUpdate updates the value for key if it exists, returning the previous
 // value. The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	if enableFastPath {
-		v, ok := m.Load(key)
-		if !ok {
-			return v, ok
-		}
-		// deduplicates identical values
-		if m.valEqual != nil {
-			if m.valEqual(
-				noescape(unsafe.Pointer(&v)),
-				noescape(unsafe.Pointer(&value)),
-			) {
-				return value, true
-			}
-		}
-	}
-	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
+	_, loaded = m.compute_(key, func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			previous = e.Value()
 			e.Update(value)
 		}
-	})
+	}, &value, computeSkipIfNotFound|computeSkipIfValEqual)
 	return previous, loaded
 }
 
 // LoadAndDelete deletes the value for a key, returning the previous value.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
-	if enableFastPath {
-		if v, ok := m.Load(key); !ok {
-			return v, ok
-		}
-	}
-	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
+	_, loaded = m.compute_(key, func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			previous = e.Value()
 			e.Delete()
 		}
-	})
+	}, nil, computeSkipIfNotFound)
 	return previous, loaded
 }
 
 // Store sets the value for a key.
 func (m *FlatMap[K, V]) Store(key K, value V) {
-	if enableFastPath {
-		// deduplicates identical values
-		if m.valEqual != nil {
-			if v, ok := m.Load(key); ok {
-				if m.valEqual(
-					noescape(unsafe.Pointer(&v)),
-					noescape(unsafe.Pointer(&value)),
-				) {
-					return
-				}
-			}
-		}
-	}
-	m.Compute(key, func(e *MapEntry[K, V]) {
+	m.compute_(key, func(e *MapEntry[K, V]) {
 		e.Update(value)
-	})
+	}, &value, computeInit|computeSkipIfValEqual)
 }
 
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	if enableFastPath {
-		// deduplicates identical values
-		if m.valEqual != nil {
-			if v, ok := m.Load(key); ok {
-				if m.valEqual(
-					noescape(unsafe.Pointer(&v)),
-					noescape(unsafe.Pointer(&value)),
-				) {
-					return value, true
-				}
-			}
-		}
-	}
-	_, loaded = m.Compute(key, func(e *MapEntry[K, V]) {
+	_, loaded = m.compute_(key, func(e *MapEntry[K, V]) {
 		previous = e.Value()
 		e.Update(value)
-	})
+	}, &value, computeInit|computeSkipIfValEqual)
 	return previous, loaded
 }
 
 // Delete deletes the value for a key.
 func (m *FlatMap[K, V]) Delete(key K) {
-	if enableFastPath {
-		if _, ok := m.Load(key); !ok {
-			return
-		}
-	}
-	m.Compute(key, func(e *MapEntry[K, V]) {
+	m.compute_(key, func(e *MapEntry[K, V]) {
 		e.Delete()
-	})
+	}, nil, computeSkipIfNotFound)
 }
 
 // Compute performs a compute-style, atomic update for the given key.
@@ -380,24 +330,138 @@ func (m *FlatMap[K, V]) Compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
-	return m.compute(key, fn, false)
+	return m.compute_(key, fn, nil, computeInit)
 }
 
+const (
+	computeInit           uint8 = 1 << iota // auto-init table if nil
+	computeIgnoreHint                       // skip rebuild cooperation
+	computeSkipIfFound                      // fast path: skip lock if key found
+	computeSkipIfNotFound                   // fast path: skip lock if key not found
+	computeSkipIfValEqual                   // fast path: skip lock if value equal
+)
+
+// compute is a thin wrapper used by MapRebuild to call compute_ with ignoreHint.
 func (m *FlatMap[K, V]) compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
 	ignoreHint bool,
 ) (actual V, loaded bool) {
-	for {
-		table := SeqLockRead32(&m.tableSeq, &m.table)
-		if table.buckets.ptr == nil {
-			m.slowInit()
-			continue
+	flags := computeInit
+	if ignoreHint {
+		flags |= computeIgnoreHint
+	}
+	return m.compute_(key, fn, nil, flags)
+}
+
+func (m *FlatMap[K, V]) compute_(
+	key K,
+	fn func(e *MapEntry[K, V]),
+	newVal *V,
+	flags uint8,
+) (actual V, loaded bool) {
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		if flags&computeInit == 0 {
+			return *new(V), false
 		}
-		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h1v := h1(hash)
-		h2v := h2(hash)
-		h2w := broadcast(h2v)
+		m.slowInit()
+		table = SeqLockRead32(&m.tableSeq, &m.table)
+	}
+
+	var hash uintptr
+	var h1v int
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h1v = h1(hash)
+	}
+	h2v := h2(hash)
+	h2w := broadcast(h2v)
+
+	// Fast path: lock-free seqlock read
+	if flags&(computeSkipIfFound|computeSkipIfNotFound|computeSkipIfValEqual) != 0 {
+		var e entry_[K, V]
+		var match bool
+		idx := table.mask & h1v
+		for b := table.buckets.At(idx); b != nil; b = (*flatBucket[K, V])(loadPtr(&b.next)) {
+			// var spins int
+			// fastRetry:
+			s1, ok := b.seq.BeginRead()
+			if !ok {
+				// delay(&spins)
+				// goto fastRetry
+				goto slowPath
+			}
+			meta := loadUint64Fast(&b.meta)
+
+			//goland:noinspection GoBoolExpressions
+			if !opt.Race_ {
+				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+					j := firstMarkedByteIndex(marked)
+					e = b.At(j).ReadUnfenced()
+					if !b.seq.EndRead(s1) {
+						// goto fastRetry
+						goto slowPath
+					}
+					if opt.EmbeddedHash_ {
+						match = e.GetHash() == hash && e.Key == key
+					} else {
+						match = e.Key == key
+					}
+					if match {
+						break
+					}
+				}
+			} else {
+				var cache [entriesPerBucket]entry_[K, V]
+				var cacheCount int
+				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+					j := firstMarkedByteIndex(marked)
+					cache[cacheCount] = b.At(j).ReadUnfenced()
+					cacheCount++
+				}
+				if !b.seq.EndRead(s1) {
+					// goto fastRetry
+					goto slowPath
+				}
+				for i := range cacheCount {
+					e = cache[i]
+					if opt.EmbeddedHash_ {
+						match = e.GetHash() == hash && e.Key == key
+					} else {
+						match = e.Key == key
+					}
+					if match {
+						break
+					}
+				}
+			}
+
+			if match {
+				if flags&computeSkipIfFound != 0 ||
+					flags&computeSkipIfValEqual != 0 && newVal != nil && m.valEqual != nil && m.valEqual(
+						noescape(unsafe.Pointer(&e.Value)),
+						noescape(unsafe.Pointer(newVal)),
+					) {
+					return e.Value, true
+				}
+				goto slowPath
+			}
+		}
+		// Key not found in fast path
+		if flags&computeSkipIfNotFound != 0 {
+			return *new(V), false
+		}
+	}
+
+slowPath:
+
+	ignoreHint := flags&computeIgnoreHint != 0
+
+	for {
 		idx := table.mask & h1v
 		root := table.buckets.At(idx)
 		root.Lock()
@@ -410,19 +474,23 @@ func (m *FlatMap[K, V]) compute(
 					if m.rs.newTableSeq.Ready() {
 						root.Unlock()
 						m.helpCopyAndWait(&m.rs)
+						table = SeqLockRead32(&m.tableSeq, &m.table)
 						continue
 					}
 				case mapRebuildBlockWritersHint:
 					root.Unlock()
 					m.rs.gate.Wait()
+					table = SeqLockRead32(&m.tableSeq, &m.table)
 					continue
 				default:
 					// mapRebuildWithWritersHint: allow concurrent writers
 				}
 			}
 		}
-		if SeqLockRead32(&m.tableSeq, &m.table).buckets.ptr != table.buckets.ptr {
+
+		if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
 			root.Unlock()
+			table = newTable
 			continue
 		}
 
@@ -472,6 +540,14 @@ func (m *FlatMap[K, V]) compute(
 		switch it.op {
 		case updateOp:
 			if it.loaded {
+				// valEqual: skip seqlock write if value unchanged
+				// if m.valEqual != nil && m.valEqual(
+				// 	noescape(unsafe.Pointer(&oldB.At(oldIdx).Ptr().Value)),
+				// 	noescape(unsafe.Pointer(&it.entry.Value)),
+				// ) {
+				// 	root.Unlock()
+				// 	return it.entry.Value, it.loaded
+				// }
 				e := oldB.At(oldIdx)
 				oldB.seq.BeginWriteLocked()
 				e.WriteUnfenced(it.entry)
@@ -911,8 +987,6 @@ func (m *FlatMap[K, V]) copyBucket(
 	newTable *flatTable[K, V],
 ) {
 	mask := newTable.mask
-	seed := m.seed
-	keyHash := m.keyHash
 	copied := 0
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
@@ -926,15 +1000,27 @@ func (m *FlatMap[K, V]) copyBucket(
 					j := firstMarkedByteIndex(marked)
 					e := b.At(j).Ptr()
 					var hash uintptr
+					var h1v int
 					if opt.EmbeddedHash_ {
 						hash = e.GetHash()
+						if m.intKey {
+							h1v = h1IntKey(hash)
+						} else {
+							h1v = h1(hash)
+						}
 					} else {
-						hash = keyHash(noescape(unsafe.Pointer(&e.Key)), seed)
+						if m.intKey {
+							hash = intHash[K](noescape(unsafe.Pointer(&e.Key)))
+							h1v = h1IntKey(hash)
+						} else {
+							hash = m.keyHash(noescape(unsafe.Pointer(&e.Key)), m.seed)
+							h1v = h1(hash)
+						}
 					}
-					idx := mask & h1(hash)
+					h2v := h2(hash)
+					idx := mask & h1v
 					destB := newTable.buckets.At(idx)
 					// Append entry to the destination bucket
-					h2v := h2(hash)
 					for {
 						meta := loadUint64Fast(&destB.meta)
 						empty := (^meta) & metaMask

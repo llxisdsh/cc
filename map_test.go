@@ -5999,35 +5999,6 @@ func TestMap_init(t *testing.T) {
 	})
 }
 
-func TestMap_HashUint64On32Bit(t *testing.T) {
-	val := uint64(0x123456789ABCDEF0)
-	hash := hashUint64On32Bit(unsafe.Pointer(&val), 0)
-
-	// The new unified hash format:
-	// h = lower32 ^ upper32 = 0x9ABCDEF0 ^ 0x12345678 = 0x88888888
-	// high = (h / entriesPerBucket) << h2Bits
-	// low = (h * HashPrime) & h2Mask
-	h := uintptr(uint32(0x9ABCDEF0) ^ uint32(0x12345678))
-
-	// Verify the hash can be used to extract h1 and h2 correctly
-	h1v := h1(hash)
-	h2v := h2(hash)
-
-	// h1 should be hash >> h2Bits
-	expectedH1 := int(hash) >> 7
-	if h1v != expectedH1 {
-		t.Errorf("h1 mismatch: got %d, want %d", h1v, expectedH1)
-	}
-
-	// h2 should have high bit set (h2TopBit)
-	if h2v&0x80 == 0 {
-		t.Errorf("h2 should have high bit set, got %x", h2v)
-	}
-
-	// Verify the hash is derived from XOR'ed value
-	t.Logf("Input: %x, XOR'd: %x, Hash: %x, h1: %d, h2: %x", val, h, hash, h1v, h2v)
-}
-
 func TestMap_UnlockWithMeta(t *testing.T) {
 	t.Run("Map", func(t *testing.T) {
 		m := NewMap[string, int]()
@@ -6098,7 +6069,7 @@ func TestMap_EmbeddedHash(t *testing.T) {
 
 // TestDefaultHasherEdgeCases tests edge cases for defaultHasher to improve coverage
 func TestMap_DefaultHasherEdgeCases(t *testing.T) {
-	keyHash, _ := defaultHasher[string, int]()
+	keyHash, _, _ := defaultHasher[string, int]()
 
 	// Test with empty string
 	emptyStr := ""
