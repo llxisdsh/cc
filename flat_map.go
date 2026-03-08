@@ -320,7 +320,7 @@ func (m *FlatMap[K, V]) computeV2_(
 	key *K,
 	newVal *V,
 	flags uint8,
-) (actual V, loaded bool) {
+) (value V, loaded bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
 	if table.buckets.ptr == nil {
 		if flags&computeInit == 0 {
@@ -462,7 +462,6 @@ slowPath:
 			emptyMeta uint64
 			lastB     *flatBucket[K, V]
 
-			loaded bool
 			oldVal V
 		)
 
@@ -474,12 +473,12 @@ slowPath:
 				e := b.At(j).Ptr()
 				if opt.EmbeddedHash_ {
 					if e.GetHash() == hash && e.Key == *key {
-						oldB, oldIdx, oldMeta, oldVal, loaded = b, j, meta, e.Value, true
+						oldB, oldIdx, oldMeta, oldVal = b, j, meta, e.Value
 						break findLoop
 					}
 				} else {
 					if e.Key == *key {
-						oldB, oldIdx, oldMeta, oldVal, loaded = b, j, meta, e.Value, true
+						oldB, oldIdx, oldMeta, oldVal = b, j, meta, e.Value
 						break findLoop
 					}
 				}
@@ -494,7 +493,7 @@ slowPath:
 			lastB = b
 		}
 
-		if loaded {
+		if oldB != nil {
 			if flags&computeSkipIfFound != 0 {
 				root.Unlock()
 				return oldVal, true
@@ -552,11 +551,6 @@ slowPath:
 			newEnt.SetHash(hash)
 		}
 
-		var retV V
-		if flags&computeSkipIfFound != 0 {
-			retV = *newVal
-		}
-
 		if emptyB != nil {
 			// insert new: no seqlock window needed since slot was empty.
 			// Reader won't access slot until meta is published with valid h2.
@@ -566,7 +560,10 @@ slowPath:
 
 			root.Unlock()
 			table.AddSize(idx, 1)
-			return retV, false
+			if flags&computeSkipIfFound != 0 {
+				return *newVal, false
+			}
+			return *new(V), false
 		}
 
 		// append new bucket
@@ -588,14 +585,17 @@ slowPath:
 				m.tryResize(mapGrowHint, size, 0)
 			}
 		}
-		return retV, false
+		if flags&computeSkipIfFound != 0 {
+			return *newVal, false
+		}
+		return *new(V), false
 	}
 }
 
 func (m *FlatMap[K, V]) compute_(
 	key *K,
 	fn func(e *MapEntry[K, V]),
-	// newVal *V,
+// newVal *V,
 	flags uint8,
 ) (actual V, loaded bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
