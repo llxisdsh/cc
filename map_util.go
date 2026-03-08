@@ -80,9 +80,6 @@ const (
 	asyncThreshold = 128 * 1024
 	// resizeOverPartition: over-partition factor to reduce resize tail latency
 	resizeOverPartition = 8
-	// enableFastPath: optimize read operations by avoiding locks when possible
-	// Can reduce latency by up to 100x in read-heavy scenarios
-	enableFastPath = true
 )
 
 type mapRebuildHint uint8
@@ -101,6 +98,13 @@ const (
 	cancelOp computeOp = iota
 	updateOp
 	deleteOp
+)
+
+const (
+	computeInit           uint8 = 1 << iota // auto-init table if nil
+	computeIgnoreHint                       // skip rebuild cooperation
+	computeSkipIfFound                      // fast path: skip lock if key found
+	computeSkipIfNotFound                   // fast path: skip lock if key not found
 )
 
 // ============================================================================
@@ -226,6 +230,36 @@ func noEscape[T any](p *T) *T {
 // SWAR Utilities
 // ============================================================================
 
+// intHash computes the hash for integer keys.
+// The switch on unsafe.Sizeof is evaluated at compile time for each generic instantiation.
+// The Go compiler (since 1.18) will perform Dead Code Elimination (DCE) to remove
+// unreachable branches, resulting in a zero-cost abstraction (no runtime branch).
+//
+//go:nosplit
+func intHash[K any](ptr unsafe.Pointer) uintptr {
+	switch unsafe.Sizeof(*(*K)(nil)) {
+	case 8:
+		if intSize == 64 {
+			return *(*uintptr)(ptr)
+		} else {
+			v := *(*uint64)(ptr)
+			return uintptr(v>>32) ^ uintptr(v)
+		}
+	case 4:
+		if intSize == 32 {
+			return *(*uintptr)(ptr)
+		} else {
+			return uintptr(*(*uint32)(ptr))
+		}
+	case 2:
+		return uintptr(*(*uint16)(ptr))
+	case 1:
+		return uintptr(*(*uint8)(ptr))
+	default:
+		return 0
+	}
+}
+
 // h1 extracts the bucket index from a hash value.
 // The hash format is unified: [high bits: bucket index] [low h2Bits: h2 entropy]
 // This allows branch-free extraction for all key types.
@@ -233,6 +267,11 @@ func noEscape[T any](p *T) *T {
 //go:nosplit
 func h1(h uintptr) int {
 	return int(h) >> h2Bits
+}
+
+//go:nosplit
+func h1IntKey(h uintptr) int {
+	return int(h) / entriesPerBucket
 }
 
 // h2 extracts the byte-level hash for in-bucket lookups.
@@ -384,151 +423,46 @@ type (
 func defaultHasher[K comparable, V any]() (
 	keyHash HashFunc,
 	valEqual EqualFunc,
+	intKey bool,
 ) {
 	keyHash, valEqual = defaultHasherUsingBuiltIn[K, V]()
 
 	switch any(*new(K)).(type) {
 	case uint, int, uintptr:
-		return hashUintptr, valEqual
+		return keyHash, valEqual, true
 	case uint64, int64:
 		if intSize == 64 {
-			return hashUint64, valEqual
+			return keyHash, valEqual, true
 		}
-
-		return hashUint64On32Bit, valEqual
+		return keyHash, valEqual, true
 	case uint32, int32:
-		return hashUint32, valEqual
+		return keyHash, valEqual, true
 	case uint16, int16:
-		return hashUint16, valEqual
+		return keyHash, valEqual, true
 	case uint8, int8:
-		return hashUint8, valEqual
-	case string:
-		return hashString, valEqual
-	case []byte:
-		return hashString, valEqual
+		return keyHash, valEqual, true
 	default:
 		// for types like integers
 		kType := reflect.TypeFor[K]()
 		switch kType.Kind() {
 		case reflect.Uint, reflect.Int, reflect.Uintptr:
-			return hashUintptr, valEqual
+			return keyHash, valEqual, true
 		case reflect.Int64, reflect.Uint64:
 			if intSize == 64 {
-				return hashUint64, valEqual
+				return keyHash, valEqual, true
 			}
-
-			return hashUint64On32Bit, valEqual
+			return keyHash, valEqual, true
 		case reflect.Int32, reflect.Uint32:
-			return hashUint32, valEqual
+			return keyHash, valEqual, true
 		case reflect.Int16, reflect.Uint16:
-			return hashUint16, valEqual
+			return keyHash, valEqual, true
 		case reflect.Int8, reflect.Uint8:
-			return hashUint8, valEqual
-		case reflect.String:
-			return hashString, valEqual
-		case reflect.Slice:
-			// Check if it's []byte
-			if kType.Elem().Kind() == reflect.Uint8 {
-				return hashString, valEqual
-			}
-			return keyHash, valEqual
+			return keyHash, valEqual, true
 		default:
-			return keyHash, valEqual
+			return keyHash, valEqual, false
 		}
 	}
 }
-
-// Integer Hash Strategy (Unified Format)
-//
-// All hash functions output a unified format:
-//
-//	[high bits: bucket index] [low h2Bits: h2 entropy]
-//
-// This enables branch-free h1/h2 extraction:
-//
-//	h1(h) = h >> h2Bits
-//	h2(h) = uint8(h) | h2TopBit
-//
-// For integers, we preserve sequential key distribution:
-//   - High bits: (v / entriesPerBucket) << h2Bits - maintains bucket ordering
-//   - Low bits: entropy from v * HashPrime - provides h2 variety
-//
-// This achieves:
-//  1. Sequential keys fill buckets optimally (100% density)
-//  2. Good h2 distribution even for aligned pointers
-//  3. Zero-branch h1/h2 extraction (14-18% faster in mixed-type scenarios)
-//
-//go:nosplit
-func mixUintptr(v uintptr) uintptr {
-	h := (v / uintptr(entriesPerBucket)) << h2Bits
-	l := (v * opt.HashPrime) & h2LowMask
-	return h | l
-}
-
-//go:nosplit
-func hashUintptr(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return mixUintptr(*(*uintptr)(ptr))
-}
-
-//go:nosplit
-func hashUint64On32Bit(ptr unsafe.Pointer, _ uintptr) uintptr {
-	v := *(*uint64)(ptr)
-	return mixUintptr(uintptr(v) ^ uintptr(v>>32))
-}
-
-//go:nosplit
-func hashUint64(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint64)(ptr)))
-}
-
-//go:nosplit
-func hashUint32(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint32)(ptr)))
-}
-
-//go:nosplit
-func hashUint16(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint16)(ptr)))
-}
-
-//go:nosplit
-func hashUint8(ptr unsafe.Pointer, _ uintptr) uintptr {
-	return mixUintptr(uintptr(*(*uint8)(ptr)))
-}
-
-// hashString computes a hash for short strings optimized for sequential insertion.
-//
-// Why 133? Since h1 = hash >> 7, using 133 = (1<<7) + 5 ensures:
-//
-//	seed' = seed*133 + byte = (seed<<7) + seed*5 + byte
-//	h1'   = seed' >> 7 ≈ seed + small_delta
-//
-// Each byte adds ~1 to h1, distributing sequential keys ("key0","key1"...)
-// across consecutive buckets. In contrast, 31 = (1<<5)-1 shifts only 5 bits,
-// causing h1 to change too slowly and sequential keys to cluster.
-//
-// Why 12 bytes? The simple loop beats built-in hash for short strings due to
-// lower call overhead. 12 is the empirical crossover point where the built-in
-// hash becomes faster for longer strings.
-//
-//go:nosplit
-func hashString(ptr unsafe.Pointer, seed uintptr) uintptr {
-	type stringHeader struct {
-		data unsafe.Pointer
-		len  int
-	}
-	s := (*stringHeader)(ptr)
-	if s.len <= 12 {
-		for i := range s.len {
-			seed = seed*133 + uintptr(*(*uint8)(unsafe.Add(s.data, i)))
-		}
-		return seed
-	}
-	// Fallback to the built-in hash function for longer strings
-	return builtInStringHasher(ptr, seed)
-}
-
-var builtInStringHasher, _ = defaultHasherUsingBuiltIn[string, struct{}]()
 
 // defaultHasherUsingBuiltIn gets Go's built-in hash and equality functions
 // for the specified types using reflection.

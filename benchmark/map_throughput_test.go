@@ -60,20 +60,14 @@ func testInsert_cc_FlatMap(
 			// defer wg.Done()
 
 			for j := start; j < end; j++ {
-				// m.Store(Int(j), j)
-				// m.Compute(
-				//	j,
-				//	func(old int, loaded bool) (newV int, op ComputeOp) {
-				//		return j, UpdateOp
-				//	},
-				// )
+				m.Store(j, j)
 
-				m.Compute(
-					j,
-					func(e *cc.MapEntry[int, int]) {
-						e.Update(j)
-					},
-				)
+				// m.Compute(
+				// 	j,
+				// 	func(e *cc.MapEntry[int, int]) {
+				// 		e.Update(j)
+				// 	},
+				// )
 			}
 			wg.Done()
 		}(i*batchSize, min((i+1)*batchSize, total))
@@ -223,13 +217,13 @@ func testInsert_cc_Map(
 			// defer wg.Done()
 			// t.Logf("start, %04d, %04d", start, end)
 			for j := start; j < end; j++ {
-				// m.Store(Int(j), j)
-				m.Compute(
-					Int(j),
-					func(e *cc.MapEntry[Int, int]) {
-						e.Update(j)
-					},
-				)
+				m.Store(Int(j), j)
+				// m.Compute(
+				// 	Int(j),
+				// 	func(e *cc.MapEntry[Int, int]) {
+				// 		e.Update(j)
+				// 	},
+				// )
 				// t.Logf("%04d", j)
 			}
 			wg.Done()
