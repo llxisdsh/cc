@@ -100,6 +100,13 @@ const (
 	deleteOp
 )
 
+const (
+	computeInit           uint8 = 1 << iota // auto-init table if nil
+	computeIgnoreHint                       // skip rebuild cooperation
+	computeSkipIfFound                      // fast path: skip lock if key found
+	computeSkipIfNotFound                   // fast path: skip lock if key not found
+)
+
 // ============================================================================
 // Private struct definitions
 // ============================================================================

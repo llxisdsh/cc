@@ -154,7 +154,6 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 
-	// hash, h1v, h2v := m.hash(noescape(unsafe.Pointer(&key)))
 	var hash uintptr
 	var h1v int
 
@@ -279,42 +278,6 @@ func (m *FlatMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 func (m *FlatMap[K, V]) Delete(key K) {
 	m.computeV2_(&key, nil, computeSkipIfNotFound)
 }
-
-// Compute performs a compute-style, atomic update for the given key.
-//
-// Concurrency model:
-//   - Acquires the root-bucket lock to serialize write/resize cooperation.
-//   - If a resize is observed, cooperates to finish copying and restarts on
-//     the latest table.
-//
-// Callback signature:
-//
-//		fn(e *MapEntry[K, V])
-//
-//	  - Use e.Loaded() and e.Value() to inspect the current state
-//	  - Use e.Update(newV) to upsert; Use e.Delete() to remove
-//
-// Parameters:
-//
-//   - key: The key to process
-//   - fn: Callback function (called regardless of value existence)
-//
-// Returns:
-//   - actual: the current value in the map after the operation
-//   - loaded: true if the key existed before the operation
-func (m *FlatMap[K, V]) Compute(
-	key K,
-	fn func(e *MapEntry[K, V]),
-) (actual V, loaded bool) {
-	return m.compute_(&key, fn, computeInit)
-}
-
-const (
-	computeInit           uint8 = 1 << iota // auto-init table if nil
-	computeIgnoreHint                       // skip rebuild cooperation
-	computeSkipIfFound                      // fast path: skip lock if key found
-	computeSkipIfNotFound                   // fast path: skip lock if key not found
-)
 
 func (m *FlatMap[K, V]) computeV2_(
 	key *K,
@@ -592,10 +555,38 @@ slowPath:
 	}
 }
 
+// Compute performs a compute-style, atomic update for the given key.
+//
+// Concurrency model:
+//   - Acquires the root-bucket lock to serialize write/resize cooperation.
+//   - If a resize is observed, cooperates to finish copying and restarts on
+//     the latest table.
+//
+// Callback signature:
+//
+//		fn(e *MapEntry[K, V])
+//
+//	  - Use e.Loaded() and e.Value() to inspect the current state
+//	  - Use e.Update(newV) to upsert; Use e.Delete() to remove
+//
+// Parameters:
+//
+//   - key: The key to process
+//   - fn: Callback function (called regardless of value existence)
+//
+// Returns:
+//   - actual: the current value in the map after the operation
+//   - loaded: true if the key existed before the operation
+func (m *FlatMap[K, V]) Compute(
+	key K,
+	fn func(e *MapEntry[K, V]),
+) (actual V, loaded bool) {
+	return m.compute_(&key, fn, computeInit)
+}
+
 func (m *FlatMap[K, V]) compute_(
 	key *K,
 	fn func(e *MapEntry[K, V]),
-// newVal *V,
 	flags uint8,
 ) (actual V, loaded bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)

@@ -102,7 +102,7 @@ func (m *MapRebuild[K, V]) Compute(
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
 	if m.m != nil {
-		return m.m.compute(key, fn, true)
+		return m.m.compute_(&key, fn, computeInit|computeIgnoreHint)
 	}
 	return m.f.compute_(&key, fn, computeInit|computeIgnoreHint)
 }

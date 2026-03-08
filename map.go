@@ -189,7 +189,6 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 
-	// hash, h1v, h2v := m.hash(noescape(unsafe.Pointer(&key)))
 	var hash uintptr
 	var h1v int
 
@@ -229,25 +228,7 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 // LoadOrStore retrieves an existing value or stores a new one if the key
 // doesn't exist, compatible with `sync.Map`.
 func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		table = m.slowInit()
-	}
-
-	e, hash, h1v := m.loadEntry_(table, &key)
-	if e != nil {
-		return e.Value, true
-	}
-
-	return m.computeEntry_(table, hash, h1v, &key,
-		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
-			if e != nil {
-				return e, e.Value, true
-			}
-			return &entry_[K, V]{Value: value}, value, false
-		},
-		false,
-	)
+	return m.computeV2_(&key, &value, computeInit|computeSkipIfFound)
 }
 
 // LoadOrStoreFn returns the existing value for the key if
@@ -264,17 +245,7 @@ func (m *Map[K, V]) LoadOrStoreFn(
 	key K,
 	newValueFn func() V,
 ) (actual V, loaded bool) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		table = m.slowInit()
-	}
-
-	e, hash, h1v := m.loadEntry_(table, &key)
-	if e != nil {
-		return e.Value, true
-	}
-
-	return m.computeEntry_(table, hash, h1v, &key,
+	return m.computeEntry_(&key,
 		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
 			if e != nil {
 				return e, e.Value, true
@@ -282,7 +253,7 @@ func (m *Map[K, V]) LoadOrStoreFn(
 			newValue := newValueFn()
 			return &entry_[K, V]{Value: newValue}, newValue, false
 		},
-		false,
+		computeInit|computeSkipIfFound,
 	)
 }
 
@@ -299,140 +270,30 @@ func (m *Map[K, V]) LoadOrStoreFn(
 //   - loaded: True if the key existed and the value was updated,
 //     false otherwise.
 func (m *Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		return *new(V), false
-	}
-
-	e, hash, h1v := m.loadEntry_(table, &key)
-	if e == nil {
-		return *new(V), false
-	}
-
-	// deduplicates identical values
-	if m.valEqual != nil {
-		if m.valEqual(
-			noescape(unsafe.Pointer(&e.Value)),
-			noescape(unsafe.Pointer(&value)),
-		) {
-			return value, true
-		}
-	}
-
-	return m.computeEntry_(table, hash, h1v, &key,
-		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
-			if e != nil {
-				return &entry_[K, V]{Value: value}, e.Value, true
-			}
-			return nil, *(new(V)), false
-		},
-		false,
-	)
+	return m.computeV2_(&key, &value, computeSkipIfNotFound)
 }
 
 // LoadAndDelete retrieves the value for a key and deletes it from the map.
 // compatible with `sync.Map`.
 func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		return *new(V), false
-	}
-
-	e, hash, h1v := m.loadEntry_(table, &key)
-	if e == nil {
-		return *new(V), false
-	}
-
-	return m.computeEntry_(table, hash, h1v, &key,
-		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
-			if e != nil {
-				return nil, e.Value, true
-			}
-			return nil, *new(V), false
-		},
-		false,
-	)
+	return m.computeV2_(&key, nil, computeSkipIfNotFound)
 }
 
 // Store inserts or updates a key-value pair, compatible with `sync.Map`.
 func (m *Map[K, V]) Store(key K, value V) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		table = m.slowInit()
-	}
-
-	e, hash, h1v := m.loadEntry_(table, &key)
-	// deduplicates identical values
-	if e != nil {
-		if m.valEqual != nil {
-			if m.valEqual(
-				noescape(unsafe.Pointer(&e.Value)),
-				noescape(unsafe.Pointer(&value)),
-			) {
-				return
-			}
-		}
-	}
-
-	m.computeEntry_(table, hash, h1v, &key,
-		func(*entry_[K, V]) (*entry_[K, V], V, bool) {
-			return &entry_[K, V]{Value: value}, *new(V), false
-		},
-		false,
-	)
+	m.computeV2_(&key, &value, computeInit)
 }
 
 // Swap stores a key-value pair and returns the previous value if any.
 // compatible with `sync.Map`.
 func (m *Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		table = m.slowInit()
-	}
-
-	e, hash, h1v := m.loadEntry_(table, &key)
-	// deduplicates identical values
-	if e != nil {
-		if m.valEqual != nil {
-			if m.valEqual(
-				noescape(unsafe.Pointer(&e.Value)),
-				noescape(unsafe.Pointer(&value)),
-			) {
-				return value, true
-			}
-		}
-	}
-
-	return m.computeEntry_(table, hash, h1v, &key,
-		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
-			if e != nil {
-				return &entry_[K, V]{Value: value}, e.Value, true
-			}
-			return &entry_[K, V]{Value: value}, *new(V), false
-		},
-		false,
-	)
+	return m.computeV2_(&key, &value, computeInit)
 }
 
 // Delete removes a key-value pair.
 // compatible with `sync.Map`.
 func (m *Map[K, V]) Delete(key K) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		return
-	}
-
-	e, hash, h1v := m.loadEntry_(table, &key)
-	if e == nil {
-		return
-	}
-
-	m.computeEntry_(table, hash, h1v, &key,
-		func(*entry_[K, V]) (*entry_[K, V], V, bool) {
-			return nil, *new(V), false
-		},
-		false,
-	)
+	m.computeV2_(&key, nil, computeSkipIfNotFound)
 }
 
 // CompareAndSwap atomically replaces an existing value with a new value
@@ -447,26 +308,7 @@ func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 		panic("called CompareAndSwap when value is not of comparable type")
 	}
 
-	e, hash, h1v := m.loadEntry_(table, &key)
-	if e == nil {
-		return false
-	}
-
-	if !m.valEqual(
-		noescape(unsafe.Pointer(&e.Value)),
-		noescape(unsafe.Pointer(&old)),
-	) {
-		return false
-	}
-	// deduplicates identical values
-	if m.valEqual(
-		noescape(unsafe.Pointer(&e.Value)),
-		noescape(unsafe.Pointer(&new)),
-	) {
-		return true
-	}
-
-	_, swapped = m.computeEntry_(table, hash, h1v, &key,
+	_, swapped = m.computeEntry_(&key,
 		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
 			var zero V
 			if e != nil &&
@@ -478,7 +320,7 @@ func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 			}
 			return e, zero, false
 		},
-		false,
+		computeSkipIfNotFound,
 	)
 	return swapped
 }
@@ -495,19 +337,7 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 		panic("called CompareAndDelete when value is not of comparable type")
 	}
 
-	e, hash, h1v := m.loadEntry_(table, &key)
-	if e == nil {
-		return false
-	}
-
-	if !m.valEqual(
-		noescape(unsafe.Pointer(&e.Value)),
-		noescape(unsafe.Pointer(&old)),
-	) {
-		return false
-	}
-
-	_, deleted = m.computeEntry_(table, hash, h1v, &key,
+	_, deleted = m.computeEntry_(&key,
 		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
 			var zero V
 			if e != nil &&
@@ -519,9 +349,270 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 			}
 			return e, zero, false
 		},
-		false,
+		computeSkipIfNotFound,
 	)
 	return deleted
+}
+
+func (m *Map[K, V]) computeV2_(
+	key *K,
+	newVal *V,
+	flags uint8,
+) (V, bool) {
+	table := (*mapTable)(loadPtr(&m.table))
+	if table == nil {
+		if flags&computeInit == 0 {
+			return *new(V), false
+		}
+		table = m.slowInit()
+	}
+
+	var hash uintptr
+	var h1v int
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+		h1v = h1(hash)
+	}
+	h2v := h2(hash)
+	h2w := broadcast(h2v)
+	// Fast path: lock-free seqlock read
+	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 || newVal != nil {
+		idx := table.mask & h1v
+		for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
+			meta := loadUint64(&b.meta)
+			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+					if opt.EmbeddedHash_ {
+						if e.GetHash() == hash && e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							if newVal != nil && m.valEqual != nil && m.valEqual(
+								noescape(unsafe.Pointer(&e.Value)),
+								noescape(unsafe.Pointer(newVal)),
+							) {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					} else {
+						if e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							if newVal != nil && m.valEqual != nil && m.valEqual(
+								noescape(unsafe.Pointer(&e.Value)),
+								noescape(unsafe.Pointer(newVal)),
+							) {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					}
+				}
+			}
+		}
+		// Key not found in fast path
+		if flags&computeSkipIfNotFound != 0 {
+			return *new(V), false
+		}
+	}
+
+slowPath:
+
+	for {
+		idx := table.mask & h1v
+		root := table.buckets.At(idx)
+
+		root.Lock()
+
+		// This is the first check, checking if there is a rebuild operation in
+		// progress before acquiring the bucket lock
+		if flags&computeIgnoreHint == 0 {
+			if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
+				switch rs.hint {
+				case mapGrowHint, mapShrinkHint:
+					if loadPtr(&rs.table) != nil /*skip init*/ &&
+						loadPtr(&rs.newTable) != nil /*skip newTable is nil*/ {
+						root.Unlock()
+						m.helpCopyAndWait(rs)
+						table = (*mapTable)(loadPtr(&m.table))
+						continue
+					}
+				case mapRebuildBlockWritersHint:
+					root.Unlock()
+					rs.latch.Wait()
+					table = (*mapTable)(loadPtr(&m.table))
+					continue
+				default:
+					// mapRebuildWithWritersHint: allow concurrent writers
+				}
+			}
+		}
+
+		// Verifies if table was replaced after lock acquisition.
+		// Needed since another goroutine may have resized the table
+		// between initial check and lock acquisition.
+		if newTable := (*mapTable)(loadPtr(&m.table)); table != newTable {
+			root.Unlock()
+			table = newTable
+			continue
+		}
+
+		var (
+			oldEntry  *entry_[K, V]
+			oldB      *bucket
+			oldIdx    int
+			oldMeta   uint64
+			emptyB    *bucket
+			emptyIdx  int
+			emptyMeta uint64
+			lastB     *bucket
+		)
+
+	findLoop:
+		for b := root; b != nil; b = (*bucket)(b.next) {
+			meta := loadUint64Fast(&b.meta)
+			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				if e := (*entry_[K, V])(*b.At(j)); e != nil {
+					if opt.EmbeddedHash_ {
+						if e.GetHash() == hash && e.Key == *key {
+							oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
+							break findLoop
+						}
+					} else {
+						if e.Key == *key {
+							oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
+							break findLoop
+						}
+					}
+				}
+			}
+			if emptyB == nil {
+				if empty := (^meta) & metaMask; empty != 0 {
+					emptyB = b
+					emptyIdx = firstMarkedByteIndex(empty)
+					emptyMeta = meta
+				}
+			}
+			lastB = b
+		}
+
+		if oldEntry != nil {
+			if flags&computeSkipIfFound != 0 {
+				root.Unlock()
+				return oldEntry.Value, true
+			}
+
+			if newVal != nil {
+				// valEqual: skip seqlock write if value unchanged
+				// if m.valEqual != nil && m.valEqual(
+				// 	noescape(unsafe.Pointer(&oldEntry.Value)),
+				// 	noescape(unsafe.Pointer(newVal)),
+				// ) {
+				// 	root.Unlock()
+				// 	return oldEntry.Value, true
+				// }
+
+				// Update
+				newEntry := &entry_[K, V]{Key: *key, Value: *newVal}
+				if opt.EmbeddedHash_ {
+					newEntry.SetHash(hash)
+				}
+				storePtr(
+					oldB.At(oldIdx),
+					unsafe.Pointer(newEntry),
+				)
+				root.Unlock()
+				return oldEntry.Value, true
+			}
+			// Delete
+			storePtr(oldB.At(oldIdx), nil)
+			newMeta := setByte(oldMeta, h2Empty, oldIdx)
+			if oldB == root {
+				root.UnlockWithMeta(newMeta)
+			} else {
+				storeUint64(&oldB.meta, newMeta)
+				root.Unlock()
+			}
+			table.AddSize(idx, -1)
+
+			// Check if table shrinking is needed
+			if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
+				loadPtr(&m.rs) == nil {
+				tableLen := table.mask + 1
+				if m.minLen < tableLen {
+					size := table.SumSize()
+					if size < tableLen*entriesPerBucket/shrinkFraction {
+						m.tryResize(mapShrinkHint, size, 0)
+					}
+				}
+			}
+			return oldEntry.Value, true
+		}
+
+		if flags&computeSkipIfNotFound != 0 || newVal == nil {
+			// No entry to insert or delete
+			root.Unlock()
+			return *new(V), false
+		}
+
+		// Insert
+		newEntry := &entry_[K, V]{Key: *key, Value: *newVal}
+		if opt.EmbeddedHash_ {
+			newEntry.SetHash(hash)
+		}
+
+		if emptyB != nil {
+			// publish pointer first, then meta; readers check meta before
+			// pointer so they won't observe a partially-initialized entry,
+			// and this reduces the window where meta is visible but pointer is
+			// still nil
+			storePtr(emptyB.At(emptyIdx), unsafe.Pointer(newEntry))
+			newMeta := setByte(emptyMeta, h2v, emptyIdx)
+			if emptyB == root {
+				root.UnlockWithMeta(newMeta)
+			} else {
+				storeUint64(&emptyB.meta, newMeta)
+				root.Unlock()
+			}
+			table.AddSize(idx, 1)
+			if flags&computeSkipIfFound != 0 {
+				return *newVal, false
+			}
+			return *new(V), false
+		}
+
+		// No empty slot, create new bucket and insert
+		storePtr(&lastB.next, unsafe.Pointer(&bucket{
+			meta: setByte(metaEmpty, h2v, 0),
+			entries: [entriesPerBucket]unsafe.Pointer{
+				unsafe.Pointer(newEntry),
+			},
+		}))
+		root.Unlock()
+		table.AddSize(idx, 1)
+
+		// Check if the table needs to grow
+		if loadPtr(&m.rs) == nil {
+			tableLen := table.mask + 1
+			size := table.SumSize()
+			const capFactor = float64(entriesPerBucket) * loadFactor
+			if size >= int(float64(tableLen)*capFactor) {
+				m.tryResize(mapGrowHint, size, 0)
+			}
+		}
+
+		if flags&computeSkipIfFound != 0 {
+			return *newVal, false
+		}
+		return *new(V), false
+	}
 }
 
 // Compute performs a compute-style, atomic update for the given key.
@@ -550,30 +641,17 @@ func (m *Map[K, V]) Compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
-	return m.compute(key, fn, false)
+	return m.compute_(&key, fn, computeInit)
 }
 
-func (m *Map[K, V]) compute(
-	key K,
+func (m *Map[K, V]) compute_(
+	key *K,
 	fn func(e *MapEntry[K, V]),
-	ignoreHint bool,
+	flags uint8,
 ) (actual V, loaded bool) {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		table = m.slowInit()
-	}
-	var hash uintptr
-	var h1v int
-	if m.intKey {
-		hash = intHash[K](noescape(unsafe.Pointer(&key)))
-		h1v = h1IntKey(hash)
-	} else {
-		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h1v = h1(hash)
-	}
-	return m.computeEntry_(table, hash, h1v, &key,
+	return m.computeEntry_(key,
 		func(e *entry_[K, V]) (*entry_[K, V], V, bool) {
-			it := MapEntry[K, V]{entry: entry_[K, V]{Key: key}}
+			it := MapEntry[K, V]{entry: entry_[K, V]{Key: *key}}
 			if e != nil {
 				it.entry = *e
 				it.loaded = true
@@ -588,7 +666,7 @@ func (m *Map[K, V]) compute(
 				return e, it.entry.Value, it.loaded
 			}
 		},
-		ignoreHint,
+		flags,
 	)
 }
 
@@ -814,61 +892,9 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	// Pre-fetch size to optimize initial capacity
 	clone.Grow(m.Size())
 	m.rangeEntry_(func(e *entry_[K, V]) bool {
-		cloneTable := (*mapTable)(loadPtr(&clone.table))
-		var hash uintptr
-		var h1v int
-		if clone.intKey {
-			hash = intHash[K](noescape(unsafe.Pointer(&e.Key)))
-			h1v = h1IntKey(hash)
-		} else {
-			hash = clone.keyHash(noescape(unsafe.Pointer(&e.Key)), clone.seed)
-			h1v = h1(hash)
-		}
-		clone.computeEntry_(cloneTable, hash, h1v, &e.Key,
-			func(*entry_[K, V]) (*entry_[K, V], V, bool) {
-				return e, e.Value, false
-			},
-			false,
-		)
+		clone.computeV2_(&e.Key, &e.Value, computeInit)
 		return true
 	})
-}
-
-//go:nosplit
-func (m *Map[K, V]) loadEntry_(
-	table *mapTable,
-	key *K,
-) (*entry_[K, V], uintptr, int) {
-	var hash uintptr
-	var h1v int
-	if m.intKey {
-		hash = intHash[K](noescape(unsafe.Pointer(key)))
-		h1v = h1IntKey(hash)
-	} else {
-		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
-		h1v = h1(hash)
-	}
-	h2v := h2(hash)
-	h2w := broadcast(h2v)
-	idx := table.mask & h1v
-	for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
-		meta := loadUint64(&b.meta)
-		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-				if opt.EmbeddedHash_ {
-					if e.GetHash() == hash && e.Key == *key {
-						return e, hash, h1v
-					}
-				} else {
-					if e.Key == *key {
-						return e, hash, h1v
-					}
-				}
-			}
-		}
-	}
-	return nil, hash, h1v
 }
 
 // computeEntry_ processes a key-value pair using the provided function.
@@ -906,14 +932,62 @@ func (m *Map[K, V]) loadEntry_(
 //   - Avoid calling other map methods inside fn to prevent deadlocks.
 //   - Do not perform expensive computations or I/O operations inside fn.
 func (m *Map[K, V]) computeEntry_(
-	table *mapTable,
-	hash uintptr, h1v int,
 	key *K,
 	fn func(e *entry_[K, V]) (*entry_[K, V], V, bool),
-	ignoreHint bool,
+	flags uint8,
 ) (V, bool) {
+	table := (*mapTable)(loadPtr(&m.table))
+	if table == nil {
+		if flags&computeInit == 0 {
+			return *new(V), false
+		}
+		table = m.slowInit()
+	}
+
+	var hash uintptr
+	var h1v int
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+		h1v = h1(hash)
+	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
+	// Fast path: lock-free seqlock read
+	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
+		idx := table.mask & h1v
+		for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
+			meta := loadUint64(&b.meta)
+			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+					if opt.EmbeddedHash_ {
+						if e.GetHash() == hash && e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					} else {
+						if e.Key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.Value, true
+							}
+							goto slowPath
+						}
+					}
+				}
+			}
+		}
+		// Key not found in fast path
+		if flags&computeSkipIfNotFound != 0 {
+			return *new(V), false
+		}
+	}
+
+slowPath:
 
 	for {
 		idx := table.mask & h1v
@@ -923,7 +997,7 @@ func (m *Map[K, V]) computeEntry_(
 
 		// This is the first check, checking if there is a rebuild operation in
 		// progress before acquiring the bucket lock
-		if !ignoreHint {
+		if flags&computeIgnoreHint == 0 {
 			if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
 				case mapGrowHint, mapShrinkHint:
