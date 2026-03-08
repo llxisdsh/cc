@@ -375,20 +375,14 @@ func testInsertString_cc_FlatMap(
 			// defer wg.Done()
 
 			for j := start; j < end; j++ {
-				// m.Store(Int(j), j)
-				// m.Compute(
-				//	strconv.Itoa(j),
-				//	func(old int, loaded bool) (newV int, op ComputeOp) {
-				//		return j, UpdateOp
-				//	},
-				// )
+				m.Store(strconv.Itoa(j), j)
 
-				m.Compute(
-					strconv.Itoa(j),
-					func(e *cc.MapEntry[string, int]) {
-						e.Update(j)
-					},
-				)
+				// m.Compute(
+				// 	strconv.Itoa(j),
+				// 	func(e *cc.MapEntry[string, int]) {
+				// 		e.Update(j)
+				// 	},
+				// )
 			}
 			wg.Done()
 		}(i*batchSize, min((i+1)*batchSize, total))

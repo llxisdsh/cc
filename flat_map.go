@@ -234,7 +234,7 @@ func (m *FlatMap[K, V]) LoadOrStore(
 	key K,
 	value V,
 ) (actual V, loaded bool) {
-	return m.computeV2_(&key, &value, computeInit|computeSkipIfFound)
+	return m.computeVal(&key, &value, computeInit|computeSkipIfFound)
 }
 
 // LoadOrStoreFn loads the value for a key if present.
@@ -244,7 +244,7 @@ func (m *FlatMap[K, V]) LoadOrStoreFn(
 	key K,
 	valueFn func() V,
 ) (actual V, loaded bool) {
-	return m.compute_(&key, func(e *MapEntry[K, V]) {
+	return m.compute(&key, func(e *MapEntry[K, V]) {
 		if !e.Loaded() {
 			e.Update(valueFn())
 		}
@@ -254,36 +254,36 @@ func (m *FlatMap[K, V]) LoadOrStoreFn(
 // LoadAndUpdate updates the value for key if it exists, returning the previous
 // value. The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	return m.computeV2_(&key, &value, computeSkipIfNotFound)
+	return m.computeVal(&key, &value, computeSkipIfNotFound)
 }
 
 // LoadAndDelete deletes the value for a key, returning the previous value.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
-	return m.computeV2_(&key, nil, computeSkipIfNotFound)
+	return m.computeVal(&key, nil, computeSkipIfNotFound)
 }
 
 // Store sets the value for a key.
 func (m *FlatMap[K, V]) Store(key K, value V) {
-	m.computeV2_(&key, &value, computeInit)
+	m.computeVal(&key, &value, computeInit)
 }
 
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	return m.computeV2_(&key, &value, computeInit)
+	return m.computeVal(&key, &value, computeInit)
 }
 
 // Delete deletes the value for a key.
 func (m *FlatMap[K, V]) Delete(key K) {
-	m.computeV2_(&key, nil, computeSkipIfNotFound)
+	m.computeVal(&key, nil, computeSkipIfNotFound)
 }
 
-func (m *FlatMap[K, V]) computeV2_(
+func (m *FlatMap[K, V]) computeVal(
 	key *K,
 	newVal *V,
 	flags uint8,
-) (value V, loaded bool) {
+) (V, bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
 	if table.buckets.ptr == nil {
 		if flags&computeInit == 0 {
@@ -470,6 +470,7 @@ slowPath:
 					root.Unlock()
 					return oldVal, true
 				}
+				// Update
 				e := oldB.At(oldIdx)
 				newEnt := entry_[K, V]{Key: *key, Value: *newVal}
 				if opt.EmbeddedHash_ {
@@ -514,6 +515,7 @@ slowPath:
 			newEnt.SetHash(hash)
 		}
 
+		// Insert into empty slot
 		if emptyB != nil {
 			// insert new: no seqlock window needed since slot was empty.
 			// Reader won't access slot until meta is published with valid h2.
@@ -581,10 +583,10 @@ func (m *FlatMap[K, V]) Compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
-	return m.compute_(&key, fn, computeInit)
+	return m.compute(&key, fn, computeInit)
 }
 
-func (m *FlatMap[K, V]) compute_(
+func (m *FlatMap[K, V]) compute(
 	key *K,
 	fn func(e *MapEntry[K, V]),
 	flags uint8,
@@ -775,6 +777,7 @@ slowPath:
 					root.Unlock()
 					return it.entry.Value, it.loaded
 				}
+				// Update
 				e := oldB.At(oldIdx)
 				oldB.seq.BeginWriteLocked()
 				e.WriteUnfenced(it.entry)
@@ -782,6 +785,7 @@ slowPath:
 				root.Unlock()
 				return it.entry.Value, it.loaded
 			}
+			// Insert into empty slot
 			if emptyB != nil {
 				// insert new: no seqlock window needed since slot was empty.
 				// Reader won't access slot until meta is published with valid h2.
@@ -962,7 +966,6 @@ func (m *FlatMap[K, V]) ComputeRange(
 						b.seq.BeginWriteLocked()
 						e.WriteUnfenced(entry_[K, V]{})
 						b.seq.EndWriteLocked()
-
 						table.AddSize(i, -1)
 					default:
 						// cancelOp: No-op
