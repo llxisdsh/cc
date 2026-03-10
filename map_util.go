@@ -61,10 +61,9 @@ const (
 		(64 - min(entriesPerBucket*8, 64))
 
 	// h2 byte format: [1-bit: non-empty flag][7-bit: entropy]
-	h2Empty   = 0
-	h2Bits    = 7
-	h2TopBit  = 1 << h2Bits  // 0x80, non-empty marker
-	h2LowMask = h2TopBit - 1 // 0x7F, entropy mask
+	h2Empty  = 0
+	h2Bits   = 7
+	h2TopBit = 1 << h2Bits // 0x80, non-empty marker
 )
 
 const (

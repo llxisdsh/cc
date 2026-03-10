@@ -900,6 +900,8 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 
 // All returns an iterator function for use with range-over-func.
 // It provides the same functionality as Range but in iterator form.
+//
+//go:nosplit
 func (m *FlatMap[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
@@ -983,6 +985,8 @@ func (m *FlatMap[K, V]) ComputeRange(
 
 // Entries returns an iterator function for use with range-over-func.
 // It provides the same functionality as ComputeRange but in iterator form.
+//
+//go:nosplit
 func (m *FlatMap[K, V]) Entries(
 	blockWriters ...bool,
 ) func(yield func(e *MapEntry[K, V]) bool) {

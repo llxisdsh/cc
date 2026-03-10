@@ -183,6 +183,8 @@ func (m *Map[K, V]) slowInit() *mapTable {
 }
 
 // Load retrieves a value for the given key, compatible with `sync.Map`.
+//
+//go:nosplit
 func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 	table := (*mapTable)(loadPtr(&m.table))
 	if table == nil {
@@ -895,6 +897,8 @@ func (m *Map[K, V]) Range(yield func(key K, value V) bool) {
 }
 
 // All compatible with `sync.Map`.
+//
+//go:nosplit
 func (m *Map[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
@@ -982,6 +986,8 @@ func (m *Map[K, V]) ComputeRange(
 
 // Entries returns an iterator function for use with range-over-func.
 // It provides the same functionality as ComputeRange but in iterator form.
+//
+//go:nosplit
 func (m *Map[K, V]) Entries(
 	blockWriters ...bool,
 ) func(yield func(e *MapEntry[K, V]) bool) {
@@ -992,6 +998,8 @@ func (m *Map[K, V]) Entries(
 
 // Size returns the number of key-value pairs in the map.
 // This is an O(1) operation.
+//
+//go:nosplit
 func (m *Map[K, V]) Size() int {
 	table := (*mapTable)(loadPtr(&m.table))
 	if table == nil {
@@ -1211,8 +1219,7 @@ func (m *Map[K, V]) rebuild(
 }
 
 func (m *Map[K, V]) beginRebuild(hint mapRebuildHint) (*rebuildState, bool) {
-	rs := new(rebuildState)
-	rs.hint = hint
+	rs := &rebuildState{hint: hint}
 	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
 		return nil, false
 	}
