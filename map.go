@@ -374,7 +374,7 @@ func (m *Map[K, V]) computeVal(
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
 	// Fast path: lock-free seqlock read
-	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 || newVal != nil {
+	if newVal != nil || flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
 		for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
 			meta := loadUint64(&b.meta)
