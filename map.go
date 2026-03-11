@@ -370,7 +370,7 @@ func (m *Map[K, V]) computeVal(
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
-	// Fast path: lock-free seqlock read
+	// Fast path: lock-free read
 	if newVal != nil || flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
 		b := table.buckets.At(idx)
@@ -486,7 +486,7 @@ slowPath:
 			}
 
 			if newVal != nil {
-				// valEqual: skip seqlock write if value unchanged
+				// valEqual: skip write if value unchanged
 				// if m.valEqual != nil && m.valEqual(
 				// 	noescape(unsafe.Pointer(&oldEntry.Value)),
 				// 	noescape(unsafe.Pointer(newVal)),
@@ -648,7 +648,7 @@ func (m *Map[K, V]) compute(
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
-	// Fast path: lock-free seqlock read
+	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
 		b := table.buckets.At(idx)
