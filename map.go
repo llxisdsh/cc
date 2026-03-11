@@ -205,24 +205,19 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
-	root := table.buckets.At(idx)
-
-	for b := root; b != nil; b = (*bucket)(loadPtr(&b.next)) {
+	b := table.buckets.At(idx)
+	for {
 		meta := loadUint64(&b.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-				if opt.EmbeddedHash_ {
-					if e.GetHash() == hash && e.Key == key {
-						return e.Value, true
-					}
-				} else {
-					if e.Key == key {
-						return e.Value, true
-					}
-				}
+			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.Key == key {
+				return e.Value, true
 			}
 		}
+		if meta&opNextMask == 0 {
+			break
+		}
+		b = (*bucket)(loadPtr(&b.next))
 	}
 	return *new(V), false
 }
@@ -378,40 +373,28 @@ func (m *Map[K, V]) computeVal(
 	// Fast path: lock-free seqlock read
 	if newVal != nil || flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
-		for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
+		b := table.buckets.At(idx)
+		for {
 			meta := loadUint64(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-					if opt.EmbeddedHash_ {
-						if e.GetHash() == hash && e.Key == *key {
-							if flags&computeSkipIfFound != 0 {
-								return e.Value, true
-							}
-							if newVal != nil && m.valEqual != nil && m.valEqual(
-								noescape(unsafe.Pointer(&e.Value)),
-								noescape(unsafe.Pointer(newVal)),
-							) {
-								return e.Value, true
-							}
-							goto slowPath
-						}
-					} else {
-						if e.Key == *key {
-							if flags&computeSkipIfFound != 0 {
-								return e.Value, true
-							}
-							if newVal != nil && m.valEqual != nil && m.valEqual(
-								noescape(unsafe.Pointer(&e.Value)),
-								noescape(unsafe.Pointer(newVal)),
-							) {
-								return e.Value, true
-							}
-							goto slowPath
-						}
+				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.Key == *key {
+					if flags&computeSkipIfFound != 0 {
+						return e.Value, true
 					}
+					if newVal != nil && m.valEqual != nil && m.valEqual(
+						noescape(unsafe.Pointer(&e.Value)),
+						noescape(unsafe.Pointer(newVal)),
+					) {
+						return e.Value, true
+					}
+					goto slowPath
 				}
 			}
+			if meta&opNextMask == 0 {
+				break
+			}
+			b = (*bucket)(loadPtr(&b.next))
 		}
 		// Key not found in fast path
 		if flags&computeSkipIfNotFound != 0 {
@@ -471,23 +454,15 @@ slowPath:
 			lastB     *bucket
 		)
 
+		b := root
 	findLoop:
-		for b := root; b != nil; b = (*bucket)(b.next) {
+		for {
 			meta := loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(*b.At(j)); e != nil {
-					if opt.EmbeddedHash_ {
-						if e.GetHash() == hash && e.Key == *key {
-							oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
-							break findLoop
-						}
-					} else {
-						if e.Key == *key {
-							oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
-							break findLoop
-						}
-					}
+				if e := (*entry_[K, V])(*b.At(j)); e != nil && e.Key == *key {
+					oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
+					break findLoop
 				}
 			}
 			if emptyB == nil {
@@ -498,6 +473,10 @@ slowPath:
 				}
 			}
 			lastB = b
+			if meta&opNextMask == 0 {
+				break
+			}
+			b = (*bucket)(b.next)
 		}
 
 		if oldEntry != nil {
@@ -590,7 +569,13 @@ slowPath:
 				unsafe.Pointer(newEntry),
 			},
 		}))
-		root.Unlock()
+		if lastB == root {
+			root.UnlockWithMeta(loadUint64Fast(&lastB.meta) | opNextMask)
+		} else {
+			storeUint64(&lastB.meta, loadUint64Fast(&lastB.meta)|opNextMask)
+			root.Unlock()
+		}
+
 		table.AddSize(idx, 1)
 
 		// Check if the table needs to grow
@@ -666,28 +651,22 @@ func (m *Map[K, V]) compute(
 	// Fast path: lock-free seqlock read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
-		for b := table.buckets.At(idx); b != nil; b = (*bucket)(loadPtr(&b.next)) {
+		b := table.buckets.At(idx)
+		for {
 			meta := loadUint64(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-					if opt.EmbeddedHash_ {
-						if e.GetHash() == hash && e.Key == *key {
-							if flags&computeSkipIfFound != 0 {
-								return e.Value, true
-							}
-							goto slowPath
-						}
-					} else {
-						if e.Key == *key {
-							if flags&computeSkipIfFound != 0 {
-								return e.Value, true
-							}
-							goto slowPath
-						}
+				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.Key == *key {
+					if flags&computeSkipIfFound != 0 {
+						return e.Value, true
 					}
+					goto slowPath
 				}
 			}
+			if meta&opNextMask == 0 {
+				break
+			}
+			b = (*bucket)(loadPtr(&b.next))
 		}
 		// Key not found in fast path
 		if flags&computeSkipIfNotFound != 0 {
@@ -747,23 +726,15 @@ slowPath:
 			lastB     *bucket
 		)
 
+		b := root
 	findLoop:
-		for b := root; b != nil; b = (*bucket)(b.next) {
+		for {
 			meta := loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(*b.At(j)); e != nil {
-					if opt.EmbeddedHash_ {
-						if e.GetHash() == hash && e.Key == *key {
-							oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
-							break findLoop
-						}
-					} else {
-						if e.Key == *key {
-							oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
-							break findLoop
-						}
-					}
+				if e := (*entry_[K, V])(*b.At(j)); e != nil && e.Key == *key {
+					oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
+					break findLoop
 				}
 			}
 			if emptyB == nil {
@@ -774,6 +745,10 @@ slowPath:
 				}
 			}
 			lastB = b
+			if meta&opNextMask == 0 {
+				break
+			}
+			b = (*bucket)(b.next)
 		}
 
 		// --- Compute Logic ---
@@ -821,7 +796,12 @@ slowPath:
 					unsafe.Pointer(newEntry),
 				},
 			}))
-			root.Unlock()
+			if lastB == root {
+				root.UnlockWithMeta(loadUint64Fast(&lastB.meta) | opNextMask)
+			} else {
+				storeUint64(&lastB.meta, loadUint64Fast(&lastB.meta)|opNextMask)
+				root.Unlock()
+			}
 			table.AddSize(idx, 1)
 
 			// Check if the table needs to grow
@@ -882,7 +862,8 @@ func (m *Map[K, V]) Range(yield func(key K, value V) bool) {
 		return
 	}
 	for i := 0; i <= table.mask; i++ {
-		for b := table.buckets.At(i); b != nil; b = (*bucket)(loadPtr(&b.next)) {
+		b := table.buckets.At(i)
+		for {
 			meta := loadUint64(&b.meta)
 			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
@@ -892,6 +873,10 @@ func (m *Map[K, V]) Range(yield func(key K, value V) bool) {
 					}
 				}
 			}
+			if meta&opNextMask == 0 {
+				break
+			}
+			b = (*bucket)(loadPtr(&b.next))
 		}
 	}
 }
@@ -946,7 +931,8 @@ func (m *Map[K, V]) ComputeRange(
 		for i := 0; i <= table.mask; i++ {
 			root := table.buckets.At(i)
 			root.Lock()
-			for b := root; b != nil; b = (*bucket)(b.next) {
+			b := root
+			for {
 				meta := loadUint64Fast(&b.meta)
 				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
@@ -978,6 +964,10 @@ func (m *Map[K, V]) ComputeRange(
 						}
 					}
 				}
+				if meta&opNextMask == 0 {
+					break
+				}
+				b = (*bucket)(b.next)
 			}
 			root.Unlock()
 		}
@@ -1346,7 +1336,8 @@ func (m *Map[K, V]) copyBucket(
 		for srcIdx := i; srcIdx < oldLen; srcIdx += baseLen {
 			srcB := table.buckets.At(srcIdx)
 			srcB.Lock()
-			for b := srcB; b != nil; b = (*bucket)(b.next) {
+			b := srcB
+			for {
 				meta := loadUint64Fast(&b.meta)
 				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
@@ -1388,6 +1379,7 @@ func (m *Map[K, V]) copyBucket(
 									meta:    setByte(metaEmpty, h2v, 0),
 									entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
 								})
+								storeUint64Fast(&destB.meta, meta|opNextMask)
 								break
 							}
 							destB = next
@@ -1395,6 +1387,10 @@ func (m *Map[K, V]) copyBucket(
 						copied++
 					}
 				}
+				if meta&opNextMask == 0 {
+					break
+				}
+				b = (*bucket)(b.next)
 			}
 			srcB.Unlock()
 		}
@@ -1435,6 +1431,14 @@ func (t *mapTable) SumSize() int {
 	return int(sum)
 }
 
+//go:nosplit
+func (b *bucket) At(i int) *unsafe.Pointer {
+	return (*unsafe.Pointer)(unsafe.Add(
+		unsafe.Pointer(&b.entries),
+		uintptr(i)*unsafe.Sizeof(unsafe.Pointer(nil))),
+	)
+}
+
 // Lock acquires a spinlock for the bucket using embedded metadata.
 // Uses atomic operations on the meta field to avoid false sharing overhead.
 // Implements optimistic locking with fallback to spinning.
@@ -1450,12 +1454,4 @@ func (b *bucket) Unlock() {
 //go:nosplit
 func (b *bucket) UnlockWithMeta(meta uint64) {
 	BitUnlockWithStoreUint64(&b.meta, opLockMask, meta)
-}
-
-//go:nosplit
-func (b *bucket) At(i int) *unsafe.Pointer {
-	return (*unsafe.Pointer)(unsafe.Add(
-		unsafe.Pointer(&b.entries),
-		uintptr(i)*unsafe.Sizeof(unsafe.Pointer(nil))),
-	)
 }

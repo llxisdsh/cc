@@ -100,7 +100,8 @@ func (m *Map[K, V]) stats() *mapStats {
 	stats.CounterLen = table.sizeMask + 1
 	for i := 0; i <= table.mask; i++ {
 		entries := 0
-		for b := table.buckets.At(i); b != nil; b = (*bucket)(loadPtr(&b.next)) {
+		b := table.buckets.At(i)
+		for {
 			stats.TotalBuckets++
 			entriesLocal := 0
 			stats.Capacity += entriesPerBucket
@@ -117,6 +118,11 @@ func (m *Map[K, V]) stats() *mapStats {
 			if entriesLocal == 0 {
 				stats.EmptyBuckets++
 			}
+
+			if meta&opNextMask == 0 {
+				break
+			}
+			b = (*bucket)(loadPtr(&b.next))
 		}
 
 		if entries < stats.MinEntries {

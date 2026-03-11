@@ -25,6 +25,7 @@ const (
 	// opByteIdx reserves the highest byte of meta for extended status flags
 	opByteIdx    = 7
 	opLockMask   = uint64(1) << (opByteIdx*8 + 7)
+	opNextMask   = uint64(1) << (opByteIdx*8 + 6)
 	metaDataMask = uint64(0x00ffffffffffffff)
 
 	// entriesPerBucket defines the number of per-bucket entry pointers.
