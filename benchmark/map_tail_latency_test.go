@@ -259,8 +259,8 @@ func TestLatencySummary(t *testing.T) {
 
 	// Sort by slowRate (lower is better)
 	slices.SortFunc(results, func(a, b *latencyResult) int {
-		v1 := float64(a.p999) * a.throughput
-		v2 := float64(b.p999) * b.throughput
+		v1 := (a.slowRate) * a.throughput
+		v2 := (b.slowRate) * b.throughput
 
 		if v1 < v2 {
 			return -1
@@ -271,7 +271,7 @@ func TestLatencySummary(t *testing.T) {
 		return 0
 	})
 
-	t.Log("\n=== Results (sorted by p999) ===")
+	t.Log("\n=== Results (sorted by slowRate) ===")
 	t.Logf("%-4s | %-16s | %12s | %10s | %10s | %10s | %8s",
 		"Rank", "Implementation", "Throughput", "p99", "p999", "max", "slow%")
 	t.Logf("-----|------------------|--------------|------------|------------|------------|----------")
@@ -280,7 +280,7 @@ func TestLatencySummary(t *testing.T) {
 			i+1, r.name, r.throughput, ms(r.p99), ms(r.p999), ms(r.max), r.slowRate)
 	}
 
-	t.Logf("\n✓ Best p999: %s (%s)", results[0].name, ms(results[0].p999))
+	t.Logf("✓ Best slowRate: %s (%6.4f%%)", results[0].name, results[0].slowRate)
 
 	// Find best throughput
 	best := results[0]
@@ -290,38 +290,4 @@ func TestLatencySummary(t *testing.T) {
 		}
 	}
 	t.Logf("✓ Best throughput: %s (%.0f/s)", best.name, best.throughput)
-}
-
-// ============================================================================
-// Quick Test (for fast iteration)
-// ============================================================================
-
-func TestLatencyQuick(t *testing.T) {
-	numCPU := runtime.GOMAXPROCS(0)
-	workers := numCPU
-	keys := 100
-	ops := 10000
-
-	t.Logf("Quick test: %d workers, %d keys, %d ops", workers, keys, ops)
-
-	impls := []struct {
-		name string
-		m    MapInterface
-	}{
-		{"sync.Map", &syncMapAdapter{&sync.Map{}}},
-		{"RWShardedMap", &rwShardedMapAdapter{NewRWLockShardedMap[int, int](numCPU * 4)}},
-		{"xsync.Map", &xsyncMapAdapter{xsync.NewMap[int, int]()}},
-		{"cc.Map", &mapAdapter{newMap()}},
-		{"cc.FlatMap", &flatMapAdapter{newFlatMap()}},
-	}
-
-	t.Logf("%-16s | %12s | %10s | %10s",
-		"Implementation", "Throughput", "p999", "max")
-	t.Logf("-----------------|--------------|------------|------------")
-
-	for _, impl := range impls {
-		r := runLatencyTest(workers, keys, ops, impl.m)
-		t.Logf("%-16s | %10.0f/s | %10s | %10s",
-			impl.name, r.throughput, ms(r.p999), ms(r.max))
-	}
 }
