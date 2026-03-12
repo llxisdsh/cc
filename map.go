@@ -187,35 +187,37 @@ func (m *Map[K, V]) slowInit() *mapTable {
 //go:nosplit
 func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 	table := (*mapTable)(loadPtr(&m.table))
-	if table != nil {
-		var hash uintptr
-		var h1v int
+	if table == nil {
+		return *new(V), false
+	}
 
-		if m.intKey {
-			hash = intHash[K](noescape(unsafe.Pointer(&key)))
-			h1v = h1IntKey(hash)
-		} else {
-			hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-			h1v = h1(hash)
-		}
+	var hash uintptr
+	var h1v int
 
-		h2v := h2(hash)
-		h2w := broadcast(h2v)
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
-		for {
-			meta := loadUint64(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.Key == key {
-					return e.Value, true
-				}
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h1v = h1(hash)
+	}
+
+	h2v := h2(hash)
+	h2w := broadcast(h2v)
+	idx := table.mask & h1v
+	b := table.buckets.At(idx)
+	for {
+		meta := loadUint64(&b.meta)
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j := firstMarkedByteIndex(marked)
+			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.Key == key {
+				return e.Value, true
 			}
-			if meta&opNextMask == 0 {
-				break
-			}
-			b = (*bucket)(loadPtr(&b.next))
 		}
+		if meta&opNextMask == 0 {
+			break
+		}
+		b = (*bucket)(loadPtr(&b.next))
 	}
 	return *new(V), false
 }
