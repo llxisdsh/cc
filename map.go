@@ -444,154 +444,147 @@ slowPath:
 		}
 
 		var (
-			oldEntry  *entry_[K, V]
-			oldB      *bucket
-			oldIdx    int
-			oldMeta   uint64
-			emptyB    *bucket
-			emptyIdx  int
-			emptyMeta uint64
-			lastB     *bucket
+			e    *entry_[K, V]
+			j    int
+			meta uint64
 		)
 
 		b := root
-	findLoop:
 		for {
-			meta := loadUint64Fast(&b.meta)
+			meta = loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(*b.At(j)); e != nil && e.Key == *key {
-					oldEntry, oldB, oldIdx, oldMeta = e, b, j, meta
-					break findLoop
+				j = firstMarkedByteIndex(marked)
+				if e = (*entry_[K, V])(*b.At(j)); e != nil && e.Key == *key {
+					goto found
 				}
 			}
-			if emptyB == nil {
-				if empty := (^meta) & metaMask; empty != 0 {
-					emptyB = b
-					emptyIdx = firstMarkedByteIndex(empty)
-					emptyMeta = meta
-				}
-			}
-			lastB = b
 			if meta&opNextMask == 0 {
 				break
 			}
 			b = (*bucket)(b.next)
 		}
-
-		if oldEntry != nil {
-			if flags&computeSkipIfFound != 0 {
+		{
+			if flags&computeSkipIfNotFound != 0 || newVal == nil {
+				// No entry to insert or delete
 				root.Unlock()
-				return oldEntry.Value, true
+				return *new(V), false
 			}
 
-			if newVal != nil {
-				// valEqual: skip write if value unchanged
-				// if m.valEqual != nil && m.valEqual(
-				// 	noescape(unsafe.Pointer(&oldEntry.Value)),
-				// 	noescape(unsafe.Pointer(newVal)),
-				// ) {
-				// 	root.Unlock()
-				// 	return oldEntry.Value, true
-				// }
-
-				// Update
-				newEntry := &entry_[K, V]{Key: *key, Value: *newVal}
-				if opt.EmbeddedHash_ {
-					newEntry.SetHash(hash)
-				}
-				storePtr(oldB.At(oldIdx), unsafe.Pointer(newEntry))
-				root.Unlock()
-				return oldEntry.Value, true
+			// Insert
+			newEntry := &entry_[K, V]{Key: *key, Value: *newVal}
+			if opt.EmbeddedHash_ {
+				newEntry.SetHash(hash)
 			}
-			// Delete
-			storePtr(oldB.At(oldIdx), nil)
-			newMeta := setByte(oldMeta, h2Empty, oldIdx)
-			if oldB == root {
-				root.UnlockWithMeta(newMeta)
-			} else {
-				storeUint64(&oldB.meta, newMeta)
-				root.Unlock()
-			}
-			table.AddSize(idx, -1)
 
-			// Check if table shrinking is needed
-			if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
-				loadPtr(&m.rs) == nil {
-				tableLen := table.mask + 1
-				if m.minLen < tableLen {
-					size := table.SumSize()
-					if size < tableLen*entriesPerBucket/shrinkFraction {
-						m.tryResize(mapShrinkHint, size, 0)
+			// Insert into empty slot
+			b = root
+			for {
+				meta = loadUint64Fast(&b.meta)
+				if empty := (^meta) & metaMask; empty != 0 {
+					// publish pointer first, then meta; readers check meta before
+					// pointer so they won't observe a partially-initialized entry,
+					// and this reduces the window where meta is visible but pointer is
+					// still nil
+					emptyIdx := firstMarkedByteIndex(empty)
+					storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
+					newMeta := setByte(meta, h2v, emptyIdx)
+					if b == root {
+						root.UnlockWithMeta(newMeta)
+					} else {
+						storeUint64(&b.meta, newMeta)
+						root.Unlock()
 					}
+					table.AddSize(idx, 1)
+					if flags&computeSkipIfFound != 0 {
+						return *newVal, false
+					}
+					return *new(V), false
 				}
+				if meta&opNextMask == 0 {
+					break
+				}
+				b = (*bucket)(b.next)
 			}
-			return oldEntry.Value, true
-		}
 
-		if flags&computeSkipIfNotFound != 0 || newVal == nil {
-			// No entry to insert or delete
-			root.Unlock()
-			return *new(V), false
-		}
-
-		// Insert
-		newEntry := &entry_[K, V]{Key: *key, Value: *newVal}
-		if opt.EmbeddedHash_ {
-			newEntry.SetHash(hash)
-		}
-
-		// Insert into empty slot
-		if emptyB != nil {
-			// publish pointer first, then meta; readers check meta before
-			// pointer so they won't observe a partially-initialized entry,
-			// and this reduces the window where meta is visible but pointer is
-			// still nil
-			storePtr(emptyB.At(emptyIdx), unsafe.Pointer(newEntry))
-			newMeta := setByte(emptyMeta, h2v, emptyIdx)
-			if emptyB == root {
-				root.UnlockWithMeta(newMeta)
+			// No empty slot, create new bucket and insert
+			storePtr(&b.next, unsafe.Pointer(&bucket{
+				meta: setByte(metaEmpty, h2v, 0),
+				entries: [entriesPerBucket]unsafe.Pointer{
+					unsafe.Pointer(newEntry),
+				},
+			}))
+			if b == root {
+				root.UnlockWithMeta(meta | opNextMask)
 			} else {
-				storeUint64(&emptyB.meta, newMeta)
+				storeUint64(&b.meta, meta|opNextMask)
 				root.Unlock()
 			}
+
 			table.AddSize(idx, 1)
+
+			// Check if the table needs to grow
+			if loadPtr(&m.rs) == nil {
+				tableLen := table.mask + 1
+				size := table.SumSize()
+				const capFactor = float64(entriesPerBucket) * loadFactor
+				if size >= int(float64(tableLen)*capFactor) {
+					m.tryResize(mapGrowHint, size, 0)
+				}
+			}
+
 			if flags&computeSkipIfFound != 0 {
 				return *newVal, false
 			}
 			return *new(V), false
 		}
+	found:
+		if flags&computeSkipIfFound != 0 {
+			root.Unlock()
+			return e.Value, true
+		}
 
-		// No empty slot, create new bucket and insert
-		storePtr(&lastB.next, unsafe.Pointer(&bucket{
-			meta: setByte(metaEmpty, h2v, 0),
-			entries: [entriesPerBucket]unsafe.Pointer{
-				unsafe.Pointer(newEntry),
-			},
-		}))
-		if lastB == root {
-			root.UnlockWithMeta(loadUint64Fast(&lastB.meta) | opNextMask)
+		if newVal != nil {
+			// valEqual: skip write if value unchanged
+			// if m.valEqual != nil && m.valEqual(
+			// 	noescape(unsafe.Pointer(&oldEntry.Value)),
+			// 	noescape(unsafe.Pointer(newVal)),
+			// ) {
+			// 	root.Unlock()
+			// 	return oldEntry.Value, true
+			// }
+
+			// Update
+			newEntry := &entry_[K, V]{Key: *key, Value: *newVal}
+			if opt.EmbeddedHash_ {
+				newEntry.SetHash(hash)
+			}
+			storePtr(b.At(j), unsafe.Pointer(newEntry))
+			root.Unlock()
+			return e.Value, true
+		}
+		// Delete
+		storePtr(b.At(j), nil)
+		newMeta := setByte(meta, h2Empty, j)
+		if b == root {
+			root.UnlockWithMeta(newMeta)
 		} else {
-			storeUint64(&lastB.meta, loadUint64Fast(&lastB.meta)|opNextMask)
+			storeUint64(&b.meta, newMeta)
 			root.Unlock()
 		}
+		table.AddSize(idx, -1)
 
-		table.AddSize(idx, 1)
-
-		// Check if the table needs to grow
-		if loadPtr(&m.rs) == nil {
+		// Check if table shrinking is needed
+		if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
+			loadPtr(&m.rs) == nil {
 			tableLen := table.mask + 1
-			size := table.SumSize()
-			const capFactor = float64(entriesPerBucket) * loadFactor
-			if size >= int(float64(tableLen)*capFactor) {
-				m.tryResize(mapGrowHint, size, 0)
+			if m.minLen < tableLen {
+				size := table.SumSize()
+				if size < tableLen*entriesPerBucket/shrinkFraction {
+					m.tryResize(mapShrinkHint, size, 0)
+				}
 			}
 		}
-
-		if flags&computeSkipIfFound != 0 {
-			return *newVal, false
-		}
-		return *new(V), false
+		return e.Value, true
 	}
 }
 
@@ -744,8 +737,8 @@ slowPath:
 					emptyMeta = meta
 				}
 			}
-			lastB = b
 			if meta&opNextMask == 0 {
+				lastB = b
 				break
 			}
 			b = (*bucket)(b.next)

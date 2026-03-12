@@ -427,9 +427,9 @@ slowPath:
 					emptyMeta = meta
 				}
 			}
-			lastB = b
 
 			if meta&opNextMask == 0 {
+				lastB = b
 				break
 			}
 			b = (*flatBucket[K, V])(b.next)
@@ -701,7 +701,6 @@ slowPath:
 			emptyB    *flatBucket[K, V]
 			emptyIdx  int
 			emptyMeta uint64
-			lastB     *flatBucket[K, V]
 		)
 		it := MapEntry[K, V]{entry: entry_[K, V]{Key: *key}}
 		if opt.EmbeddedHash_ {
@@ -727,8 +726,6 @@ slowPath:
 					emptyMeta = meta
 				}
 			}
-			lastB = b
-
 			if meta&opNextMask == 0 {
 				break
 			}
@@ -770,16 +767,16 @@ slowPath:
 				return it.entry.Value, it.loaded
 			}
 			// append new bucket
-			storePtr(&lastB.next, unsafe.Pointer(&flatBucket[K, V]{
+			storePtr(&b.next, unsafe.Pointer(&flatBucket[K, V]{
 				meta: setByte(emptyMeta, h2v, 0),
 				entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
 					{buf: it.entry},
 				},
 			}))
-			if lastB == root {
-				root.UnlockWithMeta(loadUint64Fast(&lastB.meta) | opNextMask)
+			if b == root {
+				root.UnlockWithMeta(loadUint64Fast(&b.meta) | opNextMask)
 			} else {
-				storeUint64(&lastB.meta, loadUint64Fast(&lastB.meta)|opNextMask)
+				storeUint64(&b.meta, loadUint64Fast(&b.meta)|opNextMask)
 				root.Unlock()
 			}
 			table.AddSize(idx, 1)
