@@ -19,14 +19,14 @@ type MapEntry[K comparable, V any] struct {
 //
 //go:nosplit
 func (e *MapEntry[K, V]) Key() K {
-	return e.entry.Key
+	return e.entry.key
 }
 
 // Value returns the entry's value. Returns zero value if not loaded.
 //
 //go:nosplit
 func (e *MapEntry[K, V]) Value() V {
-	return e.entry.Value
+	return e.entry.value
 }
 
 // Loaded reports whether the entry exists in the map.
@@ -40,7 +40,7 @@ func (e *MapEntry[K, V]) Loaded() bool {
 //
 //go:nosplit
 func (e *MapEntry[K, V]) Update(value V) {
-	e.entry.Value = value
+	e.entry.value = value
 	e.op = updateOp
 }
 
@@ -48,13 +48,13 @@ func (e *MapEntry[K, V]) Update(value V) {
 //
 //go:nosplit
 func (e *MapEntry[K, V]) Delete() {
-	e.entry.Value = *new(V)
+	e.entry.value = *new(V)
 	e.op = deleteOp
 }
 
 // entry_ is the internal representation of a map entry.
 type entry_[K comparable, V any] struct {
 	opt.EmbeddedHash
-	Key   K
-	Value V
+	key   K
+	value V
 }
