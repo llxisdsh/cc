@@ -217,10 +217,11 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 			}
 		}
 		if meta&opNextMask == 0 {
-			return *new(V), false
+			break
 		}
 		b = (*bucket)(loadPtr(&b.next))
 	}
+	return *new(V), false
 }
 
 // Store inserts or updates a key-value pair, compatible with `sync.Map`.

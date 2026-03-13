@@ -213,10 +213,11 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 			}
 		}
 		if meta&opNextMask == 0 {
-			return *new(V), false
+			break
 		}
 		b = (*flatBucket[K, V])(loadPtr(&b.next))
 	}
+	return *new(V), false
 }
 
 // Store sets the value for a key.
