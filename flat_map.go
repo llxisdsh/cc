@@ -213,11 +213,10 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 			}
 		}
 		if meta&opNextMask == 0 {
-			break
+			return *new(V), false
 		}
 		b = (*flatBucket[K, V])(loadPtr(&b.next))
 	}
-	return *new(V), false
 }
 
 // Store sets the value for a key.
@@ -759,13 +758,15 @@ slowPath:
 			root.Unlock()
 			table.AddSize(idx, -1)
 			// Check if table shrinking is needed
-			if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
-				mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
-				tableLen := table.mask + 1
-				if minTableLen < tableLen {
-					size := table.SumSize()
-					if size < tableLen*entriesPerBucket/shrinkFraction {
-						m.tryResize(mapShrinkHint, size, 0)
+			if m.shrinkOn {
+				if newMeta&metaDataMask == metaEmpty &&
+					mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
+					tableLen := table.mask + 1
+					if minTableLen < tableLen {
+						size := table.SumSize()
+						if size < tableLen*entriesPerBucket/shrinkFraction {
+							m.tryResize(mapShrinkHint, size, 0)
+						}
 					}
 				}
 			}
@@ -1193,8 +1194,7 @@ func (m *FlatMap[K, V]) copyBucket(
 					// Append entry to the destination bucket
 					for {
 						meta := loadUint64Fast(&destB.meta)
-						empty := (^meta) & metaMask
-						if empty != 0 {
+						if empty := (^meta) & metaMask; empty != 0 {
 							emptyIdx := firstMarkedByteIndex(empty)
 							storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
 							*destB.At(emptyIdx).Ptr() = *e

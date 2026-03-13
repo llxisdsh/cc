@@ -210,16 +210,17 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 		meta := loadUint64(&b.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.key == key {
-				return e.value, true
+			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+				if e.key == key {
+					return e.value, true
+				}
 			}
 		}
 		if meta&opNextMask == 0 {
-			break
+			return *new(V), false
 		}
 		b = (*bucket)(loadPtr(&b.next))
 	}
-	return *new(V), false
 }
 
 // Store inserts or updates a key-value pair, compatible with `sync.Map`.
@@ -248,15 +249,17 @@ func (m *Map[K, V]) Store(key K, value V) {
 			meta := loadUint64(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.key == key {
-					// valEqual: skip write if value unchanged
-					if m.valEqual != nil && m.valEqual(
-						noescape(unsafe.Pointer(&e.value)),
-						noescape(unsafe.Pointer(&value)),
-					) {
-						return
+				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+					if e.key == key {
+						// valEqual: skip write if value unchanged
+						if m.valEqual != nil && m.valEqual(
+							noescape(unsafe.Pointer(&e.value)),
+							noescape(unsafe.Pointer(&value)),
+						) {
+							return
+						}
+						goto slowPath
 					}
-					goto slowPath
 				}
 			}
 			if meta&opNextMask == 0 {
@@ -315,8 +318,10 @@ slowPath:
 			meta = loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(*b.At(j)); e != nil && e.key == key {
-					goto found
+				if e := (*entry_[K, V])(*b.At(j)); e != nil {
+					if e.key == key {
+						goto found
+					}
 				}
 			}
 			if meta&opNextMask == 0 {
@@ -594,11 +599,13 @@ func (m *Map[K, V]) compute(
 			meta := loadUint64(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil && e.key == *key {
-					if flags&computeSkipIfFound != 0 {
-						return e.value, true
+				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+					if e.key == *key {
+						if flags&computeSkipIfFound != 0 {
+							return e.value, true
+						}
+						goto slowPath
 					}
-					goto slowPath
 				}
 			}
 			if meta&opNextMask == 0 {
@@ -664,9 +671,11 @@ slowPath:
 			meta = loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(*b.At(j)); e != nil && e.key == *key {
-					it.entry.value, it.loaded = e.value, true
-					break findLoop
+				if e := (*entry_[K, V])(*b.At(j)); e != nil {
+					if e.key == *key {
+						it.entry.value, it.loaded = e.value, true
+						break findLoop
+					}
 				}
 			}
 			if meta&opNextMask == 0 {
@@ -771,13 +780,15 @@ slowPath:
 			table.AddSize(idx, -1)
 
 			// Check if table shrinking is needed
-			if m.shrinkOn && newMeta&metaDataMask == metaEmpty &&
-				loadPtr(&m.rs) == nil {
-				tableLen := table.mask + 1
-				if m.minLen < tableLen {
-					size := table.SumSize()
-					if size < tableLen*entriesPerBucket/shrinkFraction {
-						m.tryResize(mapShrinkHint, size, 0)
+			if m.shrinkOn {
+				if newMeta&metaDataMask == metaEmpty &&
+					loadPtr(&m.rs) == nil {
+					tableLen := table.mask + 1
+					if m.minLen < tableLen {
+						size := table.SumSize()
+						if size < tableLen*entriesPerBucket/shrinkFraction {
+							m.tryResize(mapShrinkHint, size, 0)
+						}
 					}
 				}
 			}
@@ -1306,8 +1317,7 @@ func (m *Map[K, V]) copyBucket(
 						// Append entry to the destination bucket
 						for {
 							meta := loadUint64Fast(&destB.meta)
-							empty := (^meta) & metaMask
-							if empty != 0 {
+							if empty := (^meta) & metaMask; empty != 0 {
 								emptyIdx := firstMarkedByteIndex(empty)
 								storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
 								*destB.At(emptyIdx) = unsafe.Pointer(e)

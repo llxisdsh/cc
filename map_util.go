@@ -570,9 +570,9 @@ const noRaceTSO_ = !opt.Race_ && isTSO_
 func loadPtr(addr *unsafe.Pointer) unsafe.Pointer {
 	if noRaceTSO_ {
 		return *addr
+	} else {
+		return atomic.LoadPointer(addr)
 	}
-
-	return atomic.LoadPointer(addr)
 }
 
 // storePtr stores a pointer atomically on non-TSO architectures.
@@ -593,9 +593,9 @@ func storePtr(addr *unsafe.Pointer, val unsafe.Pointer) {
 func loadUint64(addr *uint64) uint64 {
 	if noRaceTSO_ && intSize == 64 {
 		return *addr
+	} else {
+		return atomic.LoadUint64(addr)
 	}
-
-	return atomic.LoadUint64(addr)
 }
 
 //nolint:unused
@@ -613,9 +613,9 @@ func storeUint64(addr *uint64, val uint64) {
 func loadUint32(addr *uint32) uint32 {
 	if noRaceTSO_ {
 		return *addr
+	} else {
+		return atomic.LoadUint32(addr)
 	}
-
-	return atomic.LoadUint32(addr)
 }
 
 //nolint:unused
@@ -633,9 +633,9 @@ func storeUint32(addr *uint32, val uint32) {
 func loadUintptr(addr *uintptr) uintptr {
 	if noRaceTSO_ {
 		return *addr
+	} else {
+		return atomic.LoadUintptr(addr)
 	}
-
-	return atomic.LoadUintptr(addr)
 }
 
 //nolint:unused
@@ -656,9 +656,9 @@ func storeUintptr(addr *uintptr, val uintptr) {
 func loadUint64Fast(addr *uint64) uint64 {
 	if opt.Race_ {
 		return atomic.LoadUint64(addr)
+	} else {
+		return *addr
 	}
-
-	return *addr
 }
 
 // storeUint64Fast performs a non-atomic write, safe only for thread-private or
@@ -679,9 +679,9 @@ func storeUint64Fast(addr *uint64, val uint64) {
 func loadUint32Fast(addr *uint32) uint32 {
 	if opt.Race_ {
 		return atomic.LoadUint32(addr)
+	} else {
+		return *addr
 	}
-
-	return *addr
 }
 
 //nolint:unused
@@ -699,9 +699,9 @@ func storeUint32Fast(addr *uint32, val uint32) {
 func loadUintptrFast(addr *uintptr) uintptr {
 	if opt.Race_ {
 		return atomic.LoadUintptr(addr)
+	} else {
+		return *addr
 	}
-
-	return *addr
 }
 
 //nolint:unused
