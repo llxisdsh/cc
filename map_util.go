@@ -107,6 +107,8 @@ const (
 	computeSkipIfNotFound                   // fast path: skip lock if key not found
 )
 
+var CPUS = runtime.GOMAXPROCS(0)
+
 // ============================================================================
 // Private struct definitions
 // ============================================================================
@@ -368,24 +370,17 @@ type noCopy struct{}
 func (*noCopy) Lock()   {}
 func (*noCopy) Unlock() {}
 
-func trySpin(spins *int) bool {
+func delay(spins *int) {
 	if runtime_canSpin(*spins) {
 		*spins++
 		runtime_doSpin()
-		return true
-	}
-	return false
-}
-
-func delay(spins *int) {
-	if trySpin(spins) {
 		return
 	}
 	*spins = 0
 	// prioritizeLowLatency: lower latency over CPU usage.
 	// Uses runtime.Gosched() for faster retries, unlike time.Sleep()
 	// which increases throughput but results in slightly higher tail latency.
-	const prioritizeLowLatency = false
+	const prioritizeLowLatency = true
 	if prioritizeLowLatency {
 		runtime.Gosched()
 	} else {

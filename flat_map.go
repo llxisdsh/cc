@@ -119,7 +119,7 @@ func (m *FlatMap[K, V]) init(
 	m.shrinkOn = cfg.autoShrink
 	tableLen := calcTableLen(cfg.capacity)
 	SeqLockWriteLocked32(&m.tableSeq, &m.table,
-		newFlatTable[K, V](tableLen, runtime.GOMAXPROCS(0)))
+		newFlatTable[K, V](tableLen, CPUS))
 }
 
 //go:noinline
@@ -215,11 +215,10 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 			}
 		}
 		if meta&opNextMask == 0 {
-			break
+			return *new(V), false
 		}
 		b = (*flatBucket[K, V])(loadPtr(&b.next))
 	}
-	return *new(V), false
 }
 
 // Store sets the value for a key.
@@ -955,7 +954,7 @@ func (m *FlatMap[K, V]) Clear() {
 
 	m.rebuild(mapRebuildBlockWritersHint, func(_ *MapRebuild[K, V]) {
 		SeqLockWriteLocked32(&m.tableSeq, &m.table,
-			newFlatTable[K, V](minTableLen, runtime.GOMAXPROCS(0)))
+			newFlatTable[K, V](minTableLen, CPUS))
 	})
 }
 
@@ -1034,6 +1033,9 @@ func (m *FlatMap[K, V]) rebuild(
 }
 
 func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) (*flatRebuildState[K, V], bool) {
+	if loadPtr(&m.rs) != nil {
+		return nil, false
+	}
 	rs := &flatRebuildState[K, V]{
 		hint: hint,
 	}
@@ -1050,8 +1052,12 @@ func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
 
 //go:noinline
 func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
-	rs, ok := m.beginRebuild(hint)
-	if !ok {
+	// Inline m.beginRebuild(hint)
+	if loadPtr(&m.rs) != nil {
+		return
+	}
+	rs := &flatRebuildState[K, V]{hint: hint}
+	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
 		return
 	}
 
@@ -1060,7 +1066,7 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
 	var newLen int
 	if hint == mapGrowHint {
 		if sizeAdd == 0 {
-			newLen = max(calcTableLen(size), tableLen<<1)
+			newLen = tableLen << 1 // max(calcTableLen(size), tableLen<<1)
 		} else {
 			newLen = calcTableLen(size + sizeAdd)
 			if newLen <= tableLen {
@@ -1085,31 +1091,70 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
 		}
 	}
 
-	cpus := runtime.GOMAXPROCS(0)
-	if cpus > 1 &&
-		newLen*int(unsafe.Sizeof(flatBucket[K, V]{})) >= asyncThreshold {
-		go m.finalizeResize(table, newLen, rs, cpus)
+	cpus := CPUS
+	if newLen*int(unsafe.Sizeof(flatBucket[K, V]{})) >= asyncThreshold || cpus <= 1 {
+		// Inline m.finalizeResize(table, newLen, rs, cpus)
+		overCpus := cpus * resizeOverPartition
+		chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
+		rs.chunks.Store(int32(chunks))
+		rs.process.Store(0)
+		rs.completed.Store(0)
+		rs.newTableSeq.ClearLocked()
+		// Inline newFlatTable
+		sizeLen := calcSizeLen(newLen, cpus)
+		newTable := flatTable[K, V]{
+			buckets:  makeUnsafeSlice(make([]flatBucket[K, V], newLen)),
+			mask:     newLen - 1,
+			size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
+			sizeMask: sizeLen - 1,
+		}
+		SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newTable)
+		m.helpCopyAndWait(rs)
+
 	} else {
-		m.finalizeResize(table, newLen, rs, cpus)
+		// go m.finalizeResize(table, newLen, rs, cpus)
+		go func(
+			table *flatTable[K, V],
+			newLen int,
+			rs *flatRebuildState[K, V],
+			cpus int,
+		) {
+			overCpus := cpus * resizeOverPartition
+			chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
+			rs.chunks.Store(int32(chunks))
+			rs.process.Store(0)
+			rs.completed.Store(0)
+			rs.newTableSeq.ClearLocked()
+			// Inline newFlatTable
+			sizeLen := calcSizeLen(newLen, cpus)
+			newTable := flatTable[K, V]{
+				buckets:  makeUnsafeSlice(make([]flatBucket[K, V], newLen)),
+				mask:     newLen - 1,
+				size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
+				sizeMask: sizeLen - 1,
+			}
+			SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newTable)
+			m.helpCopyAndWait(rs)
+		}(table, newLen, rs, cpus)
 	}
 }
 
-func (m *FlatMap[K, V]) finalizeResize(
-	table *flatTable[K, V],
-	newLen int,
-	rs *flatRebuildState[K, V],
-	cpus int,
-) {
-	overCpus := cpus * resizeOverPartition
-	chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
-	rs.chunks.Store(int32(chunks))
-	rs.process.Store(0)
-	rs.completed.Store(0)
-	rs.newTableSeq.ClearLocked()
-	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable,
-		newFlatTable[K, V](newLen, cpus))
-	m.helpCopyAndWait(rs)
-}
+// func (m *FlatMap[K, V]) finalizeResize(
+// 	table *flatTable[K, V],
+// 	newLen int,
+// 	rs *flatRebuildState[K, V],
+// 	cpus int,
+// ) {
+// 	overCpus := cpus * resizeOverPartition
+// 	chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
+// 	rs.chunks.Store(int32(chunks))
+// 	rs.process.Store(0)
+// 	rs.completed.Store(0)
+// 	rs.newTableSeq.ClearLocked()
+// 	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable,
+// 		newFlatTable[K, V](newLen, cpus))
+// 	m.helpCopyAndWait(rs)
+// }
 
 //go:noinline
 func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
@@ -1267,7 +1312,11 @@ func (b *flatBucket[K, V]) At(i int) *SeqLockSlot[entry_[K, V]] {
 }
 
 func (b *flatBucket[K, V]) Lock() {
-	BitLockUint64(&b.meta, opLockMask)
+	// Inline BitLockUint64(&b.meta, opLockMask)
+	cur := atomic.LoadUint64(&b.meta)
+	if !atomic.CompareAndSwapUint64(&b.meta, cur&^opLockMask, cur|opLockMask) {
+		slowBitLockUint64(&b.meta, opLockMask)
+	}
 }
 
 //go:nosplit

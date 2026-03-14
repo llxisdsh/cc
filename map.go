@@ -139,7 +139,7 @@ func (m *Map[K, V]) init(
 	m.minLen = calcTableLen(cfg.capacity)
 	m.shrinkOn = cfg.autoShrink
 
-	table := newMapTable(m.minLen, runtime.GOMAXPROCS(0))
+	table := newMapTable(m.minLen, CPUS)
 	atomic.StorePointer(&m.table, unsafe.Pointer(table))
 	return table
 }
@@ -149,13 +149,6 @@ func (m *Map[K, V]) init(
 //
 //go:noinline
 func (m *Map[K, V]) slowInit() *mapTable {
-	rs := (*rebuildState)(loadPtr(&m.rs))
-	if rs != nil {
-		rs.latch.Wait()
-		// Now the table should be initialized
-		return (*mapTable)(loadPtr(&m.table))
-	}
-
 	rs, ok := m.beginRebuild(mapRebuildBlockWritersHint)
 	if !ok {
 		// Another goroutine is initializing, wait for it to complete
@@ -217,11 +210,10 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 			}
 		}
 		if meta&opNextMask == 0 {
-			break
+			return *new(V), false
 		}
 		b = (*bucket)(loadPtr(&b.next))
 	}
-	return *new(V), false
 }
 
 // Store inserts or updates a key-value pair, compatible with `sync.Map`.
@@ -389,7 +381,6 @@ slowPath:
 					m.tryResize(mapGrowHint, size, 0)
 				}
 			}
-
 			return
 		}
 	found:
@@ -957,7 +948,7 @@ func (m *Map[K, V]) Clear() {
 		return
 	}
 	m.rebuild(mapRebuildBlockWritersHint, func(_ *MapRebuild[K, V]) {
-		cpus := runtime.GOMAXPROCS(0)
+		cpus := CPUS
 		newTable := newMapTable(m.minLen, cpus)
 		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 	})
@@ -1093,7 +1084,7 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
 	atomic.StorePointer(&clone.table,
-		unsafe.Pointer(newMapTable(clone.minLen, runtime.GOMAXPROCS(0))),
+		unsafe.Pointer(newMapTable(clone.minLen, CPUS)),
 	)
 
 	// Pre-fetch size to optimize initial capacity
@@ -1161,6 +1152,9 @@ func (m *Map[K, V]) rebuild(
 }
 
 func (m *Map[K, V]) beginRebuild(hint mapRebuildHint) (*rebuildState, bool) {
+	if loadPtr(&m.rs) != nil {
+		return nil, false
+	}
 	rs := &rebuildState{hint: hint}
 	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
 		return nil, false
@@ -1178,8 +1172,12 @@ func (m *Map[K, V]) tryResize(
 	hint mapRebuildHint,
 	size, sizeAdd int,
 ) {
-	rs, ok := m.beginRebuild(hint)
-	if !ok {
+	// Inline m.beginRebuild(hint)
+	if loadPtr(&m.rs) != nil {
+		return
+	}
+	rs := &rebuildState{hint: hint}
+	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
 		return
 	}
 
@@ -1188,7 +1186,7 @@ func (m *Map[K, V]) tryResize(
 	var newLen int
 	if hint == mapGrowHint {
 		if sizeAdd == 0 {
-			newLen = max(calcTableLen(size), tableLen<<1)
+			newLen = tableLen << 1 // max(calcTableLen(size), tableLen<<1)
 		} else {
 			newLen = calcTableLen(size + sizeAdd)
 			if newLen <= tableLen {
@@ -1215,27 +1213,57 @@ func (m *Map[K, V]) tryResize(
 		atomic.AddUint32(&m.shrinks, 1)
 	}
 
-	cpus := runtime.GOMAXPROCS(0)
-	if cpus > 1 &&
-		newLen*int(unsafe.Sizeof(bucket{})) >= asyncThreshold {
-		// The big table, use goroutines to create new table and copy entries
-		go m.finalizeResize(table, newLen, rs, cpus)
+	cpus := CPUS
+	if newLen*int(unsafe.Sizeof(bucket{})) < asyncThreshold || cpus <= 1 {
+		// m.finalizeResize(table, newLen, rs, cpus)
+		atomic.StorePointer(&rs.table, unsafe.Pointer(table))
+		// newTable := newMapTable(newLen, cpus)
+		sizeLen := calcSizeLen(newLen, cpus)
+		newTable := &mapTable{
+			buckets:  makeUnsafeSlice(make([]bucket, 0, newLen)),
+			mask:     newLen - 1,
+			size:     makeUnsafeSlice(make([]counterStripe, 0, sizeLen)),
+			sizeMask: sizeLen - 1,
+			chunks:   calcParallelism(newLen, minBucketsPerCPU, cpus*resizeOverPartition),
+		}
+		atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
+		m.helpCopyAndWait(rs)
 	} else {
-		m.finalizeResize(table, newLen, rs, cpus)
+		// The big table, use goroutines to create new table and copy entries
+		// go m.finalizeResize(table, newLen, rs, cpus)
+		go func(
+			table *mapTable,
+			newLen int,
+			rs *rebuildState,
+			cpus int,
+		) {
+			atomic.StorePointer(&rs.table, unsafe.Pointer(table))
+			// newTable := newMapTable(newLen, cpus)
+			sizeLen := calcSizeLen(newLen, cpus)
+			newTable := &mapTable{
+				buckets:  makeUnsafeSlice(make([]bucket, 0, newLen)),
+				mask:     newLen - 1,
+				size:     makeUnsafeSlice(make([]counterStripe, 0, sizeLen)),
+				sizeMask: sizeLen - 1,
+				chunks:   calcParallelism(newLen, minBucketsPerCPU, cpus*resizeOverPartition),
+			}
+			atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
+			m.helpCopyAndWait(rs)
+		}(table, newLen, rs, cpus)
 	}
 }
 
-func (m *Map[K, V]) finalizeResize(
-	table *mapTable,
-	newLen int,
-	rs *rebuildState,
-	cpus int,
-) {
-	atomic.StorePointer(&rs.table, unsafe.Pointer(table))
-	newTable := newMapTable(newLen, cpus)
-	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
-	m.helpCopyAndWait(rs)
-}
+// func (m *Map[K, V]) finalizeResize(
+// 	table *mapTable,
+// 	newLen int,
+// 	rs *rebuildState,
+// 	cpus int,
+// ) {
+// 	atomic.StorePointer(&rs.table, unsafe.Pointer(table))
+// 	newTable := newMapTable(newLen, cpus)
+// 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
+// 	m.helpCopyAndWait(rs)
+// }
 
 //go:noinline
 func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
@@ -1394,7 +1422,11 @@ func (b *bucket) At(i int) *unsafe.Pointer {
 // Uses atomic operations on the meta field to avoid false sharing overhead.
 // Implements optimistic locking with fallback to spinning.
 func (b *bucket) Lock() {
-	BitLockUint64(&b.meta, opLockMask)
+	// Inline BitLockUint64(&b.meta, opLockMask)
+	cur := atomic.LoadUint64(&b.meta)
+	if !atomic.CompareAndSwapUint64(&b.meta, cur&^opLockMask, cur|opLockMask) {
+		slowBitLockUint64(&b.meta, opLockMask)
+	}
 }
 
 //go:nosplit
