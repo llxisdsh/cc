@@ -34,17 +34,17 @@ type FlatMap[K comparable, V any] struct {
 	tableSeq SeqLock32 // seqlock of table
 	shrinkOn bool      // WithAutoShrink
 	intKey   bool
-	rs       flatRebuildState[K, V]
+	rs       unsafe.Pointer // *flatRebuildState[K, V]
 }
 
 type flatRebuildState[K comparable, V any] struct {
-	hint        atomic.Uint32
+	hint        mapRebuildHint
 	chunks      atomic.Int32
 	newTable    SeqLockSlot[flatTable[K, V]]
 	newTableSeq SeqLock32 // seqlock of new table
 	process     atomic.Int32
 	completed   atomic.Int32
-	gate        Gate
+	latch       Latch
 }
 
 type flatTable[K comparable, V any] struct {
@@ -120,14 +120,16 @@ func (m *FlatMap[K, V]) init(
 	tableLen := calcTableLen(cfg.capacity)
 	SeqLockWriteLocked32(&m.tableSeq, &m.table,
 		newFlatTable[K, V](tableLen, runtime.GOMAXPROCS(0)))
-	m.rs.gate.Open()
 }
 
 //go:noinline
 func (m *FlatMap[K, V]) slowInit() {
 	rs, ok := m.beginRebuild(mapRebuildBlockWritersHint)
 	if !ok {
-		rs.gate.Wait()
+		rs = (*flatRebuildState[K, V])(loadPtr(&m.rs))
+		if rs != nil {
+			rs.latch.Wait()
+		}
 		return
 	}
 	// The table may have been altered prior to our changes.
@@ -310,18 +312,18 @@ slowPath:
 		root.Lock()
 
 		// Help finishing rebuild if needed
-		if hint := mapRebuildHint(m.rs.hint.Load()); hint != mapNoHint {
-			switch hint {
+		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
+			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if m.rs.newTableSeq.Ready() {
+				if rs.newTableSeq.Ready() {
 					root.Unlock()
-					m.helpCopyAndWait(&m.rs)
+					m.helpCopyAndWait(rs)
 					table = SeqLockRead32(&m.tableSeq, &m.table)
 					continue
 				}
 			case mapRebuildBlockWritersHint:
 				root.Unlock()
-				m.rs.gate.Wait()
+				rs.latch.Wait()
 				table = SeqLockRead32(&m.tableSeq, &m.table)
 				continue
 			default:
@@ -417,7 +419,7 @@ slowPath:
 		table.AddSize(idx, 1)
 
 		// Auto-grow check (parallel resize)
-		if mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
+		if loadPtr(&m.rs) == nil {
 			tableLen := table.mask + 1
 			size := table.SumSize()
 			const capFactor = float64(entriesPerBucket) * loadFactor
@@ -622,18 +624,18 @@ slowPath:
 
 		// Help finishing rebuild if needed
 		if flags&computeIgnoreHint == 0 {
-			if hint := mapRebuildHint(m.rs.hint.Load()); hint != mapNoHint {
-				switch hint {
+			if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
+				switch rs.hint {
 				case mapGrowHint, mapShrinkHint:
-					if m.rs.newTableSeq.Ready() {
+					if rs.newTableSeq.Ready() {
 						root.Unlock()
-						m.helpCopyAndWait(&m.rs)
+						m.helpCopyAndWait(rs)
 						table = SeqLockRead32(&m.tableSeq, &m.table)
 						continue
 					}
 				case mapRebuildBlockWritersHint:
 					root.Unlock()
-					m.rs.gate.Wait()
+					rs.latch.Wait()
 					table = SeqLockRead32(&m.tableSeq, &m.table)
 					continue
 				default:
@@ -734,7 +736,7 @@ slowPath:
 			}
 			table.AddSize(idx, 1)
 			// Auto-grow check (parallel resize)
-			if mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
+			if loadPtr(&m.rs) == nil {
 				tableLen := table.mask + 1
 				size := table.SumSize()
 				const capFactor = float64(entriesPerBucket) * loadFactor
@@ -761,7 +763,7 @@ slowPath:
 			// Check if table shrinking is needed
 			if m.shrinkOn {
 				if newMeta&metaDataMask == metaEmpty &&
-					mapRebuildHint(m.rs.hint.Load()) == mapNoHint {
+					loadPtr(&m.rs) == nil {
 					tableLen := table.mask + 1
 					if minTableLen < tableLen {
 						size := table.SumSize()
@@ -1010,17 +1012,17 @@ func (m *FlatMap[K, V]) rebuild(
 ) {
 	for {
 		// Help finishing rebuild if needed
-		if hint := mapRebuildHint(m.rs.hint.Load()); hint != mapNoHint {
-			switch hint {
+		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
+			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if m.rs.newTableSeq.Ready() {
-					m.helpCopyAndWait(&m.rs)
+				if rs.newTableSeq.Ready() {
+					m.helpCopyAndWait(rs)
 				} else {
 					runtime.Gosched()
 					continue
 				}
 			default:
-				m.rs.gate.Wait()
+				rs.latch.Wait()
 			}
 		}
 		if rs, ok := m.beginRebuild(rebuildHint); ok {
@@ -1032,17 +1034,18 @@ func (m *FlatMap[K, V]) rebuild(
 }
 
 func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) (*flatRebuildState[K, V], bool) {
-	rs := &m.rs
-	if !rs.hint.CompareAndSwap(uint32(mapNoHint), uint32(hint)) {
-		return rs, false
+	rs := &flatRebuildState[K, V]{
+		hint: hint,
 	}
-	rs.gate.Close()
+	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
+		return nil, false
+	}
 	return rs, true
 }
 
 func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
-	rs.hint.Store(uint32(mapNoHint))
-	rs.gate.Open()
+	atomic.StorePointer(&m.rs, nil)
+	rs.latch.Open()
 }
 
 //go:noinline
@@ -1135,7 +1138,7 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 	for {
 		process := rs.process.Add(1)
 		if process > chunks {
-			rs.gate.Wait()
+			rs.latch.Wait()
 			return
 		}
 		process--
