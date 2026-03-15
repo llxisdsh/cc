@@ -139,7 +139,7 @@ func (m *Map[K, V]) init(
 	m.minLen = calcTableLen(cfg.capacity)
 	m.shrinkOn = cfg.autoShrink
 
-	table := newMapTable(m.minLen, CPUS)
+	table := newMapTable(m.minLen, maxProcs())
 	atomic.StorePointer(&m.table, unsafe.Pointer(table))
 	return table
 }
@@ -948,8 +948,7 @@ func (m *Map[K, V]) Clear() {
 		return
 	}
 	m.rebuild(mapRebuildBlockWritersHint, func(_ *MapRebuild[K, V]) {
-		cpus := CPUS
-		newTable := newMapTable(m.minLen, cpus)
+		newTable := newMapTable(m.minLen, maxProcs())
 		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 	})
 }
@@ -1084,7 +1083,7 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
 	atomic.StorePointer(&clone.table,
-		unsafe.Pointer(newMapTable(clone.minLen, CPUS)),
+		unsafe.Pointer(newMapTable(clone.minLen, maxProcs())),
 	)
 
 	// Pre-fetch size to optimize initial capacity
@@ -1213,20 +1212,18 @@ func (m *Map[K, V]) tryResize(
 		atomic.AddUint32(&m.shrinks, 1)
 	}
 
-	cpus := CPUS
+	cpus := maxProcs()
 	if newLen*int(unsafe.Sizeof(bucket{})) < asyncThreshold || cpus <= 1 {
-		// m.finalizeResize(table, newLen, rs, cpus)
 		atomic.StorePointer(&rs.table, unsafe.Pointer(table))
-		// newTable := newMapTable(newLen, cpus)
+		// Inline newMapTable(newLen, cpus)
 		sizeLen := calcSizeLen(newLen, cpus)
-		newTable := &mapTable{
+		atomic.StorePointer(&rs.newTable, unsafe.Pointer(&mapTable{
 			buckets:  makeUnsafeSlice(make([]bucket, 0, newLen)),
 			mask:     newLen - 1,
 			size:     makeUnsafeSlice(make([]counterStripe, 0, sizeLen)),
 			sizeMask: sizeLen - 1,
 			chunks:   calcParallelism(newLen, minBucketsPerCPU, cpus*resizeOverPartition),
-		}
-		atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
+		}))
 		m.helpCopyAndWait(rs)
 	} else {
 		// The big table, use goroutines to create new table and copy entries
@@ -1238,16 +1235,15 @@ func (m *Map[K, V]) tryResize(
 			cpus int,
 		) {
 			atomic.StorePointer(&rs.table, unsafe.Pointer(table))
-			// newTable := newMapTable(newLen, cpus)
+			// Inline newMapTable(newLen, cpus)
 			sizeLen := calcSizeLen(newLen, cpus)
-			newTable := &mapTable{
+			atomic.StorePointer(&rs.newTable, unsafe.Pointer(&mapTable{
 				buckets:  makeUnsafeSlice(make([]bucket, 0, newLen)),
 				mask:     newLen - 1,
 				size:     makeUnsafeSlice(make([]counterStripe, 0, sizeLen)),
 				sizeMask: sizeLen - 1,
 				chunks:   calcParallelism(newLen, minBucketsPerCPU, cpus*resizeOverPartition),
-			}
-			atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
+			}))
 			m.helpCopyAndWait(rs)
 		}(table, newLen, rs, cpus)
 	}
@@ -1340,7 +1336,6 @@ func (m *Map[K, V]) copyBucket(
 								h1v = h1(hash)
 							}
 						}
-						h2v := h2(hash)
 						idx := mask & h1v
 						destB := newTable.buckets.At(idx)
 						// Append entry to the destination bucket
@@ -1348,14 +1343,14 @@ func (m *Map[K, V]) copyBucket(
 							meta := loadUint64Fast(&destB.meta)
 							if empty := (^meta) & metaMask; empty != 0 {
 								emptyIdx := firstMarkedByteIndex(empty)
-								storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
+								storeUint64Fast(&destB.meta, setByte(meta, h2(hash), emptyIdx))
 								*destB.At(emptyIdx) = unsafe.Pointer(e)
 								break
 							}
 							next := (*bucket)(destB.next)
 							if next == nil {
 								destB.next = unsafe.Pointer(&bucket{
-									meta:    setByte(metaEmpty, h2v, 0),
+									meta:    setByte(metaEmpty, h2(hash), 0),
 									entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
 								})
 								storeUint64Fast(&destB.meta, meta|opNextMask)
@@ -1380,14 +1375,13 @@ func (m *Map[K, V]) copyBucket(
 }
 
 func newMapTable(tableLen, cpus int) *mapTable {
-	overCpus := cpus * resizeOverPartition
 	sizeLen := calcSizeLen(tableLen, cpus)
 	return &mapTable{
 		buckets:  makeUnsafeSlice(make([]bucket, tableLen)),
 		mask:     tableLen - 1,
 		size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
 		sizeMask: sizeLen - 1,
-		chunks:   calcParallelism(tableLen, minBucketsPerCPU, overCpus),
+		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 	}
 }
 

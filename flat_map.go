@@ -119,7 +119,7 @@ func (m *FlatMap[K, V]) init(
 	m.shrinkOn = cfg.autoShrink
 	tableLen := calcTableLen(cfg.capacity)
 	SeqLockWriteLocked32(&m.tableSeq, &m.table,
-		newFlatTable[K, V](tableLen, CPUS))
+		newFlatTable[K, V](tableLen, maxProcs()))
 }
 
 //go:noinline
@@ -954,7 +954,7 @@ func (m *FlatMap[K, V]) Clear() {
 
 	m.rebuild(mapRebuildBlockWritersHint, func(_ *MapRebuild[K, V]) {
 		SeqLockWriteLocked32(&m.tableSeq, &m.table,
-			newFlatTable[K, V](minTableLen, CPUS))
+			newFlatTable[K, V](minTableLen, maxProcs()))
 	})
 }
 
@@ -1091,70 +1091,47 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
 		}
 	}
 
-	cpus := CPUS
+	cpus := maxProcs()
 	if newLen*int(unsafe.Sizeof(flatBucket[K, V]{})) >= asyncThreshold || cpus <= 1 {
-		// Inline m.finalizeResize(table, newLen, rs, cpus)
-		overCpus := cpus * resizeOverPartition
-		chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
+		chunks := calcParallelism(table.mask+1, minBucketsPerCPU, cpus*resizeOverPartition)
 		rs.chunks.Store(int32(chunks))
-		rs.process.Store(0)
-		rs.completed.Store(0)
-		rs.newTableSeq.ClearLocked()
+		// rs.process.Store(0)
+		// rs.completed.Store(0)
+		// rs.newTableSeq.ClearLocked()
 		// Inline newFlatTable
 		sizeLen := calcSizeLen(newLen, cpus)
-		newTable := flatTable[K, V]{
+		SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
 			buckets:  makeUnsafeSlice(make([]flatBucket[K, V], newLen)),
 			mask:     newLen - 1,
 			size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
 			sizeMask: sizeLen - 1,
-		}
-		SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newTable)
+		})
 		m.helpCopyAndWait(rs)
 
 	} else {
-		// go m.finalizeResize(table, newLen, rs, cpus)
 		go func(
 			table *flatTable[K, V],
 			newLen int,
 			rs *flatRebuildState[K, V],
 			cpus int,
 		) {
-			overCpus := cpus * resizeOverPartition
-			chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
+			chunks := calcParallelism(table.mask+1, minBucketsPerCPU, cpus*resizeOverPartition)
 			rs.chunks.Store(int32(chunks))
-			rs.process.Store(0)
-			rs.completed.Store(0)
-			rs.newTableSeq.ClearLocked()
+			// rs.process.Store(0)
+			// rs.completed.Store(0)
+			// rs.newTableSeq.ClearLocked()
 			// Inline newFlatTable
 			sizeLen := calcSizeLen(newLen, cpus)
-			newTable := flatTable[K, V]{
+			SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
 				buckets:  makeUnsafeSlice(make([]flatBucket[K, V], newLen)),
 				mask:     newLen - 1,
 				size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
 				sizeMask: sizeLen - 1,
-			}
-			SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newTable)
+			})
 			m.helpCopyAndWait(rs)
 		}(table, newLen, rs, cpus)
 	}
 }
-
-// func (m *FlatMap[K, V]) finalizeResize(
-// 	table *flatTable[K, V],
-// 	newLen int,
-// 	rs *flatRebuildState[K, V],
-// 	cpus int,
-// ) {
-// 	overCpus := cpus * resizeOverPartition
-// 	chunks := calcParallelism(table.mask+1, minBucketsPerCPU, overCpus)
-// 	rs.chunks.Store(int32(chunks))
-// 	rs.process.Store(0)
-// 	rs.completed.Store(0)
-// 	rs.newTableSeq.ClearLocked()
-// 	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable,
-// 		newFlatTable[K, V](newLen, cpus))
-// 	m.helpCopyAndWait(rs)
-// }
 
 //go:noinline
 func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
@@ -1192,7 +1169,7 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 		m.copyBucket(&table, start, end, oldLen, baseLen, &newTable)
 		if rs.completed.Add(1) == chunks {
 			SeqLockWriteLocked32(&m.tableSeq, &m.table, newTable)
-			rs.newTableSeq.ClearLocked()
+			// rs.newTableSeq.ClearLocked()
 			m.endRebuild(rs)
 			return
 		}
@@ -1237,7 +1214,6 @@ func (m *FlatMap[K, V]) copyBucket(
 							h1v = h1(hash)
 						}
 					}
-					h2v := h2(hash)
 					idx := mask & h1v
 					destB := newTable.buckets.At(idx)
 					// Append entry to the destination bucket
@@ -1245,14 +1221,14 @@ func (m *FlatMap[K, V]) copyBucket(
 						meta := loadUint64Fast(&destB.meta)
 						if empty := (^meta) & metaMask; empty != 0 {
 							emptyIdx := firstMarkedByteIndex(empty)
-							storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
+							storeUint64Fast(&destB.meta, setByte(meta, h2(hash), emptyIdx))
 							*destB.At(emptyIdx).Ptr() = *e
 							break
 						}
 						next := (*flatBucket[K, V])(destB.next)
 						if next == nil {
 							destB.next = unsafe.Pointer(&flatBucket[K, V]{
-								meta: setByte(metaEmpty, h2v, 0),
+								meta: setByte(metaEmpty, h2(hash), 0),
 								entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
 									{buf: *e},
 								},

@@ -107,7 +107,11 @@ const (
 	computeSkipIfNotFound                   // fast path: skip lock if key not found
 )
 
-var CPUS = runtime.GOMAXPROCS(0)
+var maxProcs_ = runtime.GOMAXPROCS(0)
+
+func maxProcs() int {
+	return maxProcs_
+}
 
 // ============================================================================
 // Private struct definitions
