@@ -1101,9 +1101,9 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
 		// Inline newFlatTable
 		sizeLen := calcSizeLen(newLen, cpus)
 		SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
-			buckets:  makeUnsafeSlice(make([]flatBucket[K, V], newLen)),
+			buckets:  makeUnsafeSlice[flatBucket[K, V]](newLen),
 			mask:     newLen - 1,
-			size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
+			size:     makeUnsafeSlice[counterStripe](sizeLen),
 			sizeMask: sizeLen - 1,
 		})
 		m.helpCopyAndWait(rs)
@@ -1123,9 +1123,9 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
 			// Inline newFlatTable
 			sizeLen := calcSizeLen(newLen, cpus)
 			SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
-				buckets:  makeUnsafeSlice(make([]flatBucket[K, V], newLen)),
+				buckets:  makeUnsafeSlice[flatBucket[K, V]](newLen),
 				mask:     newLen - 1,
-				size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
+				size:     makeUnsafeSlice[counterStripe](sizeLen),
 				sizeMask: sizeLen - 1,
 			})
 			m.helpCopyAndWait(rs)
@@ -1216,19 +1216,20 @@ func (m *FlatMap[K, V]) copyBucket(
 					}
 					idx := mask & h1v
 					destB := newTable.buckets.At(idx)
+					h2v := h2(hash)
 					// Append entry to the destination bucket
 					for {
 						meta := loadUint64Fast(&destB.meta)
 						if empty := (^meta) & metaMask; empty != 0 {
 							emptyIdx := firstMarkedByteIndex(empty)
-							storeUint64Fast(&destB.meta, setByte(meta, h2(hash), emptyIdx))
+							storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
 							*destB.At(emptyIdx).Ptr() = *e
 							break
 						}
 						next := (*flatBucket[K, V])(destB.next)
 						if next == nil {
 							destB.next = unsafe.Pointer(&flatBucket[K, V]{
-								meta: setByte(metaEmpty, h2(hash), 0),
+								meta: setByte(metaEmpty, h2v, 0),
 								entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
 									{buf: *e},
 								},
@@ -1258,9 +1259,9 @@ func newFlatTable[K comparable, V any](
 ) flatTable[K, V] {
 	sizeLen := calcSizeLen(tableLen, cpus)
 	return flatTable[K, V]{
-		buckets:  makeUnsafeSlice(make([]flatBucket[K, V], tableLen)),
+		buckets:  makeUnsafeSlice[flatBucket[K, V]](tableLen),
 		mask:     tableLen - 1,
-		size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
+		size:     makeUnsafeSlice[counterStripe](sizeLen),
 		sizeMask: sizeLen - 1,
 	}
 }

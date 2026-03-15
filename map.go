@@ -1218,9 +1218,9 @@ func (m *Map[K, V]) tryResize(
 		// Inline newMapTable(newLen, cpus)
 		sizeLen := calcSizeLen(newLen, cpus)
 		atomic.StorePointer(&rs.newTable, unsafe.Pointer(&mapTable{
-			buckets:  makeUnsafeSlice(make([]bucket, 0, newLen)),
+			buckets:  makeUnsafeSlice[bucket](newLen),
 			mask:     newLen - 1,
-			size:     makeUnsafeSlice(make([]counterStripe, 0, sizeLen)),
+			size:     makeUnsafeSlice[counterStripe](sizeLen),
 			sizeMask: sizeLen - 1,
 			chunks:   calcParallelism(newLen, minBucketsPerCPU, cpus*resizeOverPartition),
 		}))
@@ -1238,9 +1238,9 @@ func (m *Map[K, V]) tryResize(
 			// Inline newMapTable(newLen, cpus)
 			sizeLen := calcSizeLen(newLen, cpus)
 			atomic.StorePointer(&rs.newTable, unsafe.Pointer(&mapTable{
-				buckets:  makeUnsafeSlice(make([]bucket, 0, newLen)),
+				buckets:  makeUnsafeSlice[bucket](newLen),
 				mask:     newLen - 1,
-				size:     makeUnsafeSlice(make([]counterStripe, 0, sizeLen)),
+				size:     makeUnsafeSlice[counterStripe](sizeLen),
 				sizeMask: sizeLen - 1,
 				chunks:   calcParallelism(newLen, minBucketsPerCPU, cpus*resizeOverPartition),
 			}))
@@ -1338,19 +1338,20 @@ func (m *Map[K, V]) copyBucket(
 						}
 						idx := mask & h1v
 						destB := newTable.buckets.At(idx)
+						h2v := h2(hash)
 						// Append entry to the destination bucket
 						for {
 							meta := loadUint64Fast(&destB.meta)
 							if empty := (^meta) & metaMask; empty != 0 {
 								emptyIdx := firstMarkedByteIndex(empty)
-								storeUint64Fast(&destB.meta, setByte(meta, h2(hash), emptyIdx))
+								storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
 								*destB.At(emptyIdx) = unsafe.Pointer(e)
 								break
 							}
 							next := (*bucket)(destB.next)
 							if next == nil {
 								destB.next = unsafe.Pointer(&bucket{
-									meta:    setByte(metaEmpty, h2(hash), 0),
+									meta:    setByte(metaEmpty, h2v, 0),
 									entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
 								})
 								storeUint64Fast(&destB.meta, meta|opNextMask)
@@ -1377,9 +1378,9 @@ func (m *Map[K, V]) copyBucket(
 func newMapTable(tableLen, cpus int) *mapTable {
 	sizeLen := calcSizeLen(tableLen, cpus)
 	return &mapTable{
-		buckets:  makeUnsafeSlice(make([]bucket, tableLen)),
+		buckets:  makeUnsafeSlice[bucket](tableLen),
 		mask:     tableLen - 1,
-		size:     makeUnsafeSlice(make([]counterStripe, sizeLen)),
+		size:     makeUnsafeSlice[counterStripe](sizeLen),
 		sizeMask: sizeLen - 1,
 		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 	}

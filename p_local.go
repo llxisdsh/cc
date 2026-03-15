@@ -229,7 +229,7 @@ func (p *PLocal[T]) grow(needed int) {
 	}
 
 	p.shards.Store(&pLocalShards[T]{
-		slice: makeUnsafeSlice(newShards),
+		slice: toUnsafeSlice(newShards),
 		len:   newSize,
 	})
 	p.mu.Unlock()

@@ -348,7 +348,12 @@ type unsafeSlice[T any] struct {
 	ptr unsafe.Pointer
 }
 
-func makeUnsafeSlice[T any](s []T) unsafeSlice[T] {
+func makeUnsafeSlice[T any](len int) unsafeSlice[T] {
+	return unsafeSlice[T]{ptr: unsafe.Pointer(unsafe.SliceData(make([]T, len)))}
+}
+
+//go:nosplit
+func toUnsafeSlice[T any](s []T) unsafeSlice[T] {
 	return unsafeSlice[T]{ptr: unsafe.Pointer(unsafe.SliceData(s))}
 }
 
