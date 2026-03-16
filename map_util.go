@@ -109,6 +109,7 @@ const (
 
 var maxProcs_ = runtime.GOMAXPROCS(0)
 
+//go:nosplit
 func maxProcs() int {
 	return maxProcs_
 }
