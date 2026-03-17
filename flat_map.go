@@ -26,15 +26,15 @@ import (
 //   - Reuses Map constants and compile-time bucket sizing (entriesPerBucket).
 //   - Buckets are packed without padding for cache-friendly layout.
 type FlatMap[K comparable, V any] struct {
-	_        noCopy
-	table    SeqLockSlot[flatTable[K, V]]
-	seed     uintptr
-	keyHash  HashFunc
-	valEqual EqualFunc
-	tableSeq SeqLock32 // seqlock of table
-	shrinkOn bool      // WithAutoShrink
-	intKey   bool
-	rs       unsafe.Pointer // *flatRebuildState[K, V]
+	_           noCopy
+	table       SeqLockSlot[flatTable[K, V]]
+	seed        uintptr
+	keyHash     HashFunc
+	valEqual    EqualFunc
+	tableSeq    SeqLock32 // seqlock of table
+	shrinkOn    bool      // WithAutoShrink
+	mustKeyHash bool
+	rs          unsafe.Pointer // *flatRebuildState[K, V]
 }
 
 type flatRebuildState[K comparable, V any] struct {
@@ -106,10 +106,10 @@ func (m *FlatMap[K, V]) init(
 		cfg.valEqual = parseValueInterface[V]()
 	}
 	// perform initialization
-	m.keyHash, m.valEqual, m.intKey = defaultHasher[K, V]()
+	m.keyHash, m.valEqual, m.mustKeyHash = defaultHasher[K, V]()
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
-		m.intKey = false
+		m.mustKeyHash = true
 	}
 	if cfg.valEqual != nil {
 		m.valEqual = cfg.valEqual
@@ -158,15 +158,13 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 
 	var hash uintptr
 	var h1v int
-
-	if m.intKey {
-		hash = intHash[K](noescape(unsafe.Pointer(&key)))
-		h1v = h1IntKey(hash)
-	} else {
+	if unsafe.Sizeof(key) > wordSize || m.mustKeyHash {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
+	} else {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+		h1v = h1IntKey(hash)
 	}
-
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
@@ -231,16 +229,15 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 
 	var hash uintptr
 	var h1v int
-	if m.intKey {
-		hash = intHash[K](noescape(unsafe.Pointer(&key)))
-		h1v = h1IntKey(hash)
-	} else {
+	if unsafe.Sizeof(key) > wordSize || m.mustKeyHash {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
+	} else {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+		h1v = h1IntKey(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
-
 	// Fast path: lock-free read
 	{
 		idx := table.mask & h1v
@@ -546,16 +543,15 @@ func (m *FlatMap[K, V]) compute(
 
 	var hash uintptr
 	var h1v int
-	if m.intKey {
-		hash = intHash[K](noescape(unsafe.Pointer(key)))
-		h1v = h1IntKey(hash)
-	} else {
+	if unsafe.Sizeof(*key) > wordSize || m.mustKeyHash {
 		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
+	} else {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+		h1v = h1IntKey(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
-
 	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
@@ -1200,18 +1196,18 @@ func (m *FlatMap[K, V]) copyBucket(
 					var h1v int
 					if opt.EmbeddedHash_ {
 						hash = e.GetHash()
-						if m.intKey {
-							h1v = h1IntKey(hash)
-						} else {
+						if unsafe.Sizeof(e.key) > wordSize || m.mustKeyHash {
 							h1v = h1(hash)
+						} else {
+							h1v = h1IntKey(hash)
 						}
 					} else {
-						if m.intKey {
-							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
-							h1v = h1IntKey(hash)
-						} else {
+						if unsafe.Sizeof(e.key) > wordSize || m.mustKeyHash {
 							hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
 							h1v = h1(hash)
+						} else {
+							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
+							h1v = h1IntKey(hash)
 						}
 					}
 					idx := mask & h1v
