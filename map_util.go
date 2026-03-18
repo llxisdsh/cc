@@ -16,8 +16,8 @@ import (
 // ============================================================================
 
 const (
-	intSize       = 32 << (^uint(0) >> 63) // 32 or 64
-	maxInt        = 1<<(intSize-1) - 1     // maxInt32 or maxInt64
+	bitSize       = 32 << (^uint(0) >> 63) // 32 or 64
+	maxInt        = 1<<(bitSize-1) - 1     // maxInt32 or maxInt64
 	cacheLineSize = opt.CacheLineSize_     // size of a cache line in bytes
 )
 
@@ -206,7 +206,7 @@ func nextPowOf2(n int) int {
 	v |= v >> 4
 	v |= v >> 8
 	v |= v >> 16
-	if intSize == 64 {
+	if bitSize == 64 {
 		v |= v >> 32
 	}
 	return v + 1
@@ -246,14 +246,14 @@ func noEscape[T any](p *T) *T {
 func intHash[K any](ptr unsafe.Pointer) uintptr {
 	switch unsafe.Sizeof(*(*K)(nil)) {
 	case 8:
-		if intSize == 64 {
+		if bitSize == 64 {
 			return *(*uintptr)(ptr)
 		} else {
 			v := *(*uint64)(ptr)
 			return uintptr(v>>32) ^ uintptr(v)
 		}
 	case 4:
-		if intSize == 32 {
+		if bitSize == 32 {
 			return *(*uintptr)(ptr)
 		} else {
 			return uintptr(*(*uint32)(ptr))
@@ -436,7 +436,7 @@ func defaultHasher[K comparable, V any]() (
 	case uint, int, uintptr:
 		return keyHash, valEqual, true
 	case uint64, int64:
-		if intSize == 64 {
+		if bitSize == 64 {
 			return keyHash, valEqual, true
 		}
 		return keyHash, valEqual, true
@@ -453,7 +453,7 @@ func defaultHasher[K comparable, V any]() (
 		case reflect.Uint, reflect.Int, reflect.Uintptr:
 			return keyHash, valEqual, true
 		case reflect.Int64, reflect.Uint64:
-			if intSize == 64 {
+			if bitSize == 64 {
 				return keyHash, valEqual, true
 			}
 			return keyHash, valEqual, true
@@ -596,7 +596,7 @@ func storePtr(addr *unsafe.Pointer, val unsafe.Pointer) {
 //nolint:unused
 //go:nosplit
 func loadUint64(addr *uint64) uint64 {
-	if noRaceTSO_ && intSize == 64 {
+	if noRaceTSO_ && bitSize == 64 {
 		return *addr
 	} else {
 		return atomic.LoadUint64(addr)
@@ -606,7 +606,7 @@ func loadUint64(addr *uint64) uint64 {
 //nolint:unused
 //go:nosplit
 func storeUint64(addr *uint64, val uint64) {
-	if noRaceTSO_ && intSize == 64 {
+	if noRaceTSO_ && bitSize == 64 {
 		*addr = val
 	} else {
 		atomic.StoreUint64(addr, val)

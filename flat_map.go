@@ -968,11 +968,13 @@ func (m *FlatMap[K, V]) ToMap(limit ...int) map[K]V {
 		}
 	}
 	a := make(map[K]V, min(m.Size(), l))
-	m.Range(func(k K, v V) bool {
+	for k, v := range m.All() {
 		a[k] = v
 		l--
-		return l > 0
-	})
+		if l == 0 {
+			break
+		}
+	}
 	return a
 }
 
