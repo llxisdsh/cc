@@ -506,7 +506,7 @@ func BenchmarkConcurrent_IntRange_xsyncMap(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			m.Range(func(k, v int) bool { return true })
+			m.RangeRelaxed(func(k, v int) bool { return true })
 		}
 	})
 }
@@ -984,7 +984,7 @@ func BenchmarkConcurrent_StrRange_xsyncMap(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			m.Range(func(k string, v int) bool { return true })
+			m.RangeRelaxed(func(k string, v int) bool { return true })
 		}
 	})
 }

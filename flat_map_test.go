@@ -383,6 +383,98 @@ func TestFlatMap_LoadAndUpdate(t *testing.T) {
 	}
 }
 
+func TestFlatMap_CompareAndSwap(t *testing.T) {
+	var m FlatMap[string, int]
+	m.Store("k", 1)
+	if !m.CompareAndSwap("k", 1, 2) {
+		t.Fatalf("CompareAndSwap should succeed")
+	}
+	if v, ok := m.Load("k"); !ok || v != 2 {
+		t.Fatalf("value after CompareAndSwap got (%v,%v), want (2,true)", v, ok)
+	}
+	if m.CompareAndSwap("k", 1, 3) {
+		t.Fatalf("CompareAndSwap should fail on mismatched old value")
+	}
+	if v, ok := m.Load("k"); !ok || v != 2 {
+		t.Fatalf("value should remain unchanged, got (%v,%v)", v, ok)
+	}
+}
+
+func TestFlatMap_CompareAndDelete(t *testing.T) {
+	var m FlatMap[string, int]
+	m.Store("k", 10)
+	if m.CompareAndDelete("k", 1) {
+		t.Fatalf("CompareAndDelete should fail on mismatched old value")
+	}
+	if v, ok := m.Load("k"); !ok || v != 10 {
+		t.Fatalf("value should remain after failed CompareAndDelete, got (%v,%v)", v, ok)
+	}
+	if !m.CompareAndDelete("k", 10) {
+		t.Fatalf("CompareAndDelete should succeed")
+	}
+	if _, ok := m.Load("k"); ok {
+		t.Fatalf("key should be deleted")
+	}
+}
+
+func TestFlatMap_CompareAndSwap_PanicForNonComparableValue(t *testing.T) {
+	var m FlatMap[int, []int]
+	m.Store(1, []int{1})
+	defer func() {
+		if recover() == nil {
+			t.Fatalf("expected panic for non-comparable value type")
+		}
+	}()
+	_ = m.CompareAndSwap(1, []int{1}, []int{2})
+}
+
+func TestFlatMap_GrowShrink_DataIntegrity(t *testing.T) {
+	m := NewFlatMap[int, int](WithCapacity(8), WithAutoShrink())
+	for i := range 2000 {
+		m.Store(i, i*3)
+	}
+	m.Grow(1 << 14)
+	for i := range 2000 {
+		v, ok := m.Load(i)
+		if !ok || v != i*3 {
+			t.Fatalf("after Grow key %d got (%v,%v), want (%d,true)", i, v, ok, i*3)
+		}
+	}
+	for i := range 1900 {
+		m.Delete(i)
+	}
+	m.Shrink()
+	for i := 1900; i < 2000; i++ {
+		v, ok := m.Load(i)
+		if !ok || v != i*3 {
+			t.Fatalf("after Shrink key %d got (%v,%v), want (%d,true)", i, v, ok, i*3)
+		}
+	}
+}
+
+func TestFlatMap_CloneTo(t *testing.T) {
+	src := NewFlatMap[int, int]()
+	for i := range 200 {
+		src.Store(i, i+1)
+	}
+	dst := NewFlatMap[int, int]()
+	dst.Store(999, 999)
+	src.CloneTo(dst)
+	if _, ok := dst.Load(999); ok {
+		t.Fatalf("destination should be cleared before clone")
+	}
+	for i := range 200 {
+		v, ok := dst.Load(i)
+		if !ok || v != i+1 {
+			t.Fatalf("cloned key %d got (%v,%v), want (%d,true)", i, v, ok, i+1)
+		}
+	}
+	src.Store(0, 777)
+	if v, ok := dst.Load(0); !ok || v != 1 {
+		t.Fatalf("destination should not track later source writes, got (%v,%v)", v, ok)
+	}
+}
+
 // TestFlatMap_Concurrent tests concurrent operations
 func TestFlatMap_Concurrent(t *testing.T) {
 	var m FlatMap[int, int]

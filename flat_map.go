@@ -501,6 +501,50 @@ func (m *FlatMap[K, V]) Delete(key K) {
 	}, computeSkipIfNotFound)
 }
 
+// CompareAndSwap atomically replaces an existing value with a new value.
+// If the existing value matches the expected value.
+func (m *FlatMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("called CompareAndSwap when value is not of comparable type")
+	}
+	m.compute(&key, func(e *MapEntry[K, V]) {
+		if e.Loaded() && m.valEqual(
+			noescape(unsafe.Pointer(&e.entry.value)),
+			noescape(unsafe.Pointer(&old)),
+		) {
+			e.Update(new)
+			swapped = true
+		}
+	}, computeSkipIfNotFound)
+	return swapped
+}
+
+// CompareAndDelete atomically deletes an existing entry.
+// If its value matches the expected value.
+func (m *FlatMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("called CompareAndDelete when value is not of comparable type")
+	}
+	m.compute(&key, func(e *MapEntry[K, V]) {
+		if e.Loaded() && m.valEqual(
+			noescape(unsafe.Pointer(&e.entry.value)),
+			noescape(unsafe.Pointer(&old)),
+		) {
+			e.Delete()
+			deleted = true
+		}
+	}, computeSkipIfNotFound)
+	return deleted
+}
+
 // Compute performs a compute-style, atomic update for the given key.
 //
 // Concurrency model:
@@ -958,6 +1002,83 @@ func (m *FlatMap[K, V]) Clear() {
 	})
 }
 
+// Grow increases the map's capacity by sizeAdd entries to accommodate future
+// growth. This pre-allocation avoids rehashing when adding new entries up to
+// the new capacity.
+//
+// Parameters:
+//   - sizeAdd specifies the number of additional entries the map should be able
+//     to hold.
+//
+// Notes:
+//   - If the current remaining capacity already exceeds sizeAdd, no growth will
+//     be triggered.
+func (m *FlatMap[K, V]) Grow(sizeAdd int) {
+	if sizeAdd <= 0 {
+		return
+	}
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		m.slowInit()
+	}
+	m.doResize(mapGrowHint, sizeAdd)
+}
+
+// Shrink reduces the capacity to fit the current size,
+// always executes regardless of WithAutoShrink.
+func (m *FlatMap[K, V]) Shrink() {
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		return
+	}
+	m.doResize(mapShrinkHint, -1)
+}
+
+func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
+	var size int
+	for {
+		// Resize check
+		table := SeqLockRead32(&m.tableSeq, &m.table)
+		tableLen := table.mask + 1
+		if hint == mapGrowHint {
+			if sizeAdd <= 0 {
+				return
+			}
+			size = table.SumSize()
+			newTableLen := calcTableLen(size + sizeAdd)
+			if tableLen >= newTableLen {
+				return
+			}
+		} else {
+			// mapShrinkHint
+			if tableLen <= minTableLen {
+				return
+			}
+			// Recalculate the shrink size to avoid over-shrinking
+			size = table.SumSize()
+			newTableLen := calcTableLen(size)
+			if tableLen <= newTableLen {
+				return
+			}
+		}
+		// Help finishing rebuild if needed
+		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
+			switch rs.hint {
+			case mapGrowHint, mapShrinkHint:
+				if rs.newTableSeq.Ready() {
+					m.helpCopyAndWait(rs)
+				} else {
+					runtime.Gosched()
+					continue
+				}
+			default:
+				rs.latch.Wait()
+			}
+		}
+		m.tryResize(hint, size, sizeAdd)
+	}
+}
+
 // ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
 func (m *FlatMap[K, V]) ToMap(limit ...int) map[K]V {
 	l := maxInt
@@ -976,6 +1097,35 @@ func (m *FlatMap[K, V]) ToMap(limit ...int) map[K]V {
 		}
 	}
 	return a
+}
+
+// CloneTo copies all key-value pairs from this map to the destination map.
+// The destination map is cleared before copying.
+//
+// Parameters:
+//   - clone: The destination map to copy into. Must not be nil.
+//
+// Notes:
+//   - This operation is not atomic with respect to concurrent modifications.
+//   - The destination map will have the same configuration as the source.
+//   - The destination map is cleared before copying to ensure a clean state.
+func (m *FlatMap[K, V]) CloneTo(clone *FlatMap[K, V]) {
+	clone.Clear()
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		return
+	}
+	clone.seed = m.seed
+	clone.keyHash = m.keyHash
+	clone.valEqual = m.valEqual
+	clone.shrinkOn = m.shrinkOn
+	clone.intKey = m.intKey
+	SeqLockWriteLocked32(&clone.tableSeq, &clone.table,
+		newFlatTable[K, V](minTableLen, maxProcs()))
+	clone.Grow(m.Size())
+	for k, v := range m.All() {
+		clone.Store(k, v)
+	}
 }
 
 // Rebuild performs a map rebuild operation with the given function.

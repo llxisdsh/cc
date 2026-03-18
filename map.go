@@ -160,7 +160,7 @@ func (m *Map[K, V]) slowInit() *mapTable {
 		return (*mapTable)(loadPtr(&m.table))
 	}
 
-	// Although the table is always changed when resizeWg is not nil,
+	// Although the table is always changed when rs is not nil,
 	// it might have been changed before that.
 	table := (*mapTable)(loadPtr(&m.table))
 	if table != nil {
@@ -482,8 +482,8 @@ func (m *Map[K, V]) Delete(key K) {
 	}, computeSkipIfNotFound)
 }
 
-// CompareAndSwap atomically replaces an existing value with a new value
-// if the existing value matches the expected value, compatible with `sync.Map`.
+// CompareAndSwap atomically replaces an existing value with a new value.
+// If the existing value matches the expected value, compatible with `sync.Map`.
 func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	table := (*mapTable)(loadPtr(&m.table))
 	if table == nil {
@@ -506,8 +506,8 @@ func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	return swapped
 }
 
-// CompareAndDelete atomically deletes an existing entry
-// if its value matches the expected value, compatible with `sync.Map`.
+// CompareAndDelete atomically deletes an existing entry.
+// If its value matches the expected value, compatible with `sync.Map`.
 func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	table := (*mapTable)(loadPtr(&m.table))
 	if table == nil {
@@ -1035,7 +1035,7 @@ func (m *Map[K, V]) doResize(
 	}
 }
 
-// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit
+// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
 func (m *Map[K, V]) ToMap(limit ...int) map[K]V {
 	l := maxInt
 	if len(limit) != 0 {
@@ -1063,11 +1063,8 @@ func (m *Map[K, V]) ToMap(limit ...int) map[K]V {
 //   - clone: The destination map to copy into. Must not be nil.
 //
 // Notes:
-//
 //   - This operation is not atomic with respect to concurrent modifications.
-//
 //   - The destination map will have the same configuration as the source.
-//
 //   - The destination map is cleared before copying to ensure a clean state.
 func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	clone.Clear()
@@ -1248,18 +1245,6 @@ func (m *Map[K, V]) tryResize(
 		}(table, newLen, rs, cpus)
 	}
 }
-
-// func (m *Map[K, V]) finalizeResize(
-// 	table *mapTable,
-// 	newLen int,
-// 	rs *rebuildState,
-// 	cpus int,
-// ) {
-// 	atomic.StorePointer(&rs.table, unsafe.Pointer(table))
-// 	newTable := newMapTable(newLen, cpus)
-// 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
-// 	m.helpCopyAndWait(rs)
-// }
 
 //go:noinline
 func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
