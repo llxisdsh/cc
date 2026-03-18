@@ -3294,7 +3294,7 @@ func TestMapWithHasher(t *testing.T) {
 }
 
 func murmur3Finalizer(i int, _ uintptr) uintptr {
-	if bitSize == 64 {
+	if intSize == 64 {
 		h := uint32(i >> 32)
 		h = (h ^ (h >> 16)) * 0x85ebca6b
 		h = (h ^ (h >> 13)) * 0xc2b2ae35

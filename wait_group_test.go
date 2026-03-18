@@ -72,7 +72,7 @@ func TestWaitGroupAddChecks(t *testing.T) {
 	// If current count is 0, and we add MaxInt64, newCnt is MaxInt64.
 	// MaxInt64 > 2^32, so it should be caught by "counter overflow".
 	t.Run("AddIntMax", func(t *testing.T) {
-		if bitSize == 32 {
+		if intSize == 32 {
 			t.Skip("Skipping AddIntMax on 32-bit int systems")
 		}
 

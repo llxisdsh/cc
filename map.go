@@ -26,17 +26,17 @@ import (
 // Notes:
 //   - Map must not be copied after first use.
 type Map[K comparable, V any] struct {
-	_           noCopy
-	table       unsafe.Pointer // *mapTable
-	rs          unsafe.Pointer // *rebuildState
-	growths     uint32
-	shrinks     uint32
-	seed        uintptr
-	keyHash     HashFunc  // WithKeyHasher
-	valEqual    EqualFunc // WithValueEqual
-	minLen      int       // WithCapacity
-	shrinkOn    bool      // WithAutoShrink
-	mustKeyHash bool
+	_        noCopy
+	table    unsafe.Pointer // *mapTable
+	rs       unsafe.Pointer // *rebuildState
+	growths  uint32
+	shrinks  uint32
+	seed     uintptr
+	keyHash  HashFunc  // WithKeyHasher
+	valEqual EqualFunc // WithValueEqual
+	minLen   int       // WithCapacity
+	shrinkOn bool      // WithAutoShrink
+	intKey   bool
 }
 
 // rebuildState represents the current state of a resizing operation
@@ -126,10 +126,10 @@ func (m *Map[K, V]) init(
 		cfg.valEqual = parseValueInterface[V]()
 	}
 	// perform initialization
-	m.keyHash, m.valEqual, m.mustKeyHash = defaultHasher[K, V]()
+	m.keyHash, m.valEqual, m.intKey = defaultHasher[K, V]()
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
-		m.mustKeyHash = true
+		m.intKey = false
 	}
 	if cfg.valEqual != nil {
 		m.valEqual = cfg.valEqual
@@ -186,13 +186,15 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 
 	var hash uintptr
 	var h1v int
-	if unsafe.Sizeof(key) > wordSize || m.mustKeyHash {
-		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h1v = h1(hash)
-	} else {
+
+	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h1v = h1(hash)
 	}
+
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
@@ -223,12 +225,12 @@ func (m *Map[K, V]) Store(key K, value V) {
 
 	var hash uintptr
 	var h1v int
-	if unsafe.Sizeof(key) > wordSize || m.mustKeyHash {
-		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h1v = h1(hash)
-	} else {
+	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h1v = h1(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
@@ -572,12 +574,12 @@ func (m *Map[K, V]) compute(
 
 	var hash uintptr
 	var h1v int
-	if unsafe.Sizeof(*key) > wordSize || m.mustKeyHash {
-		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
-		h1v = h1(hash)
-	} else {
+	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = h1IntKey(hash)
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+		h1v = h1(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
@@ -1079,7 +1081,7 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	clone.valEqual = m.valEqual
 	clone.minLen = m.minLen
 	clone.shrinkOn = m.shrinkOn
-	clone.mustKeyHash = m.mustKeyHash
+	clone.intKey = m.intKey
 	atomic.StorePointer(&clone.table,
 		unsafe.Pointer(newMapTable(clone.minLen, maxProcs())),
 	)
@@ -1320,17 +1322,18 @@ func (m *Map[K, V]) copyBucket(
 						var h1v int
 						if opt.EmbeddedHash_ {
 							hash = e.GetHash()
-							if unsafe.Sizeof(e.key) > wordSize || m.mustKeyHash {
-							} else {
+							if m.intKey {
 								h1v = h1IntKey(hash)
+							} else {
+								h1v = h1(hash)
 							}
 						} else {
-							if unsafe.Sizeof(e.key) > wordSize || m.mustKeyHash {
-								hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
-								h1v = h1(hash)
-							} else {
+							if m.intKey {
 								hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
 								h1v = h1IntKey(hash)
+							} else {
+								hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+								h1v = h1(hash)
 							}
 						}
 						idx := mask & h1v

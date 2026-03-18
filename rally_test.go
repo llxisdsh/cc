@@ -8,7 +8,7 @@ import (
 )
 
 func TestRally_Boundary(t *testing.T) {
-	if bitSize == 32 {
+	if intSize == 32 {
 		t.Skip("Skipping TestRally_Boundary on 32-bit int systems")
 	}
 
