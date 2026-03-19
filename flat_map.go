@@ -188,8 +188,10 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 				if !b.seq.EndRead(s1) {
 					goto retry
 				}
-				if e.key == key {
-					return e.value, true
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						return e.value, true
+					}
 				}
 			}
 		} else {
@@ -209,8 +211,10 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 			}
 			for i := range cacheCount {
 				e := &cache[i]
-				if e.key == key {
-					return e.value, true
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						return e.value, true
+					}
 				}
 			}
 		}
@@ -260,15 +264,19 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 					if !b.seq.EndRead(s1) {
 						goto slowPath
 					}
-					if e.key == key {
-						// valEqual: skip write if value unchanged
-						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&e.value)),
-							noescape(unsafe.Pointer(&value)),
-						) {
-							return
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == key {
+							// valEqual: skip write if value unchanged
+							if m.valEqual != nil {
+								if m.valEqual(
+									noescape(unsafe.Pointer(&e.value)),
+									noescape(unsafe.Pointer(&value)),
+								) {
+									return
+								}
+							}
+							goto slowPath
 						}
-						goto slowPath
 					}
 				}
 			} else {
@@ -284,15 +292,19 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 				}
 				for i := range cacheCount {
 					e := &cache[i]
-					if e.key == key {
-						// valEqual: skip write if value unchanged
-						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&e.value)),
-							noescape(unsafe.Pointer(&value)),
-						) {
-							return
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == key {
+							// valEqual: skip write if value unchanged
+							if m.valEqual != nil {
+								if m.valEqual(
+									noescape(unsafe.Pointer(&e.value)),
+									noescape(unsafe.Pointer(&value)),
+								) {
+									return
+								}
+							}
+							goto slowPath
 						}
-						goto slowPath
 					}
 				}
 			}
@@ -351,9 +363,11 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				e := b.At(j).Ptr()
-				if e.key == key {
-					oldB, oldIdx = b, j
-					break findLoop
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						oldB, oldIdx = b, j
+						break findLoop
+					}
 				}
 			}
 			if emptyB == nil {
@@ -409,10 +423,11 @@ slowPath:
 				{buf: newEnt},
 			},
 		}))
+		newMeta := loadUint64Fast(&b.meta) | opNextMask
 		if b == root {
-			root.UnlockWithMeta(loadUint64Fast(&b.meta) | opNextMask)
+			root.UnlockWithMeta(newMeta)
 		} else {
-			storeUint64(&b.meta, loadUint64Fast(&b.meta)|opNextMask)
+			storeUint64(&b.meta, newMeta)
 			root.Unlock()
 		}
 		table.AddSize(idx, 1)
@@ -512,12 +527,14 @@ func (m *FlatMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 		panic("called CompareAndSwap when value is not of comparable type")
 	}
 	m.compute(&key, func(e *MapEntry[K, V]) {
-		if e.Loaded() && m.valEqual(
-			noescape(unsafe.Pointer(&e.entry.value)),
-			noescape(unsafe.Pointer(&old)),
-		) {
-			e.Update(new)
-			swapped = true
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old)),
+			) {
+				e.Update(new)
+				swapped = true
+			}
 		}
 	}, computeSkipIfNotFound)
 	return swapped
@@ -534,12 +551,14 @@ func (m *FlatMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 		panic("called CompareAndDelete when value is not of comparable type")
 	}
 	m.compute(&key, func(e *MapEntry[K, V]) {
-		if e.Loaded() && m.valEqual(
-			noescape(unsafe.Pointer(&e.entry.value)),
-			noescape(unsafe.Pointer(&old)),
-		) {
-			e.Delete()
-			deleted = true
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old)),
+			) {
+				e.Delete()
+				deleted = true
+			}
 		}
 	}, computeSkipIfNotFound)
 	return deleted
@@ -619,11 +638,13 @@ func (m *FlatMap[K, V]) compute(
 					if !b.seq.EndRead(s1) {
 						goto slowPath
 					}
-					if e.key == *key {
-						if flags&computeSkipIfFound != 0 {
-							return e.value, true
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.value, true
+							}
+							goto slowPath
 						}
-						goto slowPath
 					}
 				}
 			} else {
@@ -639,11 +660,13 @@ func (m *FlatMap[K, V]) compute(
 				}
 				for i := range cacheCount {
 					e := &cache[i]
-					if e.key == *key {
-						if flags&computeSkipIfFound != 0 {
-							return e.value, true
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.value, true
+							}
+							goto slowPath
 						}
-						goto slowPath
 					}
 				}
 			}
@@ -712,9 +735,11 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				e := b.At(j).Ptr()
-				if e.key == *key {
-					oldB, oldIdx, oldMeta, it.entry.value, it.loaded = b, j, meta, e.value, true
-					break findLoop
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == *key {
+						oldB, oldIdx, oldMeta, it.entry.value, it.loaded = b, j, meta, e.value, true
+						break findLoop
+					}
 				}
 			}
 			if emptyB == nil {
@@ -735,12 +760,14 @@ slowPath:
 		case updateOp:
 			if it.loaded {
 				// valEqual: skip write if value unchanged
-				if m.valEqual != nil && m.valEqual(
-					noescape(unsafe.Pointer(&oldB.At(oldIdx).Ptr().value)),
-					noescape(unsafe.Pointer(&it.entry.value)),
-				) {
-					root.Unlock()
-					return it.entry.value, it.loaded
+				if m.valEqual != nil {
+					if m.valEqual(
+						noescape(unsafe.Pointer(&oldB.At(oldIdx).Ptr().value)),
+						noescape(unsafe.Pointer(&it.entry.value)),
+					) {
+						root.Unlock()
+						return it.entry.value, it.loaded
+					}
 				}
 				// Update
 				e := oldB.At(oldIdx)
@@ -771,10 +798,11 @@ slowPath:
 					{buf: it.entry},
 				},
 			}))
+			newMeta := loadUint64Fast(&b.meta) | opNextMask
 			if b == root {
-				root.UnlockWithMeta(loadUint64Fast(&b.meta) | opNextMask)
+				root.UnlockWithMeta(newMeta)
 			} else {
-				storeUint64(&b.meta, loadUint64Fast(&b.meta)|opNextMask)
+				storeUint64(&b.meta, newMeta)
 				root.Unlock()
 			}
 			table.AddSize(idx, 1)
@@ -805,13 +833,14 @@ slowPath:
 			table.AddSize(idx, -1)
 			// Check if table shrinking is needed
 			if m.shrinkOn {
-				if newMeta&metaDataMask == metaEmpty &&
-					loadPtr(&m.rs) == nil {
-					tableLen := table.mask + 1
-					if minTableLen < tableLen {
-						size := table.SumSize()
-						if size < tableLen*entriesPerBucket/shrinkFraction {
-							m.tryResize(mapShrinkHint, size, 0)
+				if newMeta&metaDataMask == metaEmpty {
+					if loadPtr(&m.rs) == nil {
+						tableLen := table.mask + 1
+						if minTableLen < tableLen {
+							size := table.SumSize()
+							if size < tableLen*entriesPerBucket/shrinkFraction {
+								m.tryResize(mapShrinkHint, size, 0)
+							}
 						}
 					}
 				}
@@ -1371,10 +1400,10 @@ func (m *FlatMap[K, V]) copyBucket(
 					h2v := h2(hash)
 					// Append entry to the destination bucket
 					for {
-						meta := loadUint64Fast(&destB.meta)
+						meta := destB.meta
 						if empty := (^meta) & metaMask; empty != 0 {
 							emptyIdx := firstMarkedByteIndex(empty)
-							storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
+							destB.meta = setByte(meta, h2v, emptyIdx)
 							*destB.At(emptyIdx).Ptr() = *e
 							break
 						}
@@ -1386,7 +1415,7 @@ func (m *FlatMap[K, V]) copyBucket(
 									{buf: *e},
 								},
 							})
-							storeUint64Fast(&destB.meta, meta|opNextMask)
+							destB.meta = meta | opNextMask
 							break
 						}
 						destB = next

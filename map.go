@@ -204,8 +204,10 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
 			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-				if e.key == key {
-					return e.value, true
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						return e.value, true
+					}
 				}
 			}
 		}
@@ -243,15 +245,18 @@ func (m *Map[K, V]) Store(key K, value V) {
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-					if e.key == key {
-						// valEqual: skip write if value unchanged
-						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&e.value)),
-							noescape(unsafe.Pointer(&value)),
-						) {
-							return
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == key {
+							// valEqual: skip write if value unchanged
+							if m.valEqual != nil {
+								if m.valEqual(
+									noescape(unsafe.Pointer(&e.value)),
+									noescape(unsafe.Pointer(&value))) {
+									return
+								}
+							}
+							goto slowPath
 						}
-						goto slowPath
 					}
 				}
 			}
@@ -312,8 +317,10 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
 				if e := (*entry_[K, V])(*b.At(j)); e != nil {
-					if e.key == key {
-						goto found
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == key {
+							goto found
+						}
 					}
 				}
 			}
@@ -489,18 +496,17 @@ func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	if table == nil {
 		return false
 	}
-
 	if m.valEqual == nil {
 		panic("called CompareAndSwap when value is not of comparable type")
 	}
-
 	m.compute(&key, func(e *MapEntry[K, V]) {
-		if e.Loaded() && m.valEqual(
-			noescape(unsafe.Pointer(&e.entry.value)),
-			noescape(unsafe.Pointer(&old)),
-		) {
-			e.Update(new)
-			swapped = true
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old))) {
+				e.Update(new)
+				swapped = true
+			}
 		}
 	}, computeSkipIfNotFound)
 	return swapped
@@ -513,18 +519,17 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	if table == nil {
 		return false
 	}
-
 	if m.valEqual == nil {
 		panic("called CompareAndDelete when value is not of comparable type")
 	}
-
 	m.compute(&key, func(e *MapEntry[K, V]) {
-		if e.Loaded() && m.valEqual(
-			noescape(unsafe.Pointer(&e.entry.value)),
-			noescape(unsafe.Pointer(&old)),
-		) {
-			e.Delete()
-			deleted = true
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old))) {
+				e.Delete()
+				deleted = true
+			}
 		}
 	}, computeSkipIfNotFound)
 	return deleted
@@ -592,11 +597,13 @@ func (m *Map[K, V]) compute(
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-					if e.key == *key {
-						if flags&computeSkipIfFound != 0 {
-							return e.value, true
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == *key {
+							if flags&computeSkipIfFound != 0 {
+								return e.value, true
+							}
+							goto slowPath
 						}
-						goto slowPath
 					}
 				}
 			}
@@ -664,9 +671,11 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
 				if e := (*entry_[K, V])(*b.At(j)); e != nil {
-					if e.key == *key {
-						it.entry.value, it.loaded = e.value, true
-						break findLoop
+					if !opt.EmbeddedHash_ || e.GetHash() == hash {
+						if e.key == *key {
+							it.entry.value, it.loaded = e.value, true
+							break findLoop
+						}
 					}
 				}
 			}
@@ -683,12 +692,14 @@ slowPath:
 		case updateOp:
 			if it.loaded {
 				// valEqual: skip write if value unchanged
-				if m.valEqual != nil && m.valEqual(
-					noescape(unsafe.Pointer(&((*entry_[K, V])(*b.At(j))).value)),
-					noescape(unsafe.Pointer(&it.entry.value)),
-				) {
-					root.Unlock()
-					return it.entry.value, it.loaded
+				if m.valEqual != nil {
+					if m.valEqual(
+						noescape(unsafe.Pointer(&((*entry_[K, V])(*b.At(j))).value)),
+						noescape(unsafe.Pointer(&it.entry.value)),
+					) {
+						root.Unlock()
+						return it.entry.value, it.loaded
+					}
 				}
 				// Update
 				newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
@@ -773,13 +784,14 @@ slowPath:
 
 			// Check if table shrinking is needed
 			if m.shrinkOn {
-				if newMeta&metaDataMask == metaEmpty &&
-					loadPtr(&m.rs) == nil {
-					tableLen := table.mask + 1
-					if m.minLen < tableLen {
-						size := table.SumSize()
-						if size < tableLen*entriesPerBucket/shrinkFraction {
-							m.tryResize(mapShrinkHint, size, 0)
+				if newMeta&metaDataMask == metaEmpty {
+					if loadPtr(&m.rs) == nil {
+						tableLen := table.mask + 1
+						if m.minLen < tableLen {
+							size := table.SumSize()
+							if size < tableLen*entriesPerBucket/shrinkFraction {
+								m.tryResize(mapShrinkHint, size, 0)
+							}
 						}
 					}
 				}
@@ -1326,10 +1338,10 @@ func (m *Map[K, V]) copyBucket(
 						h2v := h2(hash)
 						// Append entry to the destination bucket
 						for {
-							meta := loadUint64Fast(&destB.meta)
+							meta := destB.meta
 							if empty := (^meta) & metaMask; empty != 0 {
 								emptyIdx := firstMarkedByteIndex(empty)
-								storeUint64Fast(&destB.meta, setByte(meta, h2v, emptyIdx))
+								destB.meta = setByte(meta, h2v, emptyIdx)
 								*destB.At(emptyIdx) = unsafe.Pointer(e)
 								break
 							}
@@ -1339,7 +1351,7 @@ func (m *Map[K, V]) copyBucket(
 									meta:    setByte(metaEmpty, h2v, 0),
 									entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
 								})
-								storeUint64Fast(&destB.meta, meta|opNextMask)
+								destB.meta = meta | opNextMask
 								break
 							}
 							destB = next
