@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"cmp"
 	"fmt"
 	"runtime"
 	"slices"
@@ -27,7 +28,7 @@ const (
 	defaultKeys         = 10000 // Number of keys
 	warmupRounds        = 3     // Warmup iterations before measurement
 	measureRounds       = 5     // Measurement rounds to average
-	batchSize           = 1     // measure latency per batch to overcome Windows timer precision (~15ms)
+	batchSize           = 5     // measure latency per batch to overcome Windows timer precision (~15ms)
 )
 
 // Helper to create cc maps with optional built-in hasher
@@ -145,7 +146,7 @@ func runLatencyTest(workers, keys, opsPerWorker int, m MapInterface) latencyResu
 				batchLatency := time.Since(batchStart).Nanoseconds()
 				perOpLatency := batchLatency / int64(batchSize) // Average per operation
 
-				if perOpLatency > int64(time.Millisecond) {
+				if perOpLatency > int64(time.Microsecond) {
 					slowOps.Add(1)
 				}
 
@@ -227,7 +228,7 @@ func runWithWarmup(workers, keys, ops int, makeMap func() MapInterface) latencyR
 
 func TestLatencySummary(t *testing.T) {
 	numCPU := runtime.GOMAXPROCS(0)
-	workers := numCPU * 2
+	workers := numCPU * 4
 	keys := defaultKeys
 	ops := defaultOpsPerWorker
 
@@ -258,17 +259,9 @@ func TestLatencySummary(t *testing.T) {
 	}
 
 	// Sort by slowRate (lower is better)
-	slices.SortFunc(results, func(a, b *latencyResult) int {
-		v1 := (a.slowRate) * a.throughput
-		v2 := (b.slowRate) * b.throughput
 
-		if v1 < v2 {
-			return -1
-		}
-		if v1 > v2 {
-			return 1
-		}
-		return 0
+	slices.SortFunc(results, func(a, b *latencyResult) int {
+		return cmp.Compare(a.slowRate, b.slowRate)
 	})
 
 	t.Log("\n=== Results (sorted by slowRate) ===")

@@ -316,11 +316,10 @@ slowPath:
 			meta = loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(*b.At(j)); e != nil {
-					if !opt.EmbeddedHash_ || e.GetHash() == hash {
-						if e.key == key {
-							goto found
-						}
+				e := (*entry_[K, V])(*b.At(j))
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						goto found
 					}
 				}
 			}
@@ -331,10 +330,6 @@ slowPath:
 		}
 		{
 			// Insert
-			newEntry := &entry_[K, V]{key: key, value: value}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
-			}
 
 			// Insert into empty slot
 			b = root
@@ -346,6 +341,10 @@ slowPath:
 					// and this reduces the window where meta is visible but pointer is
 					// still nil
 					emptyIdx := firstMarkedByteIndex(empty)
+					newEntry := &entry_[K, V]{key: key, value: value}
+					if opt.EmbeddedHash_ {
+						newEntry.SetHash(hash)
+					}
 					storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
 					newMeta := setByte(meta, h2v, emptyIdx)
 					if b == root {
@@ -364,6 +363,10 @@ slowPath:
 			}
 
 			// No empty slot, create new bucket and insert
+			newEntry := &entry_[K, V]{key: key, value: value}
+			if opt.EmbeddedHash_ {
+				newEntry.SetHash(hash)
+			}
 			storePtr(&b.next, unsafe.Pointer(&bucket{
 				meta: setByte(metaEmpty, h2v, 0),
 				entries: [entriesPerBucket]unsafe.Pointer{
@@ -670,12 +673,11 @@ slowPath:
 			meta = loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(*b.At(j)); e != nil {
-					if !opt.EmbeddedHash_ || e.GetHash() == hash {
-						if e.key == *key {
-							it.entry.value, it.loaded = e.value, true
-							break findLoop
-						}
+				e := (*entry_[K, V])(*b.At(j))
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == *key {
+						it.entry.value, it.loaded = e.value, true
+						break findLoop
 					}
 				}
 			}
@@ -891,32 +893,30 @@ func (m *Map[K, V]) ComputeRange(
 				meta := loadUint64Fast(&b.meta)
 				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
-					if e := (*entry_[K, V])(*b.At(j)); e != nil {
+					e := (*entry_[K, V])(*b.At(j))
+					it.entry = *e
+					it.op = cancelOp
+					shouldContinue := fn(noEscape(&it))
 
-						it.entry = *e
-						it.op = cancelOp
-						shouldContinue := fn(noEscape(&it))
-
-						switch it.op {
-						case updateOp:
-							newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
-							if opt.EmbeddedHash_ {
-								newEntry.SetHash(e.GetHash())
-							}
-							storePtr(b.At(j), unsafe.Pointer(newEntry))
-						case deleteOp:
-							storePtr(b.At(j), nil)
-							meta = setByte(meta, h2Empty, j)
-							storeUint64(&b.meta, meta)
-							table.AddSize(i, -1)
-						default:
-							// cancelOp: no-op
+					switch it.op {
+					case updateOp:
+						newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
+						if opt.EmbeddedHash_ {
+							newEntry.SetHash(e.GetHash())
 						}
+						storePtr(b.At(j), unsafe.Pointer(newEntry))
+					case deleteOp:
+						storePtr(b.At(j), nil)
+						meta = setByte(meta, h2Empty, j)
+						storeUint64(&b.meta, meta)
+						table.AddSize(i, -1)
+					default:
+						// cancelOp: no-op
+					}
 
-						if !shouldContinue {
-							root.Unlock()
-							return
-						}
+					if !shouldContinue {
+						root.Unlock()
+						return
 					}
 				}
 				if meta&opNextMask == 0 {
@@ -1314,50 +1314,49 @@ func (m *Map[K, V]) copyBucket(
 				meta := loadUint64Fast(&b.meta)
 				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
-					if e := (*entry_[K, V])(*b.At(j)); e != nil {
-						var hash uintptr
-						var h1v int
-						if opt.EmbeddedHash_ {
-							hash = e.GetHash()
-							if m.intKey {
-								h1v = h1IntKey(hash)
-							} else {
-								h1v = h1(hash)
-							}
+					e := (*entry_[K, V])(*b.At(j))
+					var hash uintptr
+					var h1v int
+					if opt.EmbeddedHash_ {
+						hash = e.GetHash()
+						if m.intKey {
+							h1v = h1IntKey(hash)
 						} else {
-							if m.intKey {
-								hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
-								h1v = h1IntKey(hash)
-							} else {
-								hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
-								h1v = h1(hash)
-							}
+							h1v = h1(hash)
 						}
-						idx := mask & h1v
-						destB := newTable.buckets.At(idx)
-						h2v := h2(hash)
-						// Append entry to the destination bucket
-						for {
-							meta := destB.meta
-							if empty := (^meta) & metaMask; empty != 0 {
-								emptyIdx := firstMarkedByteIndex(empty)
-								destB.meta = setByte(meta, h2v, emptyIdx)
-								*destB.At(emptyIdx) = unsafe.Pointer(e)
-								break
-							}
-							next := (*bucket)(destB.next)
-							if next == nil {
-								destB.next = unsafe.Pointer(&bucket{
-									meta:    setByte(metaEmpty, h2v, 0),
-									entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
-								})
-								destB.meta = meta | opNextMask
-								break
-							}
-							destB = next
+					} else {
+						if m.intKey {
+							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
+							h1v = h1IntKey(hash)
+						} else {
+							hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+							h1v = h1(hash)
 						}
-						copied++
 					}
+					idx := mask & h1v
+					destB := newTable.buckets.At(idx)
+					h2v := h2(hash)
+					// Append entry to the destination bucket
+					for {
+						meta := destB.meta
+						if empty := (^meta) & metaMask; empty != 0 {
+							emptyIdx := firstMarkedByteIndex(empty)
+							destB.meta = setByte(meta, h2v, emptyIdx)
+							*destB.At(emptyIdx) = unsafe.Pointer(e)
+							break
+						}
+						next := (*bucket)(destB.next)
+						if next == nil {
+							destB.next = unsafe.Pointer(&bucket{
+								meta:    setByte(metaEmpty, h2v, 0),
+								entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
+							})
+							destB.meta = meta | opNextMask
+							break
+						}
+						destB = next
+					}
+					copied++
 				}
 				if meta&opNextMask == 0 {
 					break
