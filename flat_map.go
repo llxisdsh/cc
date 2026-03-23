@@ -124,8 +124,8 @@ func (m *FlatMap[K, V]) init(
 
 //go:noinline
 func (m *FlatMap[K, V]) slowInit() {
-	rs, ok := m.beginRebuild(mapRebuildBlockWritersHint)
-	if !ok {
+	rs := m.beginRebuild(mapRebuildBlockWritersHint)
+	if rs == nil {
 		rs = (*flatRebuildState[K, V])(loadPtr(&m.rs))
 		if rs != nil {
 			rs.latch.Wait()
@@ -171,13 +171,13 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
 	b := table.buckets.At(idx)
+retry:
 	for {
-		var spins int
-	retry:
+		// var spins int
 		s1, ok := b.seq.BeginRead()
 		if !ok {
-			delay(&spins)
-			goto retry
+			// delay(&spins)
+			continue retry
 		}
 		meta := loadUint64Fast(&b.meta)
 		//goland:noinspection GoBoolExpressions
@@ -186,7 +186,7 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 				j := firstMarkedByteIndex(marked)
 				e := b.At(j).ReadUnfenced()
 				if !b.seq.EndRead(s1) {
-					goto retry
+					continue retry
 				}
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == key {
@@ -207,7 +207,7 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 				cacheCount++
 			}
 			if !b.seq.EndRead(s1) {
-				goto retry
+				continue retry
 			}
 			for i := range cacheCount {
 				e := &cache[i]
@@ -871,14 +871,14 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 	var cacheCount int
 	for i := 0; i <= table.mask; i++ {
 		b := table.buckets.At(i)
+	retry:
 		for {
-			var spins int
-		retry:
+			// var spins int
 			s1, ok := b.seq.BeginRead()
 
 			if !ok {
-				delay(&spins)
-				goto retry
+				// delay(&spins)
+				continue retry
 			}
 			meta = loadUint64Fast(&b.meta)
 			cacheCount = 0
@@ -888,7 +888,7 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 				cacheCount++
 			}
 			if !b.seq.EndRead(s1) {
-				goto retry
+				continue retry
 			}
 			for j := range cacheCount {
 				kv := &cache[j]
@@ -1205,7 +1205,7 @@ func (m *FlatMap[K, V]) rebuild(
 				rs.latch.Wait()
 			}
 		}
-		if rs, ok := m.beginRebuild(rebuildHint); ok {
+		if rs := m.beginRebuild(rebuildHint); rs != nil {
 			fn(noEscape(&MapRebuild[K, V]{f: m}))
 			m.endRebuild(rs)
 			return
@@ -1213,17 +1213,17 @@ func (m *FlatMap[K, V]) rebuild(
 	}
 }
 
-func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) (*flatRebuildState[K, V], bool) {
+func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) *flatRebuildState[K, V] {
 	if loadPtr(&m.rs) != nil {
-		return nil, false
+		return nil
 	}
 	rs := &flatRebuildState[K, V]{
 		hint: hint,
 	}
 	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
-		return nil, false
+		return nil
 	}
-	return rs, true
+	return rs
 }
 
 func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
@@ -1233,12 +1233,8 @@ func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
 
 //go:noinline
 func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
-	// Inline m.beginRebuild(hint)
-	if loadPtr(&m.rs) != nil {
-		return
-	}
-	rs := &flatRebuildState[K, V]{hint: hint}
-	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
+	rs := m.beginRebuild(hint)
+	if rs == nil {
 		return
 	}
 
@@ -1273,45 +1269,29 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
 	}
 
 	cpus := maxProcs()
+	chunks := calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition)
+	rs.chunks.Store(int32(chunks))
 	if newLen*int(unsafe.Sizeof(flatBucket[K, V]{})) >= asyncThreshold || cpus <= 1 {
-		chunks := calcParallelism(table.mask+1, minBucketsPerCPU, cpus*resizeOverPartition)
-		rs.chunks.Store(int32(chunks))
-		// rs.process.Store(0)
-		// rs.completed.Store(0)
-		// rs.newTableSeq.ClearLocked()
-		// Inline newFlatTable
-		sizeLen := calcSizeLen(newLen, cpus)
-		SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
-			buckets:  makeUnsafeSlice[flatBucket[K, V]](newLen),
-			mask:     newLen - 1,
-			size:     makeUnsafeSlice[counterStripe](sizeLen),
-			sizeMask: sizeLen - 1,
-		})
-		m.helpCopyAndWait(rs)
-
+		m.finalizeResize(rs, newLen, cpus)
 	} else {
-		go func(
-			table *flatTable[K, V],
-			newLen int,
-			rs *flatRebuildState[K, V],
-			cpus int,
-		) {
-			chunks := calcParallelism(table.mask+1, minBucketsPerCPU, cpus*resizeOverPartition)
-			rs.chunks.Store(int32(chunks))
-			// rs.process.Store(0)
-			// rs.completed.Store(0)
-			// rs.newTableSeq.ClearLocked()
-			// Inline newFlatTable
-			sizeLen := calcSizeLen(newLen, cpus)
-			SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
-				buckets:  makeUnsafeSlice[flatBucket[K, V]](newLen),
-				mask:     newLen - 1,
-				size:     makeUnsafeSlice[counterStripe](sizeLen),
-				sizeMask: sizeLen - 1,
-			})
-			m.helpCopyAndWait(rs)
-		}(table, newLen, rs, cpus)
+		// The big table, use goroutines to create new table and copy entries
+		go m.finalizeResize(rs, newLen, cpus)
 	}
+}
+
+func (m *FlatMap[K, V]) finalizeResize(rs *flatRebuildState[K, V], newLen int, cpus int) {
+	// rs.process.Store(0)
+	// rs.completed.Store(0)
+	// rs.newTableSeq.ClearLocked()
+	// Inline newFlatTable
+	sizeLen := calcSizeLen(newLen, cpus)
+	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
+		buckets:  makeUnsafeSlice[flatBucket[K, V]](newLen),
+		mask:     newLen - 1,
+		size:     makeUnsafeSlice[counterStripe](sizeLen),
+		sizeMask: sizeLen - 1,
+	})
+	m.helpCopyAndWait(rs)
 }
 
 //go:noinline

@@ -175,8 +175,6 @@ func TestInsert_cc_Map(t *testing.T) {
 	})
 }
 
-type Int int
-
 // func (s Int) HashCode(uintptr) uintptr {
 //	//n := uint64(s)
 //	//return (uintptr)(bits.ReverseBytes64(n))
@@ -198,11 +196,11 @@ func testInsert_cc_Map(
 	time.Sleep(2 * time.Second)
 	runtime.GC()
 
-	var m *cc.Map[Int, int]
+	var m *cc.Map[int, int]
 	if preSize {
-		m = cc.NewMap[Int, int](cc.WithCapacity(total))
+		m = cc.NewMap[int, int](cc.WithCapacity(total))
 	} else {
-		m = cc.NewMap[Int, int]()
+		m = cc.NewMap[int, int]()
 	}
 
 	var wg sync.WaitGroup
@@ -217,10 +215,10 @@ func testInsert_cc_Map(
 			// defer wg.Done()
 			// t.Logf("start, %04d, %04d", start, end)
 			for j := start; j < end; j++ {
-				m.Store(Int(j), j)
+				m.Store(j, j)
 				// m.Compute(
-				// 	Int(j),
-				// 	func(e *cc.MapEntry[Int, int]) {
+				// 	j,
+				// 	func(e *cc.MapEntry[int, int]) {
 				// 		e.Update(j)
 				// 	},
 				// )
@@ -252,7 +250,7 @@ func testInsert_cc_Map(
 	// rand check
 	for i := range 1000 {
 		idx := i * (total / 1000)
-		if val, ok := m.Load(Int(idx)); !ok || val != idx {
+		if val, ok := m.Load(idx); !ok || val != idx {
 			t.Errorf(
 				"Expected value %d at key %d, got %d, exists: %v",
 				idx,
@@ -275,7 +273,7 @@ func testInsert_cc_Map(
 				// defer wg.Done()
 
 				for j := start; j < end; j++ {
-					_, _ = m.Load(Int(j))
+					_, _ = m.Load(j)
 				}
 				wg.Done()
 			}(i*batchSize, min((i+1)*batchSize, total))

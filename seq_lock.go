@@ -297,6 +297,8 @@ func (slot *SeqLockSlot[T]) Ptr() *T {
 // SeqLockRead atomically loads a tear-free snapshot using the external SeqLock.
 // Spins until seq is even and unchanged across two reads; copies the value
 // within the stable window.
+//
+//go:nosplit
 func SeqLockRead[T any](sl *SeqLock, slot *SeqLockSlot[T]) (v T) {
 	if s1, ok := sl.BeginRead(); ok {
 		v = slot.ReadUnfenced()
@@ -307,8 +309,9 @@ func SeqLockRead[T any](sl *SeqLock, slot *SeqLockSlot[T]) (v T) {
 	return slowSeqLockRead(sl, slot)
 }
 
+//go:nosplit
 func slowSeqLockRead[T any](sl *SeqLock, slot *SeqLockSlot[T]) (v T) {
-	var spins int
+	// var spins int
 	for {
 		if s1, ok := sl.BeginRead(); ok {
 			v = slot.ReadUnfenced()
@@ -317,7 +320,7 @@ func slowSeqLockRead[T any](sl *SeqLock, slot *SeqLockSlot[T]) (v T) {
 			}
 			continue
 		}
-		delay(&spins)
+		// delay(&spins)
 	}
 }
 
@@ -347,6 +350,8 @@ func slowSeqLockWrite[T any](sl *SeqLock, slot *SeqLockSlot[T], v T) {
 // SeqLockRead32 atomically loads a tear-free snapshot using the external SeqLock.
 // Spins until seq is even and unchanged across two reads; copies the value
 // within the stable window.
+//
+//go:nosplit
 func SeqLockRead32[T any](sl *SeqLock32, slot *SeqLockSlot[T]) (v T) {
 	if s1, ok := sl.BeginRead(); ok {
 		v = slot.ReadUnfenced()
@@ -357,8 +362,9 @@ func SeqLockRead32[T any](sl *SeqLock32, slot *SeqLockSlot[T]) (v T) {
 	return slowSeqLockRead32(sl, slot)
 }
 
+//go:nosplit
 func slowSeqLockRead32[T any](sl *SeqLock32, slot *SeqLockSlot[T]) (v T) {
-	var spins int
+	// var spins int
 	for {
 		if s1, ok := sl.BeginRead(); ok {
 			v = slot.ReadUnfenced()
@@ -367,7 +373,7 @@ func slowSeqLockRead32[T any](sl *SeqLock32, slot *SeqLockSlot[T]) (v T) {
 			}
 			continue
 		}
-		delay(&spins)
+		// delay(&spins)
 	}
 }
 

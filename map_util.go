@@ -433,35 +433,21 @@ func defaultHasher[K comparable, V any]() (
 	keyHash, valEqual = defaultHasherUsingBuiltIn[K, V]()
 
 	switch any(*new(K)).(type) {
-	case uint, int, uintptr:
-		return keyHash, valEqual, true
-	case uint64, int64:
-		if bitSize == 64 {
-			return keyHash, valEqual, true
-		}
-		return keyHash, valEqual, true
-	case uint32, int32:
-		return keyHash, valEqual, true
-	case uint16, int16:
-		return keyHash, valEqual, true
-	case uint8, int8:
+	case uint, int, uintptr,
+		uint64, int64,
+		uint32, int32,
+		uint16, int16,
+		uint8, int8:
 		return keyHash, valEqual, true
 	default:
 		// for types like integers
 		kType := reflect.TypeFor[K]()
 		switch kType.Kind() {
-		case reflect.Uint, reflect.Int, reflect.Uintptr:
-			return keyHash, valEqual, true
-		case reflect.Int64, reflect.Uint64:
-			if bitSize == 64 {
-				return keyHash, valEqual, true
-			}
-			return keyHash, valEqual, true
-		case reflect.Int32, reflect.Uint32:
-			return keyHash, valEqual, true
-		case reflect.Int16, reflect.Uint16:
-			return keyHash, valEqual, true
-		case reflect.Int8, reflect.Uint8:
+		case reflect.Uint, reflect.Int, reflect.Uintptr,
+			reflect.Int64, reflect.Uint64,
+			reflect.Int32, reflect.Uint32,
+			reflect.Int16, reflect.Uint16,
+			reflect.Int8, reflect.Uint8:
 			return keyHash, valEqual, true
 		default:
 			return keyHash, valEqual, false
