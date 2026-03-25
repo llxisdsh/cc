@@ -274,6 +274,7 @@ type IEqualFunc[T any] interface {
 	EqualFunc(other T) bool
 }
 
+//go:nosplit
 func parseKeyInterface[K comparable]() (keyHash HashFunc) {
 	var k *K
 	if _, ok := any(k).(IHashFunc); ok {
@@ -284,6 +285,7 @@ func parseKeyInterface[K comparable]() (keyHash HashFunc) {
 	return
 }
 
+//go:nosplit
 func parseValueInterface[V any]() (valEqual EqualFunc) {
 	var v *V
 	if _, ok := any(v).(IEqualFunc[V]); ok {

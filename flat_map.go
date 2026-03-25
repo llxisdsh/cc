@@ -117,9 +117,16 @@ func (m *FlatMap[K, V]) init(
 
 	m.seed = uintptr(rand.Uint64())
 	m.shrinkOn = cfg.autoShrink
+	// inline newFlatTable
 	tableLen := calcTableLen(cfg.capacity)
-	SeqLockWriteLocked32(&m.tableSeq, &m.table,
-		newFlatTable[K, V](tableLen, maxProcs()))
+	cpus := maxProcs()
+	sizeLen := calcSizeLen(tableLen, cpus)
+	SeqLockWriteLocked32(&m.tableSeq, &m.table, flatTable[K, V]{
+		buckets:  makeUnsafeSlice[flatBucket[K, V]](tableLen),
+		mask:     tableLen - 1,
+		size:     makeUnsafeSlice[counterStripe](sizeLen),
+		sizeMask: sizeLen - 1,
+	})
 }
 
 //go:noinline
@@ -1283,7 +1290,7 @@ func (m *FlatMap[K, V]) finalizeResize(rs *flatRebuildState[K, V], newLen int, c
 	// rs.process.Store(0)
 	// rs.completed.Store(0)
 	// rs.newTableSeq.ClearLocked()
-	// Inline newFlatTable
+	// inline newFlatTable
 	sizeLen := calcSizeLen(newLen, cpus)
 	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
 		buckets:  makeUnsafeSlice[flatBucket[K, V]](newLen),

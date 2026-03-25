@@ -136,10 +136,20 @@ func (m *Map[K, V]) init(
 	}
 
 	m.seed = uintptr(rand.Uint64())
-	m.minLen = calcTableLen(cfg.capacity)
+	tableLen := calcTableLen(cfg.capacity)
+	m.minLen = tableLen
 	m.shrinkOn = cfg.autoShrink
 
-	table := newMapTable(m.minLen, maxProcs())
+	// inline newMapTable
+	cpus := maxProcs()
+	sizeLen := calcSizeLen(tableLen, cpus)
+	table := &mapTable{
+		buckets:  makeUnsafeSlice[bucket](tableLen),
+		mask:     tableLen - 1,
+		size:     makeUnsafeSlice[counterStripe](sizeLen),
+		sizeMask: sizeLen - 1,
+		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
+	}
 	atomic.StorePointer(&m.table, unsafe.Pointer(table))
 	return table
 }
@@ -1232,7 +1242,7 @@ func (m *Map[K, V]) finalizeResize(
 	newLen int,
 	cpus int,
 ) {
-	// Inline newMapTable(newLen, cpus)
+	// inline newMapTable
 	sizeLen := calcSizeLen(newLen, cpus)
 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(&mapTable{
 		buckets:  makeUnsafeSlice[bucket](newLen),

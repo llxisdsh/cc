@@ -196,11 +196,11 @@ func calcSizeLen(tableLen, cpus int) int {
 // Compatible with both 32-bit and 64-bit systems.
 //
 //go:nosplit
-func nextPowOf2(n int) int {
-	if n <= 0 {
+func nextPowOf2(v int) int {
+	if v <= 0 {
 		return 1
 	}
-	v := n - 1
+	v--
 	v |= v >> 1
 	v |= v >> 2
 	v |= v >> 4
@@ -209,7 +209,8 @@ func nextPowOf2(n int) int {
 	if bitSize == 64 {
 		v |= v >> 32
 	}
-	return v + 1
+	v++
+	return v
 }
 
 // noescape hides a pointer from escape analysis. noescape is
@@ -425,6 +426,7 @@ type (
 	EqualFunc func(ptr unsafe.Pointer, other unsafe.Pointer) bool
 )
 
+//go:nosplit
 func defaultHasher[K comparable, V any]() (
 	keyHash HashFunc,
 	valEqual EqualFunc,
@@ -464,12 +466,13 @@ func defaultHasher[K comparable, V any]() (
 // Notes:
 //   - This implementation relies on Go's internal type representation
 //   - It should be verified for compatibility with each Go version upgrade
+//
+//go:nosplit
 func defaultHasherUsingBuiltIn[K comparable, V any]() (
 	keyHash HashFunc,
 	valEqual EqualFunc,
 ) {
-	var m map[K]V
-	mapType := iTypeOf(m).MapType()
+	mapType := iTypeOf((map[K]V)(nil)).MapType()
 	return mapType.Hasher, mapType.Elem.Equal
 }
 
@@ -510,6 +513,7 @@ type iType struct {
 	PtrToThis iTypeOff // type for pointer to this type, may be zero
 }
 
+//go:nosplit
 func (t *iType) MapType() *iMapType {
 	return (*iMapType)(unsafe.Pointer(t))
 }
@@ -523,6 +527,7 @@ type iMapType struct {
 	Hasher func(unsafe.Pointer, uintptr) uintptr
 }
 
+//go:nosplit
 func iTypeOf(a any) *iType {
 	eface := *(*iEmptyInterface)(unsafe.Pointer(&a))
 	// Types are either static (for compiler-created types) or
