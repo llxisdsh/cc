@@ -45,9 +45,9 @@ const (
 	//   - 32-bit: bucket size becomes 32B → 2/4/8 buckets per
 	//     64/128/256B cache line, also without padding.
 	//
-	// Example outcomes (ptrSize, cacheLineSize → entries):
-	//   (8,  32) → 2  ; (8,  64) → 6 ; (8, 128) → 6 ; (8, 256) → 6
-	//   (4,  32) → 5  ; (4,  64) → 5 ; (4, 128) → 5 ; (4, 256) → 5
+	// Example outcomes (cacheLineSize → entriesPerBucket):
+	//   64bit: 32B → 2; 64B → 6; 128B → 6; 256B → 6
+	//   32bit: 32B → 5; 64B → 5; 128B → 5; 256B → 5
 	pointerSize    = int(unsafe.Sizeof(unsafe.Pointer(nil)))
 	bucketOverhead = int(unsafe.Sizeof(struct {
 		meta uint64

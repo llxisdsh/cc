@@ -282,7 +282,7 @@ func parseKeyInterface[K comparable]() (keyHash HashFunc) {
 			return any((*K)(ptr)).(IHashFunc).HashFunc(seed)
 		}
 	}
-	return
+	return keyHash
 }
 
 //go:nosplit
@@ -293,5 +293,5 @@ func parseValueInterface[V any]() (valEqual EqualFunc) {
 			return any((*V)(ptr)).(IEqualFunc[V]).EqualFunc(*(*V)(other))
 		}
 	}
-	return
+	return valEqual
 }
