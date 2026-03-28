@@ -2,6 +2,7 @@ package cc
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"runtime"
 	"sync"
@@ -2918,10 +2919,7 @@ func TestFlatMap_All(t *testing.T) {
 		m := NewFlatMap[string, int]()
 		m.Store("key1", 100)
 
-		found := make(map[string]int)
-		for k, v := range m.All() {
-			found[k] = v
-		}
+		found := maps.Collect(m.All())
 
 		if len(found) != 1 {
 			t.Errorf("Expected 1 element, got %d", len(found))
@@ -2944,10 +2942,7 @@ func TestFlatMap_All(t *testing.T) {
 		}
 
 		// Iterate using All
-		found := make(map[int]string)
-		for k, v := range m.All() {
-			found[k] = v
-		}
+		found := maps.Collect(m.All())
 
 		// Verify all elements are found
 		if len(found) != len(expected) {
@@ -3003,10 +2998,7 @@ func TestFlatMap_All(t *testing.T) {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				found := make(map[int]string)
-				for k, v := range m.All() {
-					found[k] = v
-				}
+				found := maps.Collect(m.All())
 				results[idx] = found
 			}(i)
 		}
@@ -3088,10 +3080,7 @@ func TestFlatMap_All(t *testing.T) {
 		}
 
 		// Iterate and verify pointer values
-		found := make(map[string]*int)
-		for k, v := range m.All() {
-			found[k] = v
-		}
+		found := maps.Collect(m.All())
 
 		if len(found) != len(values) {
 			t.Errorf("Expected %d elements, got %d", len(values), len(found))
@@ -3118,10 +3107,7 @@ func TestFlatMap_All(t *testing.T) {
 		}
 
 		// Verify all elements through iteration
-		found := make(map[int]int)
-		for k, v := range m.All() {
-			found[k] = v
-		}
+		found := maps.Collect(m.All())
 
 		if len(found) != size {
 			t.Errorf("Expected %d elements, got %d", size, len(found))
@@ -3161,10 +3147,7 @@ func TestFlatMap_All_Compatibility(t *testing.T) {
 	})
 
 	// Collect results from All
-	allResults := make(map[string]int)
-	for k, v := range m.All() {
-		allResults[k] = v
-	}
+	allResults := maps.Collect(m.All())
 
 	// Compare results
 	if len(rangeResults) != len(allResults) {

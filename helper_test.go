@@ -191,7 +191,7 @@ func TestParallelStress(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(iterations)
 
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		go func() {
 			defer wg.Done()
 			// We use a clean background context so only Parallel's internal cancellation is at play
