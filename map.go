@@ -290,8 +290,7 @@ slowPath:
 		if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.table) != nil /*skip init*/ &&
-					loadPtr(&rs.newTable) != nil /*skip newTable is nil*/ {
+				if loadPtr(&rs.newTable) != nil {
 					root.Unlock()
 					m.helpCopyAndWait(rs)
 					table = (*mapTable)(loadPtr(&m.table))
@@ -398,7 +397,7 @@ slowPath:
 				size := table.SumSize()
 				const capFactor = float64(entriesPerBucket) * loadFactor
 				if size >= int(float64(tableLen)*capFactor) {
-					m.tryResize(mapGrowHint, size, 0)
+					m.tryResize(mapGrowHint, tableLen<<1)
 				}
 			}
 			return
@@ -645,8 +644,7 @@ slowPath:
 			if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
 				case mapGrowHint, mapShrinkHint:
-					if loadPtr(&rs.table) != nil /*skip init*/ &&
-						loadPtr(&rs.newTable) != nil /*skip newTable is nil*/ {
+					if loadPtr(&rs.newTable) != nil {
 						root.Unlock()
 						m.helpCopyAndWait(rs)
 						table = (*mapTable)(loadPtr(&m.table))
@@ -774,7 +772,7 @@ slowPath:
 				size := table.SumSize()
 				const capFactor = float64(entriesPerBucket) * loadFactor
 				if size >= int(float64(tableLen)*capFactor) {
-					m.tryResize(mapGrowHint, size, 0)
+					m.tryResize(mapGrowHint, tableLen<<1)
 				}
 			}
 			return it.entry.value, it.loaded
@@ -802,7 +800,7 @@ slowPath:
 						if m.minLen < tableLen {
 							size := table.SumSize()
 							if size < tableLen*entriesPerBucket/shrinkFraction {
-								m.tryResize(mapShrinkHint, size, 0)
+								m.tryResize(mapShrinkHint, tableLen>>1)
 							}
 						}
 					}
@@ -1003,25 +1001,24 @@ func (m *Map[K, V]) Shrink() {
 	if table == nil {
 		return
 	}
-	m.doResize(mapShrinkHint, -1)
+	m.doResize(mapShrinkHint, 0)
 }
 
 func (m *Map[K, V]) doResize(
 	hint mapRebuildHint,
 	sizeAdd int,
 ) {
-	var size int
 	for {
 		// Resize check
 		table := (*mapTable)(loadPtr(&m.table))
 		tableLen := table.mask + 1
+		var newLen int
 		if hint == mapGrowHint {
 			if sizeAdd <= 0 {
 				return
 			}
-			size = table.SumSize()
-			newTableLen := calcTableLen(size + sizeAdd)
-			if tableLen >= newTableLen {
+			newLen = calcTableLen(table.SumSize() + sizeAdd)
+			if newLen <= tableLen {
 				return
 			}
 		} else {
@@ -1029,20 +1026,16 @@ func (m *Map[K, V]) doResize(
 			if tableLen <= m.minLen {
 				return
 			}
-			// Recalculate the shrink size to avoid over-shrinking
-			size = table.SumSize()
-			newTableLen := calcTableLen(size)
-			if tableLen <= newTableLen {
+			newLen = calcTableLen(table.SumSize())
+			if newLen >= tableLen {
 				return
 			}
 		}
-
 		// Help finishing rebuild if needed
 		if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.table) != nil /*skip init*/ &&
-					loadPtr(&rs.newTable) != nil /*skip newTable is nil*/ {
+				if loadPtr(&rs.newTable) != nil {
 					m.helpCopyAndWait(rs)
 				} else {
 					runtime.Gosched()
@@ -1053,7 +1046,9 @@ func (m *Map[K, V]) doResize(
 			}
 		}
 
-		m.tryResize(hint, size, sizeAdd)
+		if m.tryResize(hint, newLen) {
+			return
+		}
 	}
 }
 
@@ -1149,8 +1144,7 @@ func (m *Map[K, V]) rebuild(
 		if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.table) != nil /*skip init*/ &&
-					loadPtr(&rs.newTable) != nil /*skip newTable is nil*/ {
+				if loadPtr(&rs.newTable) != nil {
 					m.helpCopyAndWait(rs)
 				} else {
 					runtime.Gosched()
@@ -1186,48 +1180,29 @@ func (m *Map[K, V]) endRebuild(rs *rebuildState) {
 }
 
 //go:noinline
-func (m *Map[K, V]) tryResize(
-	hint mapRebuildHint,
-	size, sizeAdd int,
-) {
+func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
 	rs := m.beginRebuild(hint)
 	if rs == nil {
-		return
+		return false
 	}
 
 	table := (*mapTable)(loadPtr(&m.table))
 	tableLen := table.mask + 1
-	var newLen int
 	if hint == mapGrowHint {
-		if sizeAdd == 0 {
-			newLen = tableLen << 1 // max(calcTableLen(size), tableLen<<1)
-		} else {
-			newLen = calcTableLen(size + sizeAdd)
-			if newLen <= tableLen {
-				m.endRebuild(rs)
-				return
-			}
+		if newLen <= tableLen {
+			m.endRebuild(rs)
+			return true
 		}
 		atomic.AddUint32(&m.growths, 1)
 	} else {
-		// mapShrinkHint
-		if sizeAdd == 0 {
-			newLen = tableLen >> 1
-			if newLen < m.minLen {
-				m.endRebuild(rs)
-				return
-			}
-		} else {
-			newLen = calcTableLen(size)
-			if newLen >= tableLen {
-				m.endRebuild(rs)
-				return
-			}
+		if newLen >= tableLen || newLen < m.minLen {
+			m.endRebuild(rs)
+			return true
 		}
 		atomic.AddUint32(&m.shrinks, 1)
 	}
 
-	atomic.StorePointer(&rs.table, unsafe.Pointer(table))
+	rs.table = unsafe.Pointer(table)
 	cpus := maxProcs()
 	if newLen*int(unsafe.Sizeof(bucket{})) < asyncThreshold || cpus <= 1 {
 		m.finalizeResize(rs, newLen, cpus)
@@ -1235,6 +1210,7 @@ func (m *Map[K, V]) tryResize(
 		// The big table, use goroutines to create new table and copy entries
 		go m.finalizeResize(rs, newLen, cpus)
 	}
+	return true
 }
 
 func (m *Map[K, V]) finalizeResize(
@@ -1256,11 +1232,11 @@ func (m *Map[K, V]) finalizeResize(
 
 //go:noinline
 func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
-	table := (*mapTable)(loadPtr(&rs.table))
-	oldLen := table.mask + 1
-	chunks := int32(table.chunks)
 	newTable := (*mapTable)(loadPtr(&rs.newTable))
 	newLen := newTable.mask + 1
+	table := (*mapTable)(rs.table)
+	oldLen := table.mask + 1
+	chunks := int32(table.chunks)
 	// Determines the concurrent task range for destination buckets.
 	// We iterate based on the "Destination Constraint" to allow lock-free
 	// writes:

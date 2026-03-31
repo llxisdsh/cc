@@ -445,7 +445,7 @@ slowPath:
 			size := table.SumSize()
 			const capFactor = float64(entriesPerBucket) * loadFactor
 			if size >= int(float64(tableLen)*capFactor) {
-				m.tryResize(mapGrowHint, size, 0)
+				m.tryResize(mapGrowHint, tableLen<<1)
 			}
 		}
 		return
@@ -819,7 +819,7 @@ slowPath:
 				size := table.SumSize()
 				const capFactor = float64(entriesPerBucket) * loadFactor
 				if size >= int(float64(tableLen)*capFactor) {
-					m.tryResize(mapGrowHint, size, 0)
+					m.tryResize(mapGrowHint, tableLen<<1)
 				}
 			}
 			return it.entry.value, it.loaded
@@ -846,7 +846,7 @@ slowPath:
 						if minTableLen < tableLen {
 							size := table.SumSize()
 							if size < tableLen*entriesPerBucket/shrinkFraction {
-								m.tryResize(mapShrinkHint, size, 0)
+								m.tryResize(mapShrinkHint, tableLen>>1)
 							}
 						}
 					}
@@ -1067,22 +1067,21 @@ func (m *FlatMap[K, V]) Shrink() {
 	if table.buckets.ptr == nil {
 		return
 	}
-	m.doResize(mapShrinkHint, -1)
+	m.doResize(mapShrinkHint, 0)
 }
 
 func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
-	var size int
 	for {
 		// Resize check
 		table := SeqLockRead32(&m.tableSeq, &m.table)
 		tableLen := table.mask + 1
+		var newLen int
 		if hint == mapGrowHint {
 			if sizeAdd <= 0 {
 				return
 			}
-			size = table.SumSize()
-			newTableLen := calcTableLen(size + sizeAdd)
-			if tableLen >= newTableLen {
+			newLen = calcTableLen(table.SumSize() + sizeAdd)
+			if newLen <= tableLen {
 				return
 			}
 		} else {
@@ -1090,10 +1089,8 @@ func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
 			if tableLen <= minTableLen {
 				return
 			}
-			// Recalculate the shrink size to avoid over-shrinking
-			size = table.SumSize()
-			newTableLen := calcTableLen(size)
-			if tableLen <= newTableLen {
+			newLen = calcTableLen(table.SumSize())
+			if newLen >= tableLen {
 				return
 			}
 		}
@@ -1111,7 +1108,10 @@ func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
 				rs.latch.Wait()
 			}
 		}
-		m.tryResize(hint, size, sizeAdd)
+
+		if m.tryResize(hint, newLen) {
+			return
+		}
 	}
 }
 
@@ -1239,39 +1239,23 @@ func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
 }
 
 //go:noinline
-func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
+func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
 	rs := m.beginRebuild(hint)
 	if rs == nil {
-		return
+		return false
 	}
 
 	table := m.table.Ptr()
 	tableLen := table.mask + 1
-	var newLen int
 	if hint == mapGrowHint {
-		if sizeAdd == 0 {
-			newLen = tableLen << 1 // max(calcTableLen(size), tableLen<<1)
-		} else {
-			newLen = calcTableLen(size + sizeAdd)
-			if newLen <= tableLen {
-				m.endRebuild(rs)
-				return
-			}
+		if newLen <= tableLen {
+			m.endRebuild(rs)
+			return true
 		}
 	} else {
-		// mapShrinkHint
-		if sizeAdd == 0 {
-			newLen = tableLen >> 1
-			if newLen < minTableLen {
-				m.endRebuild(rs)
-				return
-			}
-		} else {
-			newLen = calcTableLen(size)
-			if newLen >= tableLen {
-				m.endRebuild(rs)
-				return
-			}
+		if newLen >= tableLen || newLen < minTableLen {
+			m.endRebuild(rs)
+			return true
 		}
 	}
 
@@ -1284,6 +1268,7 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, size, sizeAdd int) {
 		// The big table, use goroutines to create new table and copy entries
 		go m.finalizeResize(rs, newLen, cpus)
 	}
+	return true
 }
 
 func (m *FlatMap[K, V]) finalizeResize(rs *flatRebuildState[K, V], newLen int, cpus int) {
