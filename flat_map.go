@@ -129,27 +129,6 @@ func (m *FlatMap[K, V]) init(
 	})
 }
 
-//go:noinline
-func (m *FlatMap[K, V]) slowInit() {
-	rs := m.beginRebuild(mapRebuildBlockWritersHint)
-	if rs == nil {
-		rs = (*flatRebuildState[K, V])(loadPtr(&m.rs))
-		if rs != nil {
-			rs.latch.Wait()
-		}
-		return
-	}
-	// The table may have been altered prior to our changes.
-	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr != nil {
-		m.endRebuild(rs)
-		return
-	}
-	var cfg MapConfig
-	m.init(&cfg)
-	m.endRebuild(rs)
-}
-
 // Load retrieves the value for a key.
 //
 //   - Per-bucket seqlock read; an even and stable sequence yields
@@ -919,6 +898,50 @@ func (m *FlatMap[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
+// Size returns the number of key-value pairs in the map.
+// This operation sums counters across all size stripes for an approximate
+// count.
+func (m *FlatMap[K, V]) Size() int {
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr == nil {
+		return 0
+	}
+
+	return table.SumSize()
+}
+
+// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
+func (m *FlatMap[K, V]) ToMap(limit ...int) map[K]V {
+	l := maxInt
+	if len(limit) != 0 {
+		l = limit[0]
+		if l <= 0 {
+			return map[K]V{}
+		}
+	}
+	a := make(map[K]V, min(m.Size(), l))
+	for k, v := range m.All() {
+		a[k] = v
+		l--
+		if l == 0 {
+			break
+		}
+	}
+	return a
+}
+
+// Entries returns an iterator function for use with range-over-func.
+// It provides the same functionality as ComputeRange but in iterator form.
+//
+//go:nosplit
+func (m *FlatMap[K, V]) Entries(
+	blockWriters ...bool,
+) func(yield func(e *MapEntry[K, V]) bool) {
+	return func(yield func(e *MapEntry[K, V]) bool) {
+		m.ComputeRange(yield, blockWriters...)
+	}
+}
+
 // ComputeRange iterates all entries and applies a user callback.
 //
 // Callback signature:
@@ -999,30 +1022,6 @@ func (m *FlatMap[K, V]) ComputeRange(
 			root.Unlock()
 		}
 	})
-}
-
-// Entries returns an iterator function for use with range-over-func.
-// It provides the same functionality as ComputeRange but in iterator form.
-//
-//go:nosplit
-func (m *FlatMap[K, V]) Entries(
-	blockWriters ...bool,
-) func(yield func(e *MapEntry[K, V]) bool) {
-	return func(yield func(e *MapEntry[K, V]) bool) {
-		m.ComputeRange(yield, blockWriters...)
-	}
-}
-
-// Size returns the number of key-value pairs in the map.
-// This operation sums counters across all size stripes for an approximate
-// count.
-func (m *FlatMap[K, V]) Size() int {
-	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
-		return 0
-	}
-
-	return table.SumSize()
 }
 
 // Clear clears all key-value pairs from the map.
@@ -1115,26 +1114,6 @@ func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
 	}
 }
 
-// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
-func (m *FlatMap[K, V]) ToMap(limit ...int) map[K]V {
-	l := maxInt
-	if len(limit) != 0 {
-		l = limit[0]
-		if l <= 0 {
-			return map[K]V{}
-		}
-	}
-	a := make(map[K]V, min(m.Size(), l))
-	for k, v := range m.All() {
-		a[k] = v
-		l--
-		if l == 0 {
-			break
-		}
-	}
-	return a
-}
-
 // CloneTo copies all key-value pairs from this map to the destination map.
 // The destination map is cleared before copying.
 //
@@ -1218,6 +1197,27 @@ func (m *FlatMap[K, V]) rebuild(
 			return
 		}
 	}
+}
+
+//go:noinline
+func (m *FlatMap[K, V]) slowInit() {
+	rs := m.beginRebuild(mapRebuildBlockWritersHint)
+	if rs == nil {
+		rs = (*flatRebuildState[K, V])(loadPtr(&m.rs))
+		if rs != nil {
+			rs.latch.Wait()
+		}
+		return
+	}
+	// The table may have been altered prior to our changes.
+	table := SeqLockRead32(&m.tableSeq, &m.table)
+	if table.buckets.ptr != nil {
+		m.endRebuild(rs)
+		return
+	}
+	var cfg MapConfig
+	m.init(&cfg)
+	m.endRebuild(rs)
 }
 
 func (m *FlatMap[K, V]) beginRebuild(hint mapRebuildHint) *flatRebuildState[K, V] {

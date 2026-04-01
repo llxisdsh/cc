@@ -140,49 +140,20 @@ func (m *Map[K, V]) init(
 	m.minLen = tableLen
 	m.shrinkOn = cfg.autoShrink
 
-	// inline newMapTable
-	cpus := maxProcs()
+	newTable := newMapTable(tableLen, maxProcs())
+	atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
+	return newTable
+}
+
+func newMapTable(tableLen, cpus int) *mapTable {
 	sizeLen := calcSizeLen(tableLen, cpus)
-	table := &mapTable{
+	return &mapTable{
 		buckets:  makeUnsafeSlice[bucket](tableLen),
 		mask:     tableLen - 1,
 		size:     makeUnsafeSlice[counterStripe](sizeLen),
 		sizeMask: sizeLen - 1,
 		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 	}
-	atomic.StorePointer(&m.table, unsafe.Pointer(table))
-	return table
-}
-
-// slowInit may be called concurrently by multiple goroutines, so it requires
-// synchronization with a "lock" mechanism.
-//
-//go:noinline
-func (m *Map[K, V]) slowInit() *mapTable {
-	rs := m.beginRebuild(mapRebuildBlockWritersHint)
-	if rs == nil {
-		// Another goroutine is initializing, wait for it to complete
-		rs = (*rebuildState)(loadPtr(&m.rs))
-		if rs != nil {
-			rs.latch.Wait()
-		}
-		// Now the table should be initialized
-		return (*mapTable)(loadPtr(&m.table))
-	}
-
-	// Although the table is always changed when rs is not nil,
-	// it might have been changed before that.
-	table := (*mapTable)(loadPtr(&m.table))
-	if table != nil {
-		m.endRebuild(rs)
-		return table
-	}
-
-	// Perform initialization
-	var cfg MapConfig
-	table = m.init(&cfg)
-	m.endRebuild(rs)
-	return table
 }
 
 // Load retrieves a value for the given key, compatible with `sync.Map`.
@@ -853,6 +824,51 @@ func (m *Map[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
+// Size returns the number of key-value pairs in the map.
+// This is an O(1) operation.
+//
+//go:nosplit
+func (m *Map[K, V]) Size() int {
+	table := (*mapTable)(loadPtr(&m.table))
+	if table == nil {
+		return 0
+	}
+	return table.SumSize()
+}
+
+// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
+func (m *Map[K, V]) ToMap(limit ...int) map[K]V {
+	l := maxInt
+	if len(limit) != 0 {
+		l = limit[0]
+		if l <= 0 {
+			return map[K]V{}
+		}
+	}
+
+	a := make(map[K]V, min(m.Size(), l))
+	for k, v := range m.All() {
+		a[k] = v
+		l--
+		if l == 0 {
+			break
+		}
+	}
+	return a
+}
+
+// Entries returns an iterator function for use with range-over-func.
+// It provides the same functionality as ComputeRange but in iterator form.
+//
+//go:nosplit
+func (m *Map[K, V]) Entries(
+	blockWriters ...bool,
+) func(yield func(e *MapEntry[K, V]) bool) {
+	return func(yield func(e *MapEntry[K, V]) bool) {
+		m.ComputeRange(yield, blockWriters...)
+	}
+}
+
 // ComputeRange iterates all entries and applies a user callback.
 //
 // Callback signature:
@@ -935,30 +951,6 @@ func (m *Map[K, V]) ComputeRange(
 			root.Unlock()
 		}
 	})
-}
-
-// Entries returns an iterator function for use with range-over-func.
-// It provides the same functionality as ComputeRange but in iterator form.
-//
-//go:nosplit
-func (m *Map[K, V]) Entries(
-	blockWriters ...bool,
-) func(yield func(e *MapEntry[K, V]) bool) {
-	return func(yield func(e *MapEntry[K, V]) bool) {
-		m.ComputeRange(yield, blockWriters...)
-	}
-}
-
-// Size returns the number of key-value pairs in the map.
-// This is an O(1) operation.
-//
-//go:nosplit
-func (m *Map[K, V]) Size() int {
-	table := (*mapTable)(loadPtr(&m.table))
-	if table == nil {
-		return 0
-	}
-	return table.SumSize()
 }
 
 // Clear compatible with `sync.Map`
@@ -1052,27 +1044,6 @@ func (m *Map[K, V]) doResize(
 	}
 }
 
-// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
-func (m *Map[K, V]) ToMap(limit ...int) map[K]V {
-	l := maxInt
-	if len(limit) != 0 {
-		l = limit[0]
-		if l <= 0 {
-			return map[K]V{}
-		}
-	}
-
-	a := make(map[K]V, min(m.Size(), l))
-	for k, v := range m.All() {
-		a[k] = v
-		l--
-		if l == 0 {
-			break
-		}
-	}
-	return a
-}
-
 // CloneTo copies all key-value pairs from this map to the destination map.
 // The destination map is cleared before copying.
 //
@@ -1096,9 +1067,8 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	clone.minLen = m.minLen
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
-	atomic.StorePointer(&clone.table,
-		unsafe.Pointer(newMapTable(clone.minLen, maxProcs())),
-	)
+	newTable := newMapTable(clone.minLen, maxProcs())
+	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
 
 	// Pre-fetch size to optimize initial capacity
 	clone.Grow(m.Size())
@@ -1163,6 +1133,37 @@ func (m *Map[K, V]) rebuild(
 	}
 }
 
+// slowInit may be called concurrently by multiple goroutines, so it requires
+// synchronization with a "lock" mechanism.
+//
+//go:noinline
+func (m *Map[K, V]) slowInit() *mapTable {
+	rs := m.beginRebuild(mapRebuildBlockWritersHint)
+	if rs == nil {
+		// Another goroutine is initializing, wait for it to complete
+		rs = (*rebuildState)(loadPtr(&m.rs))
+		if rs != nil {
+			rs.latch.Wait()
+		}
+		// Now the table should be initialized
+		return (*mapTable)(loadPtr(&m.table))
+	}
+
+	// Although the table is always changed when rs is not nil,
+	// it might have been changed before that.
+	table := (*mapTable)(loadPtr(&m.table))
+	if table != nil {
+		m.endRebuild(rs)
+		return table
+	}
+
+	// Perform initialization
+	var cfg MapConfig
+	table = m.init(&cfg)
+	m.endRebuild(rs)
+	return table
+}
+
 func (m *Map[K, V]) beginRebuild(hint mapRebuildHint) *rebuildState {
 	if loadPtr(&m.rs) != nil {
 		return nil
@@ -1218,15 +1219,8 @@ func (m *Map[K, V]) finalizeResize(
 	newLen int,
 	cpus int,
 ) {
-	// inline newMapTable
-	sizeLen := calcSizeLen(newLen, cpus)
-	atomic.StorePointer(&rs.newTable, unsafe.Pointer(&mapTable{
-		buckets:  makeUnsafeSlice[bucket](newLen),
-		mask:     newLen - 1,
-		size:     makeUnsafeSlice[counterStripe](sizeLen),
-		sizeMask: sizeLen - 1,
-		chunks:   calcParallelism(newLen, minBucketsPerCPU, cpus*resizeOverPartition),
-	}))
+	newTable := newMapTable(newLen, cpus)
+	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
 	m.helpCopyAndWait(rs)
 }
 
@@ -1340,17 +1334,6 @@ func (m *Map[K, V]) copyBucket(
 	}
 	if copied != 0 {
 		newTable.AddSize(start, copied)
-	}
-}
-
-func newMapTable(tableLen, cpus int) *mapTable {
-	sizeLen := calcSizeLen(tableLen, cpus)
-	return &mapTable{
-		buckets:  makeUnsafeSlice[bucket](tableLen),
-		mask:     tableLen - 1,
-		size:     makeUnsafeSlice[counterStripe](sizeLen),
-		sizeMask: sizeLen - 1,
-		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 	}
 }
 
