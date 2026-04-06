@@ -12,6 +12,8 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/llxisdsh/cc"
+
+	CsMap "github.com/mhmtszr/concurrent-swiss-map"
 )
 
 func Test_MemoryPeakReduction(t *testing.T) {
@@ -169,6 +171,27 @@ func Test_MemoryPeakReduction(t *testing.T) {
 			"alphadose_haxmap memory usage: %d bytes, items: %d",
 			peak,
 			m.Len(),
+		)
+	}
+
+	{
+		var m1, m2 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+
+		m := CsMap.New[int, int]()
+
+		for i := range numItems {
+			m.Store(i, i)
+		}
+
+		runtime.ReadMemStats(&m2)
+		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
+
+		t.Logf(
+			"mhmtszr_CsMap memory usage: %d bytes, items: %d",
+			peak,
+			m.Count(),
 		)
 	}
 }

@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alphadose/haxmap"
 	"github.com/llxisdsh/cc"
+	CsMap "github.com/mhmtszr/concurrent-swiss-map"
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
@@ -87,6 +89,16 @@ type rwShardedMapAdapter struct{ m *RWLockShardedMap[int, int] }
 
 func (a *rwShardedMapAdapter) Store(k, v int)         { a.m.Store(k, v) }
 func (a *rwShardedMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
+
+type haxmapAdapter struct{ m *haxmap.Map[int, int] }
+
+func (a *haxmapAdapter) Store(k, v int)         { a.m.Set(k, v) }
+func (a *haxmapAdapter) Load(k int) (int, bool) { return a.m.Get(k) }
+
+type csMapAdapter struct{ m *CsMap.CsMap[int, int] }
+
+func (a *csMapAdapter) Store(k, v int)         { a.m.Store(k, v) }
+func (a *csMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
 
 // ============================================================================
 // Latency Result
@@ -248,6 +260,8 @@ func TestLatencySummary(t *testing.T) {
 		{"xsync.Map", func() MapInterface { return &xsyncMapAdapter{xsync.NewMap[int, int]()} }},
 		{"cc.Map", func() MapInterface { return &mapAdapter{newMap()} }},
 		{"cc.FlatMap", func() MapInterface { return &flatMapAdapter{newFlatMap()} }},
+		{"alphadose.haxmap", func() MapInterface { return &haxmapAdapter{haxmap.New[int, int]()} }},
+		{"mhmtszr.CsMap", func() MapInterface { return &csMapAdapter{CsMap.New[int, int]()} }},
 	}
 
 	var results []*latencyResult
@@ -266,14 +280,14 @@ func TestLatencySummary(t *testing.T) {
 
 	t.Log("\n=== Results (sorted by slowRate) ===")
 	t.Logf("%-4s | %-16s | %12s | %10s | %10s | %10s | %8s",
-		"Rank", "Implementation", "Throughput", "p99", "p999", "max", "slow%")
+		"Rank", "Implementation", "Throughput", "p99", "p999", "max", "(>1µs)%")
 	t.Logf("-----|------------------|--------------|------------|------------|------------|----------")
 	for i, r := range results {
 		t.Logf("%-4d | %-16s | %10.0f/s | %10s | %10s | %10s | %6.4f%%",
 			i+1, r.name, r.throughput, ms(r.p99), ms(r.p999), ms(r.max), r.slowRate)
 	}
 
-	t.Logf("✓ Best slowRate: %s (%6.4f%%)", results[0].name, results[0].slowRate)
+	t.Logf("✓ Best slowRate(>1µs)%%: %s (%6.4f%%)", results[0].name, results[0].slowRate)
 
 	// Find best throughput
 	best := results[0]
