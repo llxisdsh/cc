@@ -34,7 +34,7 @@ type Map[K comparable, V any] struct {
 	seed     uintptr
 	keyHash  HashFunc  // WithKeyHasher
 	valEqual EqualFunc // WithValueEqual
-	minLen   int       // WithCapacity
+	minLen   uintptr   // WithCapacity
 	shrinkOn bool      // WithAutoShrink
 	intKey   bool
 }
@@ -45,18 +45,18 @@ type rebuildState struct {
 	latch     Latch
 	table     unsafe.Pointer // *mapTable
 	newTable  unsafe.Pointer // *mapTable
-	process   int32
-	completed int32
+	process   uint32
+	completed uint32
 }
 
 // mapTable represents the internal hash table structure.
 type mapTable struct {
 	buckets  unsafeSlice[bucket]
-	mask     int
+	mask     uintptr
 	size     unsafeSlice[counterStripe]
-	sizeMask int
+	sizeMask uintptr
 	// number of chunks and chunks size for resizing
-	chunks int
+	chunks uintptr
 }
 
 // bucket represents a hash table bucket with cache-line alignment.
@@ -145,7 +145,7 @@ func (m *Map[K, V]) init(
 	return newTable
 }
 
-func newMapTable(tableLen, cpus int) *mapTable {
+func newMapTable(tableLen, cpus uintptr) *mapTable {
 	sizeLen := calcSizeLen(tableLen, cpus)
 	return &mapTable{
 		buckets:  makeUnsafeSlice[bucket](tableLen),
@@ -166,7 +166,7 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 	}
 
 	var hash uintptr
-	var h1v int
+	var h1v uintptr
 
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
@@ -207,7 +207,7 @@ func (m *Map[K, V]) Store(key K, value V) {
 	}
 
 	var hash uintptr
-	var h1v int
+	var h1v uintptr
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = h1IntKey(hash)
@@ -288,7 +288,7 @@ slowPath:
 
 		var (
 			meta uint64
-			j    int
+			j    uintptr
 		)
 
 		b := root
@@ -367,7 +367,7 @@ slowPath:
 				tableLen := table.mask + 1
 				size := table.SumSize()
 				const capFactor = float64(entriesPerBucket) * loadFactor
-				if size >= int(float64(tableLen)*capFactor) {
+				if size >= uintptr(float64(tableLen)*capFactor) {
 					m.tryResize(mapGrowHint, tableLen<<1)
 				}
 			}
@@ -561,7 +561,7 @@ func (m *Map[K, V]) compute(
 	}
 
 	var hash uintptr
-	var h1v int
+	var h1v uintptr
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = h1IntKey(hash)
@@ -643,7 +643,7 @@ slowPath:
 
 		var (
 			meta uint64
-			j    int
+			j    uintptr
 		)
 		it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
 		b := root
@@ -742,7 +742,7 @@ slowPath:
 				tableLen := table.mask + 1
 				size := table.SumSize()
 				const capFactor = float64(entriesPerBucket) * loadFactor
-				if size >= int(float64(tableLen)*capFactor) {
+				if size >= uintptr(float64(tableLen)*capFactor) {
 					m.tryResize(mapGrowHint, tableLen<<1)
 				}
 			}
@@ -761,7 +761,7 @@ slowPath:
 				storeUint64(&b.meta, newMeta)
 				root.Unlock()
 			}
-			table.AddSize(idx, -1)
+			table.AddSize(idx, ^uintptr(0))
 
 			// Check if table shrinking is needed
 			if m.shrinkOn {
@@ -797,7 +797,7 @@ func (m *Map[K, V]) Range(yield func(key K, value V) bool) {
 	if table == nil {
 		return
 	}
-	for i := 0; i <= table.mask; i++ {
+	for i := uintptr(0); i <= table.mask; i++ {
 		b := table.buckets.At(i)
 		for {
 			meta := loadUint64(&b.meta)
@@ -833,7 +833,7 @@ func (m *Map[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	return table.SumSize()
+	return int(table.SumSize())
 }
 
 // ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
@@ -909,7 +909,7 @@ func (m *Map[K, V]) ComputeRange(
 		it := MapEntry[K, V]{
 			loaded: true,
 		}
-		for i := 0; i <= table.mask; i++ {
+		for i := uintptr(0); i <= table.mask; i++ {
 			root := table.buckets.At(i)
 			root.Lock()
 			b := root
@@ -933,7 +933,7 @@ func (m *Map[K, V]) ComputeRange(
 						storePtr(b.At(j), nil)
 						meta = setByte(meta, h2Empty, j)
 						storeUint64(&b.meta, meta)
-						table.AddSize(i, -1)
+						table.AddSize(i, ^uintptr(0))
 					default:
 						// cancelOp: no-op
 					}
@@ -983,7 +983,7 @@ func (m *Map[K, V]) Grow(sizeAdd int) {
 	if loadPtr(&m.table) == nil {
 		m.slowInit()
 	}
-	m.doResize(mapGrowHint, sizeAdd)
+	m.doResize(mapGrowHint, uintptr(sizeAdd))
 }
 
 // Shrink reduces the capacity to fit the current size,
@@ -998,13 +998,13 @@ func (m *Map[K, V]) Shrink() {
 
 func (m *Map[K, V]) doResize(
 	hint mapRebuildHint,
-	sizeAdd int,
+	sizeAdd uintptr,
 ) {
 	for {
 		// Resize check
 		table := (*mapTable)(loadPtr(&m.table))
 		tableLen := table.mask + 1
-		var newLen int
+		var newLen uintptr
 		if hint == mapGrowHint {
 			if sizeAdd <= 0 {
 				return
@@ -1181,7 +1181,7 @@ func (m *Map[K, V]) endRebuild(rs *rebuildState) {
 }
 
 //go:noinline
-func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
+func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 	rs := m.beginRebuild(hint)
 	if rs == nil {
 		return false
@@ -1205,7 +1205,7 @@ func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
 
 	rs.table = unsafe.Pointer(table)
 	cpus := maxProcs()
-	if newLen*int(unsafe.Sizeof(bucket{})) < asyncThreshold || cpus <= 1 {
+	if newLen*unsafe.Sizeof(bucket{}) < asyncThreshold || cpus <= 1 {
 		m.finalizeResize(rs, newLen, cpus)
 	} else {
 		// The big table, use goroutines to create new table and copy entries
@@ -1214,11 +1214,7 @@ func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
 	return true
 }
 
-func (m *Map[K, V]) finalizeResize(
-	rs *rebuildState,
-	newLen int,
-	cpus int,
-) {
+func (m *Map[K, V]) finalizeResize(rs *rebuildState, newLen, cpus uintptr) {
 	newTable := newMapTable(newLen, cpus)
 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
 	m.helpCopyAndWait(rs)
@@ -1230,7 +1226,7 @@ func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
 	newLen := newTable.mask + 1
 	table := (*mapTable)(rs.table)
 	oldLen := table.mask + 1
-	chunks := int32(table.chunks)
+	chunks := table.chunks
 	// Determines the concurrent task range for destination buckets.
 	// We iterate based on the "Destination Constraint" to allow lock-free
 	// writes:
@@ -1240,19 +1236,19 @@ func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
 	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
 	// owns the write operations for its assigned destination buckets.
 	baseLen := min(newLen, oldLen)
-	chunkSz := (baseLen + int(chunks) - 1) / int(chunks)
+	chunkSz := (baseLen + (chunks) - 1) / (chunks)
 	for {
-		process := atomic.AddInt32(&rs.process, 1)
+		process := uintptr(atomic.AddUint32(&rs.process, 1))
 		if process > chunks {
 			// Wait copying completed
 			rs.latch.Wait()
 			return
 		}
 		process--
-		start := int(process) * chunkSz
+		start := (process) * chunkSz
 		end := min(start+chunkSz, baseLen)
 		m.copyBucket(table, start, end, oldLen, baseLen, newTable)
-		if atomic.AddInt32(&rs.completed, 1) == chunks {
+		if uintptr(atomic.AddUint32(&rs.completed, 1)) == chunks {
 			// Copying completed
 			atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 			m.endRebuild(rs)
@@ -1263,12 +1259,12 @@ func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
 
 func (m *Map[K, V]) copyBucket(
 	table *mapTable,
-	start, end int,
-	oldLen, baseLen int,
+	start, end uintptr,
+	oldLen, baseLen uintptr,
 	newTable *mapTable,
 ) {
 	mask := newTable.mask
-	copied := 0
+	var copied uintptr
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
 		// In Grow, runs once. In Shrink, runs twice (usually).
@@ -1282,7 +1278,7 @@ func (m *Map[K, V]) copyBucket(
 					j := firstMarkedByteIndex(marked)
 					e := (*entry_[K, V])(*b.At(j))
 					var hash uintptr
-					var h1v int
+					var h1v uintptr
 					if opt.EmbeddedHash_ {
 						hash = e.GetHash()
 						if m.intKey {
@@ -1340,27 +1336,27 @@ func (m *Map[K, V]) copyBucket(
 // AddSize atomically adds delta to the size counter for the given bucket index.
 //
 //go:nosplit
-func (t *mapTable) AddSize(idx, delta int) {
-	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, uintptr(delta))
+func (t *mapTable) AddSize(idx, delta uintptr) {
+	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
 }
 
 // SumSize calculates the total number of entries in the table
 // by summing all counter-stripes.
 //
 //go:nosplit
-func (t *mapTable) SumSize() int {
+func (t *mapTable) SumSize() uintptr {
 	var sum uintptr
-	for i := 0; i <= t.sizeMask; i++ {
+	for i := uintptr(0); i <= t.sizeMask; i++ {
 		sum += loadUintptr(&t.size.At(i).c)
 	}
-	return int(sum)
+	return sum
 }
 
 //go:nosplit
-func (b *bucket) At(i int) *unsafe.Pointer {
+func (b *bucket) At(i uintptr) *unsafe.Pointer {
 	return (*unsafe.Pointer)(unsafe.Add(
 		unsafe.Pointer(&b.entries),
-		uintptr(i)*unsafe.Sizeof(unsafe.Pointer(nil))),
+		i*unsafe.Sizeof(unsafe.Pointer(nil))),
 	)
 }
 

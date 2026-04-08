@@ -97,7 +97,7 @@ func (p *PLocal[T]) Get() *T {
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
-			s := *shards.slice.At(pid)
+			s := *shards.slice.At(uintptr(pid))
 			runtime_procUnpin()
 			return &s.val
 		}
@@ -118,7 +118,7 @@ func (p *PLocal[T]) slowGet() *T {
 			continue
 		}
 		if pid < shards.len {
-			s := *shards.slice.At(pid)
+			s := *shards.slice.At(uintptr(pid))
 			runtime_procUnpin()
 			return &s.val
 		}
@@ -140,7 +140,7 @@ func (p *PLocal[T]) With(fn func(*T)) {
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
-			s := *shards.slice.At(pid)
+			s := *shards.slice.At(uintptr(pid))
 			if opt.Race_ {
 				s.Lock()
 			}
@@ -168,7 +168,7 @@ func (p *PLocal[T]) slowWith(fn func(*T)) {
 			continue
 		}
 		if pid < shards.len {
-			s := *shards.slice.At(pid)
+			s := *shards.slice.At(uintptr(pid))
 			if opt.Race_ {
 				s.Lock()
 			}
@@ -188,7 +188,7 @@ func (p *PLocal[T]) grow(needed int) {
 	p.mu.Lock()
 
 	current := p.shards.Load()
-	currentLen := 0
+	var currentLen int
 	if current != nil {
 		currentLen = current.len
 	}
@@ -209,7 +209,7 @@ func (p *PLocal[T]) grow(needed int) {
 
 	newShards := make([]*pLocalSlot[T], newSize)
 	if current != nil {
-		for i := range currentLen {
+		for i := range uintptr(currentLen) {
 			newShards[i] = *current.slice.At(i)
 		}
 	}
@@ -243,7 +243,7 @@ func (p *PLocal[T]) grow(needed int) {
 func (p *PLocal[T]) ForEach(fn func(*T)) {
 	shards := p.shards.Load()
 	if shards != nil {
-		for i := range shards.len {
+		for i := range uintptr(shards.len) {
 			s := *shards.slice.At(i)
 			fn(&s.val)
 		}
@@ -285,7 +285,7 @@ func (p *PLocalCounter) Add(delta uintptr) {
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
-			s := *shards.slice.At(pid)
+			s := *shards.slice.At(uintptr(pid))
 			s.val.Add(delta)
 			runtime_procUnpin()
 			return
@@ -301,7 +301,7 @@ func (p *PLocalCounter) Value() uintptr {
 	shards := p.shards.Load()
 	var sum uintptr
 	if shards != nil {
-		for i := range shards.len {
+		for i := range uintptr(shards.len) {
 			s := *shards.slice.At(i)
 			sum += s.val.Load()
 		}
@@ -315,7 +315,7 @@ func (p *PLocalCounter) Reset() uintptr {
 	shards := p.shards.Load()
 	var sum uintptr
 	if shards != nil {
-		for i := range shards.len {
+		for i := range uintptr(shards.len) {
 			s := *shards.slice.At(i)
 			sum += s.val.Swap(0)
 		}
@@ -349,7 +349,7 @@ func (p *PLocalCounter64) Add(delta uint64) {
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
-			s := *shards.slice.At(pid)
+			s := *shards.slice.At(uintptr(pid))
 			s.val.Add(delta)
 			runtime_procUnpin()
 			return
@@ -365,7 +365,7 @@ func (p *PLocalCounter64) Value() uint64 {
 	shards := p.shards.Load()
 	var sum uint64
 	if shards != nil {
-		for i := range shards.len {
+		for i := range uintptr(shards.len) {
 			s := *shards.slice.At(i)
 			sum += s.val.Load()
 		}
@@ -379,7 +379,7 @@ func (p *PLocalCounter64) Reset() uint64 {
 	shards := p.shards.Load()
 	var sum uint64
 	if shards != nil {
-		for i := range shards.len {
+		for i := range uintptr(shards.len) {
 			s := *shards.slice.At(i)
 			sum += s.val.Swap(0)
 		}

@@ -5,7 +5,7 @@ import (
 	"unsafe"
 )
 
-func calcEntriesSim(ps, cl int) int {
+func calcEntriesSim(ps, cl uintptr) uintptr {
 	target := min(cl, 32+32*(ps>>3))
 	overhead := 8 + ps
 	if target <= overhead {
@@ -17,9 +17,9 @@ func calcEntriesSim(ps, cl int) int {
 
 func TestEntriesPerBucket_Simulated(t *testing.T) {
 	cases := []struct {
-		ps   int
-		cl   int
-		want int
+		ps   uintptr
+		cl   uintptr
+		want uintptr
 	}{
 		{8, 32, 2},
 		{8, 64, 6},
@@ -48,15 +48,15 @@ func TestEntriesPerBucket_Simulated(t *testing.T) {
 }
 
 func TestEntriesPerBucket_Actual(t *testing.T) {
-	ps := int(unsafe.Sizeof(unsafe.Pointer(nil)))
-	cl := int(cacheLineSize)
+	ps := unsafe.Sizeof(unsafe.Pointer(nil))
+	cl := cacheLineSize
 	exp := calcEntriesSim(ps, cl)
 	if entriesPerBucket != exp {
 		t.Fatalf("entriesPerBucket=%d exp=%d", entriesPerBucket, exp)
 	}
 	size := unsafe.Sizeof(bucket{})
-	overhead := uintptr(8 + ps)
-	want := overhead + uintptr(entriesPerBucket*ps)
+	overhead := 8 + ps
+	want := overhead + entriesPerBucket*ps
 	if size != want {
 		t.Fatalf("bucket size=%d want=%d", size, want)
 	}

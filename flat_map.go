@@ -39,19 +39,19 @@ type FlatMap[K comparable, V any] struct {
 
 type flatRebuildState[K comparable, V any] struct {
 	hint        mapRebuildHint
-	chunks      atomic.Int32
+	chunks      atomic.Uint32
 	newTable    SeqLockSlot[flatTable[K, V]]
 	newTableSeq SeqLock32 // seqlock of new table
-	process     atomic.Int32
-	completed   atomic.Int32
+	process     atomic.Uint32
+	completed   atomic.Uint32
 	latch       Latch
 }
 
 type flatTable[K comparable, V any] struct {
 	buckets  unsafeSlice[flatBucket[K, V]]
-	mask     int
+	mask     uintptr
 	size     unsafeSlice[counterStripe]
-	sizeMask int
+	sizeMask uintptr
 }
 
 type flatBucket[K comparable, V any] struct {
@@ -117,16 +117,9 @@ func (m *FlatMap[K, V]) init(
 
 	m.seed = uintptr(rand.Uint64())
 	m.shrinkOn = cfg.autoShrink
-	// inline newFlatTable
 	tableLen := calcTableLen(cfg.capacity)
-	cpus := maxProcs()
-	sizeLen := calcSizeLen(tableLen, cpus)
-	SeqLockWriteLocked32(&m.tableSeq, &m.table, flatTable[K, V]{
-		buckets:  makeUnsafeSlice[flatBucket[K, V]](tableLen),
-		mask:     tableLen - 1,
-		size:     makeUnsafeSlice[counterStripe](sizeLen),
-		sizeMask: sizeLen - 1,
-	})
+	SeqLockWriteLocked32(&m.tableSeq, &m.table,
+		newFlatTable[K, V](tableLen, maxProcs()))
 }
 
 // Load retrieves the value for a key.
@@ -143,7 +136,7 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 	}
 
 	var hash uintptr
-	var h1v int
+	var h1v uintptr
 
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
@@ -220,7 +213,7 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 	}
 
 	var hash uintptr
-	var h1v int
+	var h1v uintptr
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = h1IntKey(hash)
@@ -336,9 +329,9 @@ slowPath:
 
 		var (
 			oldB      *flatBucket[K, V]
-			oldIdx    int
+			oldIdx    uintptr
 			emptyB    *flatBucket[K, V]
-			emptyIdx  int
+			emptyIdx  uintptr
 			emptyMeta uint64
 		)
 
@@ -423,7 +416,7 @@ slowPath:
 			tableLen := table.mask + 1
 			size := table.SumSize()
 			const capFactor = float64(entriesPerBucket) * loadFactor
-			if size >= int(float64(tableLen)*capFactor) {
+			if size >= uintptr(float64(tableLen)*capFactor) {
 				m.tryResize(mapGrowHint, tableLen<<1)
 			}
 		}
@@ -594,7 +587,7 @@ func (m *FlatMap[K, V]) compute(
 	}
 
 	var hash uintptr
-	var h1v int
+	var h1v uintptr
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = h1IntKey(hash)
@@ -703,10 +696,10 @@ slowPath:
 
 		var (
 			oldB      *flatBucket[K, V]
-			oldIdx    int
+			oldIdx    uintptr
 			oldMeta   uint64
 			emptyB    *flatBucket[K, V]
-			emptyIdx  int
+			emptyIdx  uintptr
 			emptyMeta uint64
 		)
 		it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
@@ -797,7 +790,7 @@ slowPath:
 				tableLen := table.mask + 1
 				size := table.SumSize()
 				const capFactor = float64(entriesPerBucket) * loadFactor
-				if size >= int(float64(tableLen)*capFactor) {
+				if size >= uintptr(float64(tableLen)*capFactor) {
 					m.tryResize(mapGrowHint, tableLen<<1)
 				}
 			}
@@ -816,7 +809,7 @@ slowPath:
 			oldB.seq.EndWriteLocked()
 
 			root.Unlock()
-			table.AddSize(idx, -1)
+			table.AddSize(idx, ^uintptr(0))
 			// Check if table shrinking is needed
 			if m.shrinkOn {
 				if newMeta&metaDataMask == metaEmpty {
@@ -855,7 +848,7 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 	var meta uint64
 	var cache [entriesPerBucket]entry_[K, V]
 	var cacheCount int
-	for i := 0; i <= table.mask; i++ {
+	for i := uintptr(0); i <= table.mask; i++ {
 		b := table.buckets.At(i)
 	retry:
 		for {
@@ -907,7 +900,7 @@ func (m *FlatMap[K, V]) Size() int {
 		return 0
 	}
 
-	return table.SumSize()
+	return int(table.SumSize())
 }
 
 // ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
@@ -982,7 +975,7 @@ func (m *FlatMap[K, V]) ComputeRange(
 		it := MapEntry[K, V]{
 			loaded: true,
 		}
-		for i := 0; i <= table.mask; i++ {
+		for i := uintptr(0); i <= table.mask; i++ {
 			root := table.buckets.At(i)
 			root.Lock()
 			b := root
@@ -1005,7 +998,7 @@ func (m *FlatMap[K, V]) ComputeRange(
 						b.seq.BeginWriteLocked()
 						e.WriteUnfenced(entry_[K, V]{})
 						b.seq.EndWriteLocked()
-						table.AddSize(i, -1)
+						table.AddSize(i, ^uintptr(0))
 					default:
 						// cancelOp: No-op
 					}
@@ -1056,7 +1049,7 @@ func (m *FlatMap[K, V]) Grow(sizeAdd int) {
 	if table.buckets.ptr == nil {
 		m.slowInit()
 	}
-	m.doResize(mapGrowHint, sizeAdd)
+	m.doResize(mapGrowHint, uintptr(sizeAdd))
 }
 
 // Shrink reduces the capacity to fit the current size,
@@ -1069,12 +1062,12 @@ func (m *FlatMap[K, V]) Shrink() {
 	m.doResize(mapShrinkHint, 0)
 }
 
-func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
+func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd uintptr) {
 	for {
 		// Resize check
 		table := SeqLockRead32(&m.tableSeq, &m.table)
 		tableLen := table.mask + 1
-		var newLen int
+		var newLen uintptr
 		if hint == mapGrowHint {
 			if sizeAdd <= 0 {
 				return
@@ -1239,7 +1232,7 @@ func (m *FlatMap[K, V]) endRebuild(rs *flatRebuildState[K, V]) {
 }
 
 //go:noinline
-func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
+func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 	rs := m.beginRebuild(hint)
 	if rs == nil {
 		return false
@@ -1261,8 +1254,8 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
 
 	cpus := maxProcs()
 	chunks := calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition)
-	rs.chunks.Store(int32(chunks))
-	if newLen*int(unsafe.Sizeof(flatBucket[K, V]{})) >= asyncThreshold || cpus <= 1 {
+	rs.chunks.Store(uint32(chunks))
+	if newLen*unsafe.Sizeof(flatBucket[K, V]{}) >= asyncThreshold || cpus <= 1 {
 		m.finalizeResize(rs, newLen, cpus)
 	} else {
 		// The big table, use goroutines to create new table and copy entries
@@ -1271,18 +1264,12 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen int) bool {
 	return true
 }
 
-func (m *FlatMap[K, V]) finalizeResize(rs *flatRebuildState[K, V], newLen int, cpus int) {
+func (m *FlatMap[K, V]) finalizeResize(rs *flatRebuildState[K, V], newLen, cpus uintptr) {
 	// rs.process.Store(0)
 	// rs.completed.Store(0)
 	// rs.newTableSeq.ClearLocked()
-	// inline newFlatTable
-	sizeLen := calcSizeLen(newLen, cpus)
-	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, flatTable[K, V]{
-		buckets:  makeUnsafeSlice[flatBucket[K, V]](newLen),
-		mask:     newLen - 1,
-		size:     makeUnsafeSlice[counterStripe](sizeLen),
-		sizeMask: sizeLen - 1,
-	})
+	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable,
+		newFlatTable[K, V](newLen, cpus))
 	m.helpCopyAndWait(rs)
 }
 
@@ -1309,7 +1296,7 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
 	// owns the write operations for its assigned destination buckets.
 	baseLen := min(newLen, oldLen)
-	chunkSz := (baseLen + int(chunks) - 1) / int(chunks)
+	chunkSz := (baseLen + uintptr(chunks) - 1) / uintptr(chunks)
 	for {
 		process := rs.process.Add(1)
 		if process > chunks {
@@ -1317,7 +1304,7 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 			return
 		}
 		process--
-		start := int(process) * chunkSz
+		start := uintptr(process) * chunkSz
 		end := min(start+chunkSz, baseLen)
 		m.copyBucket(&table, start, end, oldLen, baseLen, &newTable)
 		if rs.completed.Add(1) == chunks {
@@ -1331,12 +1318,12 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 
 func (m *FlatMap[K, V]) copyBucket(
 	table *flatTable[K, V],
-	start, end int,
-	oldLen, baseLen int,
+	start, end uintptr,
+	oldLen, baseLen uintptr,
 	newTable *flatTable[K, V],
 ) {
 	mask := newTable.mask
-	copied := 0
+	var copied uintptr
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
 		// In Grow, runs once. In Shrink, runs twice (usually).
@@ -1350,7 +1337,7 @@ func (m *FlatMap[K, V]) copyBucket(
 					j := firstMarkedByteIndex(marked)
 					e := b.At(j).Ptr()
 					var hash uintptr
-					var h1v int
+					var h1v uintptr
 					if opt.EmbeddedHash_ {
 						hash = e.GetHash()
 						if m.intKey {
@@ -1408,7 +1395,7 @@ func (m *FlatMap[K, V]) copyBucket(
 }
 
 func newFlatTable[K comparable, V any](
-	tableLen, cpus int,
+	tableLen, cpus uintptr,
 ) flatTable[K, V] {
 	sizeLen := calcSizeLen(tableLen, cpus)
 	return flatTable[K, V]{
@@ -1420,24 +1407,24 @@ func newFlatTable[K comparable, V any](
 }
 
 //go:nosplit
-func (t *flatTable[K, V]) AddSize(idx, delta int) {
-	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, uintptr(delta))
+func (t *flatTable[K, V]) AddSize(idx, delta uintptr) {
+	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
 }
 
 //go:nosplit
-func (t *flatTable[K, V]) SumSize() int {
+func (t *flatTable[K, V]) SumSize() uintptr {
 	var sum uintptr
-	for i := 0; i <= t.sizeMask; i++ {
+	for i := uintptr(0); i <= t.sizeMask; i++ {
 		sum += loadUintptr(&t.size.At(i).c)
 	}
-	return int(sum)
+	return sum
 }
 
 //go:nosplit
-func (b *flatBucket[K, V]) At(i int) *SeqLockSlot[entry_[K, V]] {
+func (b *flatBucket[K, V]) At(i uintptr) *SeqLockSlot[entry_[K, V]] {
 	return (*SeqLockSlot[entry_[K, V]])(unsafe.Add(
 		unsafe.Pointer(&b.entries),
-		uintptr(i)*unsafe.Sizeof(SeqLockSlot[entry_[K, V]]{}),
+		i*unsafe.Sizeof(SeqLockSlot[entry_[K, V]]{}),
 	))
 }
 

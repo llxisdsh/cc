@@ -30,33 +30,33 @@ import (
 type mapStats struct {
 	// RootBuckets is the number of root buckets in the hash table.
 	// Each bucket holds a few entries.
-	RootBuckets int
+	RootBuckets uintptr
 	// TotalBuckets is the total number of buckets in the hash table,
 	// including root and their chained buckets. Each bucket holds
 	// a few entries.
-	TotalBuckets int
+	TotalBuckets uintptr
 	// EmptyBuckets is the number of buckets that hold no entries.
-	EmptyBuckets int
+	EmptyBuckets uintptr
 	// Capacity is the Map capacity, i.e., the total number of
 	// entries that all buckets can physically hold. This number
 	// does not consider the load factor.
-	Capacity int
+	Capacity uintptr
 	// Size is the exact number of entries stored in the map.
-	Size int
+	Size uintptr
 	// Counter is the number of entries stored in the map according
 	// to the internal atomic counter. In the case of concurrent map
 	// modifications, this number may be different from Size.
-	Counter int
+	Counter uintptr
 	// CounterLen is the number of internal atomic counter stripes.
 	// This number may grow with the map capacity to improve
 	// multithreaded scalability.
-	CounterLen int
+	CounterLen uintptr
 	// MinEntries is the minimum number of entries per a chain of
 	// buckets, i.e., a root bucket and its chained buckets.
-	MinEntries int
+	MinEntries uintptr
 	// MinEntries is the maximum number of entries per a chain of
 	// buckets, i.e., a root bucket and its chained buckets.
-	MaxEntries int
+	MaxEntries uintptr
 	// TotalGrowths is the number of times the hash table grew.
 	TotalGrowths uint32
 	// TotalGrowths is the number of times the hash table shrunk.
@@ -98,12 +98,12 @@ func (m *Map[K, V]) stats() *mapStats {
 	stats.RootBuckets = table.mask + 1
 	stats.Counter = table.SumSize()
 	stats.CounterLen = table.sizeMask + 1
-	for i := 0; i <= table.mask; i++ {
-		entries := 0
+	for i := uintptr(0); i <= table.mask; i++ {
+		var entries uintptr
 		b := table.buckets.At(i)
 		for {
 			stats.TotalBuckets++
-			entriesLocal := 0
+			var entriesLocal uintptr
 			stats.Capacity += entriesPerBucket
 
 			meta := loadUint64(&b.meta)
@@ -893,14 +893,14 @@ func TestMapConcurrentReadWriteStress(t *testing.T) {
 }
 
 func TestMapCalcLen(t *testing.T) {
-	var tableLen, growTableLen, sizeLen, parallelism, lastTableLen, lastGrowTableLen, lastSizeLen, lastParallelism int
-	cpus := runtime.GOMAXPROCS(0)
+	var tableLen, growTableLen, sizeLen, parallelism, lastTableLen, lastGrowTableLen, lastSizeLen, lastParallelism uintptr
+	cpus := uintptr(runtime.GOMAXPROCS(0))
 	t.Log("runtime.GOMAXPROCS(0),", cpus)
-	for i := range 1000000 {
+	for i := range uintptr(1000000) {
 		tableLen = calcTableLen(i)
 		sizeLen = calcSizeLen(i, cpus)
 		// const capFactor = float64(entriesPerBucket) * mapLoadFactor
-		growThreshold := int(
+		growThreshold := uintptr(
 			float64(tableLen*entriesPerBucket) * loadFactor,
 		)
 		growTableLen = calcTableLen(growThreshold)
@@ -3544,7 +3544,7 @@ func TestMapClear(t *testing.T) {
 }
 
 func TestNewMapPresized(t *testing.T) {
-	var capacity, expectedCap int
+	var capacity, expectedCap uintptr
 	capacity, expectedCap = NewMap[string, string]().stats().
 		Capacity, defaultMinMapTableCap
 	if capacity != expectedCap {
@@ -3636,7 +3636,7 @@ func TestNewMapPresized(t *testing.T) {
 
 func TestNewMapPresized_DoesNotShrinkBelowMinLen(t *testing.T) {
 	const minLen = 1024
-	const numEntries = int(minLen*float64(entriesPerBucket)*loadFactor) - entriesPerBucket
+	const numEntries = int(minLen*float64(entriesPerBucket)*loadFactor) - int(entriesPerBucket)
 	m := NewMap[int, int](WithCapacity(numEntries), WithAutoShrink())
 	for i := range 2 * numEntries {
 		m.Store(i, i)
@@ -3661,7 +3661,7 @@ func TestNewMapPresized_DoesNotShrinkBelowMinLen(t *testing.T) {
 
 func TestNewMapGrowOnly_OnlyShrinksOnClear(t *testing.T) {
 	const minLen = 128
-	const numEntries = minLen * entriesPerBucket
+	const numEntries = int(minLen * entriesPerBucket)
 	m := NewMap[int, int](WithCapacity(numEntries))
 
 	stats := m.stats()
@@ -3769,7 +3769,7 @@ func TestMapResize_CounterLenLimit(t *testing.T) {
 	if stats.Size != numEntries {
 		t.Fatalf("size was too small: %d", stats.Size)
 	}
-	maxCounterLen := runtime.GOMAXPROCS(0) * 2
+	maxCounterLen := uintptr(runtime.GOMAXPROCS(0)) * 2
 	if stats.CounterLen > maxCounterLen {
 		t.Fatalf("number of counter stripes was too large: %d, expected: %d",
 			stats.CounterLen, maxCounterLen)
@@ -3838,7 +3838,7 @@ func parallelRandTypedResizer(
 
 func TestMapParallelResize(t *testing.T) {
 	const numIters = 1_000
-	const numEntries = 2 * entriesPerBucket * minTableLen
+	const numEntries = int(2 * entriesPerBucket * minTableLen)
 	m := NewMap[string, int]()
 	cdone := make(chan bool)
 	go parallelRandTypedResizer(t, m, numIters, numEntries, cdone)
@@ -6007,7 +6007,7 @@ func TestMap_UnlockWithMeta(t *testing.T) {
 		key := "test"
 		hash := m.keyHash(unsafe.Pointer(&key), m.seed)
 		table := (*mapTable)(atomic.LoadPointer(&m.table))
-		bucketIdx := int(hash) & table.mask
+		bucketIdx := hash & table.mask
 		bucket := table.buckets.At(bucketIdx)
 
 		// Lock the bucket first

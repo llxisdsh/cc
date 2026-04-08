@@ -48,12 +48,12 @@ const (
 	// Example outcomes (cacheLineSize → entriesPerBucket):
 	//   64bit: 32B → 2; 64B → 6; 128B → 6; 256B → 6
 	//   32bit: 32B → 5; 64B → 5; 128B → 5; 256B → 5
-	pointerSize    = int(unsafe.Sizeof(unsafe.Pointer(nil)))
-	bucketOverhead = int(unsafe.Sizeof(struct {
+	pointerSize    = unsafe.Sizeof(unsafe.Pointer(nil))
+	bucketOverhead = unsafe.Sizeof(struct {
 		meta uint64
 		next unsafe.Pointer
-	}{}))
-	maxBucketBytes   = min(int(cacheLineSize), 32+32*(pointerSize/8))
+	}{})
+	maxBucketBytes   = min(cacheLineSize, 32+32*(pointerSize/8))
 	entriesPerBucket = min(opByteIdx, (maxBucketBytes-bucketOverhead)/pointerSize)
 
 	// Metadata constants for bucket entry management
@@ -107,10 +107,10 @@ const (
 	computeSkipIfNotFound                   // fast path: skip lock if key not found
 )
 
-var maxProcs_ = runtime.GOMAXPROCS(0)
+var maxProcs_ = uintptr(max(runtime.GOMAXPROCS(0), 1))
 
 //go:nosplit
-func maxProcs() int {
+func maxProcs() uintptr {
 	return maxProcs_
 }
 
@@ -156,7 +156,7 @@ type counterStripe struct {
 //   - chunks: Suggested degree of parallelism (number of goroutines).
 //
 //go:nosplit
-func calcParallelism(items, threshold, cpus int) int {
+func calcParallelism(items, threshold, cpus uintptr) uintptr {
 	if items <= threshold {
 		return 1
 	}
@@ -169,15 +169,15 @@ func calcParallelism(items, threshold, cpus int) int {
 // return value must be a power of 2
 //
 //go:nosplit
-func calcTableLen(capacity int) int {
-	tableLen := minTableLen
-	const minThreshold = int(float64(minTableLen*entriesPerBucket) * loadFactor)
+func calcTableLen(capacity uintptr) uintptr {
+	tableLen := uintptr(minTableLen)
+	const minThreshold = uintptr(float64(minTableLen*entriesPerBucket) * loadFactor)
 	if capacity >= minThreshold {
 		const invFactor = 1.0 / (float64(entriesPerBucket) * loadFactor)
 		// +entriesPerBucket-1 is used to compensate for calculation
 		// inaccuracies
 		tableLen = nextPowOf2(
-			int(float64(capacity+entriesPerBucket-1) * invFactor),
+			uintptr(float64(capacity+entriesPerBucket-1) * invFactor),
 		)
 	}
 	return tableLen
@@ -187,7 +187,7 @@ func calcTableLen(capacity int) int {
 // return value must be a power of 2
 //
 //go:nosplit
-func calcSizeLen(tableLen, cpus int) int {
+func calcSizeLen(tableLen, cpus uintptr) uintptr {
 	return nextPowOf2(min(cpus, tableLen>>10))
 }
 
@@ -196,7 +196,7 @@ func calcSizeLen(tableLen, cpus int) int {
 // Compatible with both 32-bit and 64-bit systems.
 //
 //go:nosplit
-func nextPowOf2(v int) int {
+func nextPowOf2(v uintptr) uintptr {
 	if v <= 0 {
 		return 1
 	}
@@ -264,7 +264,7 @@ func intHash[K any](ptr unsafe.Pointer) uintptr {
 	case 1:
 		return uintptr(*(*uint8)(ptr))
 	default:
-		return 0
+		panic("unreachable")
 	}
 }
 
@@ -273,13 +273,13 @@ func intHash[K any](ptr unsafe.Pointer) uintptr {
 // This allows branch-free extraction for all key types.
 //
 //go:nosplit
-func h1(h uintptr) int {
-	return int(h) >> h2Bits
+func h1(h uintptr) uintptr {
+	return h >> h2Bits
 }
 
 //go:nosplit
-func h1IntKey(h uintptr) int {
-	return int(h) / entriesPerBucket
+func h1IntKey(h uintptr) uintptr {
+	return h / entriesPerBucket
 }
 
 // h2 extracts the byte-level hash for in-bucket lookups.
@@ -308,8 +308,8 @@ func broadcast(b uint8) uint64 {
 //   - The index (0-7) of the first marked byte in the uint64
 //
 //go:nosplit
-func firstMarkedByteIndex(w uint64) int {
-	return bits.TrailingZeros64(w) >> 3
+func firstMarkedByteIndex(w uint64) uintptr {
+	return uintptr(bits.TrailingZeros64(w)) >> 3
 }
 
 // markZeroBytes implements SWAR (SIMD Within A Register) byte search.
@@ -335,7 +335,7 @@ func markZeroBytes(w uint64) uint64 {
 // Returns the modified uint64 value.
 //
 //go:nosplit
-func setByte(w uint64, b uint8, idx int) uint64 {
+func setByte(w uint64, b uint8, idx uintptr) uint64 {
 	shift := idx << 3
 	return (w &^ (0xff << shift)) | (uint64(b) << shift)
 }
@@ -350,7 +350,7 @@ type unsafeSlice[T any] struct {
 	ptr unsafe.Pointer
 }
 
-func makeUnsafeSlice[T any](len int) unsafeSlice[T] {
+func makeUnsafeSlice[T any](len uintptr) unsafeSlice[T] {
 	return unsafeSlice[T]{ptr: unsafe.Pointer(unsafe.SliceData(make([]T, len)))}
 }
 
@@ -360,8 +360,8 @@ func toUnsafeSlice[T any](s []T) unsafeSlice[T] {
 }
 
 //go:nosplit
-func (s unsafeSlice[T]) At(i int) *T {
-	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*new(T))*uintptr(i)))
+func (s unsafeSlice[T]) At(i uintptr) *T {
+	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*new(T))*i))
 }
 
 // ============================================================================
