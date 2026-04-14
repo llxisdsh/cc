@@ -12,8 +12,8 @@ github.com/dolthub/maphash v0.1.0 h1:bsQ7JsF4FkkWyrP3oCnFJgrCUAFbFf3kOl4L/QxPDyQ
 github.com/dolthub/maphash v0.1.0/go.mod h1:gkg4Ch4CdCDu5h6PMriVLawB7koZ+5ijb9puGMV50a4=
 github.com/fufuok/cmap v1.19.3 h1:Wz6mi3iWgrkogA3LZ1gConCRvWAbrsQtF15OVHD2y1E=
 github.com/fufuok/cmap v1.19.3/go.mod h1:whMZvNp+7EOJUSB1Ohmw3s7jOxJLbGSw3JbGRjz6wtM=
-github.com/mhmtszr/concurrent-swiss-map v1.0.9 h1:ijAlVG/QHC4A4FRdfdtq0oRJ03Zx9dsF8RSiBQB/gKk=
-github.com/mhmtszr/concurrent-swiss-map v1.0.9/go.mod h1:F6QETL48Qn7jEJ3ZPt7EqRZjAAZu7lRQeQGIzXuUIDc=
+github.com/mhmtszr/concurrent-swiss-map v1.0.10 h1:TUckxzIdpZGm1rEgaWDZuLIwLuCaCtjN9YZWL/3Cl8c=
+github.com/mhmtszr/concurrent-swiss-map v1.0.10/go.mod h1:F6QETL48Qn7jEJ3ZPt7EqRZjAAZu7lRQeQGIzXuUIDc=
 github.com/orcaman/concurrent-map/v2 v2.0.1 h1:jOJ5Pg2w1oeB6PeDurIYf6k9PQ+aTITr/6lP/L/zp6c=
 github.com/orcaman/concurrent-map/v2 v2.0.1/go.mod h1:9Eq3TG2oBe5FirmYWQfYO5iH1q0Jv47PLaNK++uCdOM=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
@@ -28,8 +28,8 @@ github.com/zhangyunhao116/skipmap v0.10.1 h1:CMH4yGZQESBM1kUNozQqQ+Ra2pKqwF3HxaT
 github.com/zhangyunhao116/skipmap v0.10.1/go.mod h1:CClnLPHl3DI+hHgrcy0OZ/QJ45AWgA3ObVcQyJop12c=
 golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 h1:kx6Ds3MlpiUHKj7syVnbp57++8WpuKPcR5yjLBjvLEA=
 golang.org/x/exp v0.0.0-20240823005443-9b4947da3948/go.mod h1:akd2r19cwCdwSwWeIdzYQGa/EZZyqcOdwWiwj5L5eKQ=
-golang.org/x/sync v0.19.0 h1:vV+1eWNmZ5geRlYjzm2adRgW2/mcpevXNg50YZtPCE4=
-golang.org/x/sync v0.19.0/go.mod h1:9KTHXmSnoGruLpwFjVSX0lNNA75CykiMECbovNTZqGI=
+golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
 golang.org/x/sys v0.41.0 h1:Ivj+2Cp/ylzLiEU89QhWblYnOE9zerudt9Ftecq2C6k=
 golang.org/x/sys v0.41.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=

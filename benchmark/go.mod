@@ -1,17 +1,19 @@
 module github.com/llxisdsh/cc/benchmark
 
-go 1.24.0
+go 1.25.0
+
+replace github.com/llxisdsh/cc => ../
 
 require (
 	github.com/Snawoot/lfmap v0.1.1
 	github.com/alphadose/haxmap v1.4.1
 	github.com/fufuok/cmap v1.19.3
 	github.com/llxisdsh/cc v0.0.0
-	github.com/mhmtszr/concurrent-swiss-map v1.0.9
+	github.com/mhmtszr/concurrent-swiss-map v1.0.10
 	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/puzpuzpuz/xsync/v4 v4.4.0
 	github.com/zhangyunhao116/skipmap v0.10.1
-	golang.org/x/sync v0.19.0
+	golang.org/x/sync v0.20.0
 )
 
 require (
@@ -22,5 +24,3 @@ require (
 	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 )
-
-replace github.com/llxisdsh/cc => ../

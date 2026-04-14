@@ -26,16 +26,11 @@ const (
 	countLoad        = min(1_000_000, countStore)
 )
 
-func mixRand(i int) int {
-	return i & (8 - 1)
-	// return (key * 11400714819323198485) >> 32 // 2^64/φ
-}
-
 // ------------------------------------------------------
 
-func BenchmarkStore_cc_FlatMap(b *testing.B) {
+func BenchmarkStore_cc_FunnelMap(b *testing.B) {
 	b.ReportAllocs()
-	m := cc.NewFlatMap[int, int]()
+	m := cc.NewFunnelMap[int, int]()
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -50,9 +45,9 @@ func BenchmarkStore_cc_FlatMap(b *testing.B) {
 	})
 }
 
-func BenchmarkLoadOrStore_cc_FlatMap(b *testing.B) {
+func BenchmarkLoadOrStore_cc_FunnelMap(b *testing.B) {
 	b.ReportAllocs()
-	m := cc.NewFlatMap[int, int]()
+	m := cc.NewFunnelMap[int, int]()
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -67,9 +62,10 @@ func BenchmarkLoadOrStore_cc_FlatMap(b *testing.B) {
 	})
 }
 
-func BenchmarkLoad_cc_FlatMap(b *testing.B) {
+func BenchmarkLoad_cc_FunnelMap(b *testing.B) {
 	b.ReportAllocs()
-	m := cc.NewFlatMap[int, int]()
+	m := cc.NewFunnelMap[int, int]()
+
 	for i := range countLoad {
 		m.Store(i, i)
 	}
@@ -87,9 +83,9 @@ func BenchmarkLoad_cc_FlatMap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_cc_FlatMap(b *testing.B) {
+func BenchmarkDelete_cc_FunnelMap(b *testing.B) {
 	b.ReportAllocs()
-	m := cc.NewFlatMap[int, int]()
+	m := cc.NewFunnelMap[int, int]()
 	for i := range countLoad {
 		m.Store(i, i)
 	}
@@ -99,18 +95,9 @@ func BenchmarkMixed_cc_FlatMap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, _ = m.LoadOrStore(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -174,7 +161,7 @@ func BenchmarkLoad_cc_Map(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_cc_Map(b *testing.B) {
+func BenchmarkDelete_cc_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewMap[int, int]()
 	for i := range countLoad {
@@ -186,18 +173,86 @@ func BenchmarkMixed_cc_Map(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, _ = m.LoadOrStore(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
+				i = 0
+			}
+		}
+	})
+}
+
+// ------------------------------------------------------
+
+func BenchmarkStore_cc_FlatMap(b *testing.B) {
+	b.ReportAllocs()
+	m := cc.NewFlatMap[int, int]()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			m.Store(i, i)
+			i++
+			if i >= countStore {
+				i = 0
+			}
+		}
+	})
+}
+
+func BenchmarkLoadOrStore_cc_FlatMap(b *testing.B) {
+	b.ReportAllocs()
+	m := cc.NewFlatMap[int, int]()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_, _ = m.LoadOrStore(i, i)
+			i++
+			if i >= countLoadOrStore {
+				i = 0
+			}
+		}
+	})
+}
+
+func BenchmarkLoad_cc_FlatMap(b *testing.B) {
+	b.ReportAllocs()
+	m := cc.NewFlatMap[int, int]()
+	for i := range countLoad {
+		m.Store(i, i)
+	}
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_, _ = m.Load(i)
+			i++
+			if i >= countLoad {
+				i = 0
+			}
+		}
+	})
+}
+
+func BenchmarkDelete_cc_FlatMap(b *testing.B) {
+	b.ReportAllocs()
+	m := cc.NewFlatMap[int, int]()
+	for i := range countLoad {
+		m.Store(i, i)
+	}
+	runtime.GC()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			m.Delete(i)
+			i++
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -260,7 +315,7 @@ func BenchmarkLoad_xsync_Map(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_xsync_Map(b *testing.B) {
+func BenchmarkDelete_xsync_Map(b *testing.B) {
 	b.ReportAllocs()
 	m := xsync.NewMap[int, int]()
 	for i := range countLoad {
@@ -272,18 +327,9 @@ func BenchmarkMixed_xsync_Map(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, _ = m.LoadOrStore(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -346,7 +392,7 @@ func BenchmarkLoad_RWLockShardedMap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_RWLockShardedMap(b *testing.B) {
+func BenchmarkDelete_RWLockShardedMap(b *testing.B) {
 	b.ReportAllocs()
 	m := NewRWLockShardedMap[int, int](runtime.GOMAXPROCS(0) * 4)
 	for i := range countLoad {
@@ -358,18 +404,9 @@ func BenchmarkMixed_RWLockShardedMap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, _ = m.LoadOrStore(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -431,7 +468,7 @@ func BenchmarkLoad_original_syncMap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_original_syncMap(b *testing.B) {
+func BenchmarkDelete_original_syncMap(b *testing.B) {
 	b.ReportAllocs()
 	var m sync.Map
 	for i := range countLoad {
@@ -443,18 +480,9 @@ func BenchmarkMixed_original_syncMap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, _ = m.LoadOrStore(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -517,7 +545,7 @@ func BenchmarkLoad_alphadose_haxmap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_alphadose_haxmap(b *testing.B) {
+func BenchmarkDelete_alphadose_haxmap(b *testing.B) {
 	b.ReportAllocs()
 	m := haxmap.New[int, int]()
 	for i := range countLoad {
@@ -529,18 +557,9 @@ func BenchmarkMixed_alphadose_haxmap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Set(i, i)
-			case 1:
-				m.Del(i)
-			case 2:
-				_, _ = m.GetOrSet(i, i)
-			default:
-				_, _ = m.Get(i)
-			}
+			m.Del(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -603,7 +622,7 @@ func BenchmarkLoad_zhangyunhao116_skipmap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_zhangyunhao116_skipmap(b *testing.B) {
+func BenchmarkDelete_zhangyunhao116_skipmap(b *testing.B) {
 	b.ReportAllocs()
 	m := skipmap.New[int, int]()
 	for i := range countLoad {
@@ -615,18 +634,9 @@ func BenchmarkMixed_zhangyunhao116_skipmap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, _ = m.LoadOrStore(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -689,7 +699,7 @@ func BenchmarkMixed_zhangyunhao116_skipmap(b *testing.B) {
 // 	})
 // }
 //
-// func BenchmarkMixed_riraccuia_ash(b *testing.B) {
+// func BenchmarkDelete_riraccuia_ash(b *testing.B) {
 // 	b.ReportAllocs()
 // 	m := new(ash.Map).From(ash.NewSkipList(32))
 // 	for i := 0; i < countLoad; i++ {
@@ -774,7 +784,7 @@ func BenchmarkLoad_fufuok_cmap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_fufuok_cmap(b *testing.B) {
+func BenchmarkDelete_fufuok_cmap(b *testing.B) {
 	b.ReportAllocs()
 	m := cmap.NewOf[int, int]()
 	for i := range countLoad {
@@ -786,18 +796,9 @@ func BenchmarkMixed_fufuok_cmap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Set(i, i)
-			case 1:
-				m.Remove(i)
-			case 2:
-				_ = m.SetIfAbsent(i, i)
-			default:
-				_, _ = m.Get(i)
-			}
+			m.Remove(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -862,7 +863,7 @@ func BenchmarkLoad_mhmtszr_concurrent_swiss_map(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_mhmtszr_concurrent_swiss_map(b *testing.B) {
+func BenchmarkDelete_mhmtszr_concurrent_swiss_map(b *testing.B) {
 	b.ReportAllocs()
 	m := csmap.New(csmap.WithShardCount[int, int](32))
 	for i := range countLoad {
@@ -874,18 +875,9 @@ func BenchmarkMixed_mhmtszr_concurrent_swiss_map(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				m.SetIfAbsent(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -1016,7 +1008,7 @@ func BenchmarkLoad_orcaman_concurrent_map(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_orcaman_concurrent_map(b *testing.B) {
+func BenchmarkDelete_orcaman_concurrent_map(b *testing.B) {
 	b.ReportAllocs()
 	m := orcaman_map.NewWithCustomShardingFunction[int, int](
 		func(key int) uint32 {
@@ -1032,18 +1024,9 @@ func BenchmarkMixed_orcaman_concurrent_map(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Set(i, i)
-			case 1:
-				m.Remove(i)
-			case 2:
-				m.SetIfAbsent(i, i)
-			default:
-				_, _ = m.Get(i)
-			}
+			m.Remove(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -1164,7 +1147,7 @@ func BenchmarkLoad_snawoot_lfmap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_snawoot_lfmap(b *testing.B) {
+func BenchmarkDelete_snawoot_lfmap(b *testing.B) {
 	b.ReportAllocs()
 	m := lfmap.New[int, int]()
 	for i := range countLoad {
@@ -1176,21 +1159,9 @@ func BenchmarkMixed_snawoot_lfmap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Set(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, ok := m.Get(i)
-				if !ok {
-					m.Set(i, i)
-				}
-			default:
-				_, _ = m.Get(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -1253,7 +1224,7 @@ func BenchmarkLoad_RWLockMap(b *testing.B) {
 	})
 }
 
-func BenchmarkMixed_RWLockMap(b *testing.B) {
+func BenchmarkDelete_RWLockMap(b *testing.B) {
 	b.ReportAllocs()
 	m := NewRWLockMap[int, int]()
 	for i := range countLoad {
@@ -1265,18 +1236,9 @@ func BenchmarkMixed_RWLockMap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch mixRand(i) {
-			case 0:
-				m.Store(i, i)
-			case 1:
-				m.Delete(i)
-			case 2:
-				_, _ = m.LoadOrStore(i, i)
-			default:
-				_, _ = m.Load(i)
-			}
+			m.Delete(i)
 			i++
-			if i >= countLoad<<1 {
+			if i >= countLoad {
 				i = 0
 			}
 		}
@@ -1335,7 +1297,7 @@ func BenchmarkLoad_stdMap(b *testing.B) {
 	}
 }
 
-func BenchmarkMixed_stdMap(b *testing.B) {
+func BenchmarkDelete_stdMap(b *testing.B) {
 	b.ReportAllocs()
 	m := make(map[int]int)
 	for i := range countLoad {
@@ -1345,20 +1307,9 @@ func BenchmarkMixed_stdMap(b *testing.B) {
 
 	var i int
 	for b.Loop() {
-		switch mixRand(i) {
-		case 0:
-			m[i] = i
-		case 1:
-			delete(m, i)
-		case 2:
-			if _, ok := m[i]; !ok {
-				m[i] = i
-			}
-		default:
-			_, _ = m[i]
-		}
 		i++
-		if i >= countLoad<<1 {
+		delete(m, i)
+		if i >= countLoad {
 			i = 0
 		}
 	}

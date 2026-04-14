@@ -194,4 +194,46 @@ func Test_MemoryPeakReduction(t *testing.T) {
 			m.Count(),
 		)
 	}
+
+	{
+		var m1, m2 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+
+		m := cc.NewFunnelMap[int, int]()
+
+		for i := range numItems {
+			m.Store(i, i)
+		}
+
+		runtime.ReadMemStats(&m2)
+		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
+
+		t.Logf(
+			"cc_FunnelMap memory usage: %d bytes, items: %d",
+			peak,
+			m.Size(),
+		)
+	}
+
+	{
+		var m1, m2 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+
+		m := cc.NewSkipMap[int, int]()
+
+		for i := range numItems {
+			m.Store(i, i)
+		}
+
+		runtime.ReadMemStats(&m2)
+		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
+
+		t.Logf(
+			"cc_SkipMap memory usage: %d bytes, items: %d",
+			peak,
+			m.Size(),
+		)
+	}
 }
