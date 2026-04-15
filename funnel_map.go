@@ -34,14 +34,12 @@ type fRebuildState struct {
 
 // fMapTable represents the internal hash table structure.
 type fMapTable[K cmp.Ordered, V any] struct {
-	buckets  unsafeSlice[fBucket]
-	mask     uintptr
-	size     unsafeSlice[counterStripe]
-	sizeMask uintptr
+	buckets unsafeSlice[fBucket]
+	mask    uintptr
+	size    PLocalCounter
 	// number of chunks and chunks size for resizing
 	chunks   uintptr
 	overflow *SkipMap[K, V]
-
 	// overflowWriters tracks in-flight lock-free overflow writers
 	overflowWriters int32
 }
@@ -111,15 +109,13 @@ func (m *FunnelMap[K, V]) init(
 }
 
 func newFunnelMapTable[K cmp.Ordered, V any](tableLen, cpus uintptr) *fMapTable[K, V] {
-	sizeLen := calcSizeLen(tableLen, cpus)
-	return &fMapTable[K, V]{
+	table := &fMapTable[K, V]{
 		buckets:  makeUnsafeSlice[fBucket](tableLen),
 		mask:     tableLen - 1,
-		size:     makeUnsafeSlice[counterStripe](sizeLen),
-		sizeMask: sizeLen - 1,
 		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 		overflow: NewSkipMap[K, V](),
 	}
+	return table
 }
 
 // Load retrieves a value for the given key.
@@ -975,7 +971,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 //
 //go:nosplit
 func (t *fMapTable[K, V]) AddSize(idx, delta uintptr) {
-	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
+	t.size.Add(delta)
 }
 
 // SumSize calculates the total number of entries in the table
@@ -983,11 +979,7 @@ func (t *fMapTable[K, V]) AddSize(idx, delta uintptr) {
 //
 //go:nosplit
 func (t *fMapTable[K, V]) SumSize() uintptr {
-	var sum uintptr
-	for i := uintptr(0); i <= t.sizeMask; i++ {
-		sum += loadUintptr(&t.size.At(i).c)
-	}
-	return sum
+	return t.size.Value()
 }
 
 //go:nosplit

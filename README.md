@@ -16,10 +16,12 @@ go get github.com/llxisdsh/cc
 
 State-of-the-art concurrent map implementations, streamlined from [**llxisdsh/pb**](https://github.com/llxisdsh/pb).
 
-| Component     | Description                                                                      | Ideal Use Case                         |
-|---------------|----------------------------------------------------------------------------------|----------------------------------------|
-| **`Map`**     | **Lock-free reads**, fine-grained write locking. Drop-in `sync.Map` replacement. | General purpose, mixed R/W workloads.  |
-| **`FlatMap`** | **Seqlock-based**, open-addressing with inline storage.                          | Read-heavy, cache-sensitive scenarios. |
+| Component       | Description                                                                      | Ideal Use Case                            |
+|-----------------|----------------------------------------------------------------------------------|-------------------------------------------|
+| **`Map`**       | **Lock-free reads**, fine-grained write locking. Drop-in `sync.Map` replacement. | General purpose, mixed R/W workloads.     |
+| **`FlatMap`**   | **Seqlock-based**, open-addressing with inline storage.                          | Read-heavy, cache-sensitive scenarios.    |
+| **`SkipMap`**   | **Lock-free**, scalable concurrent skip list mapping keys to values.             | Highly concurrent, ordered iteration.     |
+| **`FunnelMap`** | **High-throughput**, uses SkipMap for collisions, PLocal counter for size.       | Extreme collision rates, high-throughput. |
 
 > **Note**: These components retain the core high-performance logic of `llxisdsh/pb` but are packaged here for lightweight integration. For comprehensive benchmarks and advanced architectural details, please refer to the [upstream repository](https://github.com/llxisdsh/pb).
 
@@ -106,7 +108,15 @@ func main() {
     fm := cc.NewFlatMap[string, int](cc.WithCapacity(1000))
     fm.Store("bar", 2)
 
-    // 3. Compute (Atomic Read-Modify-Write)
+    // 3. SkipMap (Lock-free, ordered concurrent skip list)
+    sm := cc.NewSkipMap[string, int]()
+    sm.Store("baz", 3)
+
+    // 4. FunnelMap (High-throughput, extreme collision resilience)
+    funnel := cc.NewFunnelMap[string, int]()
+    funnel.Store("qux", 4)
+
+    // 5. Compute (Atomic Read-Modify-Write)
     // Safe, lock-free coordination for complex state changes
     m.Compute("foo", func(e *cc.MapEntry[string, int]) {
         if e.Loaded() {
@@ -118,7 +128,7 @@ func main() {
         }
     })
 
-    // 4. Rebuild (Atomic transaction)
+    // 6. Rebuild (Atomic transaction)
     // Safe, Multiple operations as single atomic transaction
     m.Rebuild(func(r *cc.MapRebuild[string, int]) {
         r.Store("new", 1)

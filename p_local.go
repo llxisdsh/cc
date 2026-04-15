@@ -188,49 +188,49 @@ func (p *PLocal[T]) grow(needed int) {
 	p.mu.Lock()
 
 	current := p.shards.Load()
-	var currentLen int
+	var currentLen uintptr
 	if current != nil {
-		currentLen = current.len
+		currentLen = uintptr(current.len)
 	}
-	if needed <= currentLen {
+	if uintptr(needed) <= currentLen {
 		p.mu.Unlock()
 		return // Already grown by someone else
 	}
 
 	// Double the size or at least satisfy needed
-	newSize := max(needed, currentLen*2)
+	newSize := max(uintptr(needed), currentLen*2)
 	// If current is nil (first grow), ensure we start with at least GOMAXPROCS
 	if current == nil {
-		initN := runtime.GOMAXPROCS(0)
+		initN := uintptr(runtime.GOMAXPROCS(0))
 		if initN > newSize {
 			newSize = initN
 		}
 	}
 
-	newShards := make([]*pLocalSlot[T], newSize)
+	newShards := makeUnsafeSlice[*pLocalSlot[T]](newSize)
 	if current != nil {
-		for i := range uintptr(currentLen) {
-			newShards[i] = *current.slice.At(i)
+		for i := range currentLen {
+			*newShards.At(i) = *current.slice.At(i)
 		}
 	}
 
 	// Allocate new slots in a contiguous block for better locality
 	addedCount := newSize - currentLen
-	newBacking := make([]pLocalSlot[T], addedCount)
+	newBacking := makeUnsafeSlice[pLocalSlot[T]](addedCount)
 
 	for i := range addedCount {
 		if p.provider != nil {
-			newBacking[i].val = p.provider()
+			newBacking.At(i).val = p.provider()
 		}
 		// Calculate the target index in the new shards slice
 		idx := currentLen + i
 		// Store the pointer to the slot in the backing array
-		newShards[idx] = &newBacking[i]
+		*newShards.At(idx) = newBacking.At(i)
 	}
 
 	p.shards.Store(&pLocalShards[T]{
-		slice: toUnsafeSlice(newShards),
-		len:   newSize,
+		slice: newShards,
+		len:   int(newSize),
 	})
 	p.mu.Unlock()
 }

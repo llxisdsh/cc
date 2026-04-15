@@ -424,7 +424,7 @@ func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		}
 
 		created := newSkipNode(key, value, lvl)
-		for i := 0; i < lvl; i++ {
+		for i := range lvl {
 			created.setNext(i, nexts[i])
 			prevs[i].setNext(i, created)
 		}
@@ -481,7 +481,7 @@ func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loade
 
 		v := newValFn()
 		created := newSkipNode(key, v, lvl)
-		for i := 0; i < lvl; i++ {
+		for i := range lvl {
 			created.setNext(i, nexts[i])
 			prevs[i].setNext(i, created)
 		}

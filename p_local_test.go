@@ -551,16 +551,16 @@ func TestPLocalCounter64_Reset(t *testing.T) {
 // 1. Mutex
 type PerfMutexCounter struct {
 	mu  sync.Mutex
-	val int64
+	val uintptr
 }
 
-func (c *PerfMutexCounter) Add(delta int64) {
+func (c *PerfMutexCounter) Add(delta uintptr) {
 	c.mu.Lock()
 	c.val += delta
 	c.mu.Unlock()
 }
 
-func (c *PerfMutexCounter) Value() int64 {
+func (c *PerfMutexCounter) Value() uintptr {
 	c.mu.Lock()
 	rv := c.val
 	c.mu.Unlock()
@@ -569,65 +569,75 @@ func (c *PerfMutexCounter) Value() int64 {
 
 // 1. Pure Atomic Counter
 type PerfAtomicCounter struct {
-	v atomic.Int64
+	v atomic.Uintptr
 }
 
-func (c *PerfAtomicCounter) Add(delta int64) {
+func (c *PerfAtomicCounter) Add(delta uintptr) {
 	c.v.Add(delta)
 }
 
-func (c *PerfAtomicCounter) Value() int64 {
+func (c *PerfAtomicCounter) Value() uintptr {
 	return c.v.Load()
 }
 
 // 2. Sharded Counter (Simulating mapTable's strategy)
 type PerfShardedCounter struct {
-	stripes []counterStripe
+	stripes unsafeSlice[counterStripe]
 	mask    uintptr
 }
 
-func NewPerfShardedCounter(shards int) *PerfShardedCounter {
+func NewPerfShardedCounter(shards uintptr) *PerfShardedCounter {
 	// shards must be power of 2
 	return &PerfShardedCounter{
-		stripes: make([]counterStripe, shards),
-		mask:    uintptr(shards - 1),
+		stripes: makeUnsafeSlice[counterStripe](shards),
+		mask:    shards - 1,
 	}
 }
 
-//go:nosplit
-func (c *PerfShardedCounter) Add(delta int64) {
+func (c *PerfShardedCounter) Add(delta uintptr) {
 	idx := uintptr(runtime_cheaprand()) & c.mask
-	atomic.AddUintptr(&c.stripes[idx].c, uintptr(delta))
+	atomic.AddUintptr(&c.stripes.At(idx).c, delta)
 }
 
-func (c *PerfShardedCounter) Value() int64 {
-	var sum int64
-	for i := range c.stripes {
-		sum += int64(c.stripes[i].c)
+func (c *PerfShardedCounter) Value() uintptr {
+	var sum uintptr
+	for i := range c.mask + 1 {
+		sum += c.stripes.At(i).c
 	}
 	return sum
 }
 
 // 3. PLocal Counter
 type PerfPLocalCounter struct {
-	p *PLocal[int64]
+	p    *PLocal[uintptr]
+	mask uintptr // Just added for comparison with ShardedCounter's benchmark.
 }
 
 func NewPerfPLocalCounter() *PerfPLocalCounter {
 	return &PerfPLocalCounter{
-		p: NewPLocal(func() int64 { return 0 }),
+		p:    NewPLocal(func() uintptr { return 0 }),
+		mask: 1, // Just added for comparison with ShardedCounter's benchmark.
 	}
 }
 
-func (c *PerfPLocalCounter) Add(delta int64) {
-	c.p.With(func(v *int64) {
+// Benchmark version: includes hash masking to match ShardedCounter's overhead
+func (c *PerfPLocalCounter) Add(delta uintptr) {
+	delta |= uintptr(runtime_cheaprand()) & c.mask
+	c.p.With(func(v *uintptr) {
 		*v += delta
 	})
 }
 
-func (c *PerfPLocalCounter) Value() int64 {
-	var sum int64
-	c.p.ForEach(func(v *int64) {
+// Is the actual implementation without benchmark overhead
+func (c *PerfPLocalCounter) AddReal(delta uintptr) {
+	c.p.With(func(v *uintptr) {
+		*v += delta
+	})
+}
+
+func (c *PerfPLocalCounter) Value() uintptr {
+	var sum uintptr
+	c.p.ForEach(func(v *uintptr) {
 		sum += *v
 	})
 	return sum
@@ -635,21 +645,30 @@ func (c *PerfPLocalCounter) Value() int64 {
 
 // 3.5 PLocalCounter Counter (Specialized)
 type PerfPLocalUintptrCounter struct {
-	p *PLocalCounter
+	p    *PLocalCounter
+	mask uintptr // Just added for comparison with ShardedCounter's benchmark.
 }
 
 func NewPerfPLocalUintptrCounter() *PerfPLocalUintptrCounter {
 	return &PerfPLocalUintptrCounter{
-		p: NewPLocalCounter(),
+		p:    NewPLocalCounter(),
+		mask: 1, // Just added for comparison with ShardedCounter's benchmark.
 	}
 }
 
-func (c *PerfPLocalUintptrCounter) Add(delta int64) {
-	c.p.Add(uintptr(delta))
+// Benchmark version: includes hash masking to match ShardedCounter's overhead
+func (c *PerfPLocalUintptrCounter) Add(delta uintptr) {
+	delta |= uintptr(runtime_cheaprand()) & c.mask
+	c.p.Add(delta)
 }
 
-func (c *PerfPLocalUintptrCounter) Value() int64 {
-	return int64(c.p.Value())
+// Is the actual implementation without benchmark overhead
+func (c *PerfPLocalUintptrCounter) AddReal(delta uintptr) {
+	c.p.Add(delta)
+}
+
+func (c *PerfPLocalUintptrCounter) Value() uintptr {
+	return c.p.Value()
 }
 
 // --- Benchmarks ---
@@ -672,8 +691,11 @@ func BenchmarkPerfCounter_Atomic(b *testing.B) {
 	})
 }
 
-func BenchmarkPerfCounter_Sharded_32(b *testing.B) {
-	c := NewPerfShardedCounter(32)
+func BenchmarkPerfCounter_Sharded_1xCPUs(b *testing.B) {
+	cpus := runtime.GOMAXPROCS(0)
+	shards := nextPowOf2(uintptr(cpus))
+	c := NewPerfShardedCounter(shards)
+
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			c.Add(1)
@@ -683,11 +705,7 @@ func BenchmarkPerfCounter_Sharded_32(b *testing.B) {
 
 func BenchmarkPerfCounter_Sharded_4xCPUs(b *testing.B) {
 	cpus := runtime.GOMAXPROCS(0)
-	// Round up to power of 2
-	shards := 1
-	for shards < cpus*4 { // 4x over-provisioning like map
-		shards <<= 1
-	}
+	shards := nextPowOf2(uintptr(cpus)) * 4
 	c := NewPerfShardedCounter(shards)
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -696,6 +714,7 @@ func BenchmarkPerfCounter_Sharded_4xCPUs(b *testing.B) {
 	})
 }
 
+// Benchmark version: includes hash masking to match ShardedCounter's overhead
 func BenchmarkPerfCounter_PLocal(b *testing.B) {
 	c := NewPerfPLocalCounter()
 	b.RunParallel(func(pb *testing.PB) {
@@ -705,6 +724,7 @@ func BenchmarkPerfCounter_PLocal(b *testing.B) {
 	})
 }
 
+// Benchmark version: includes hash masking to match ShardedCounter's overhead
 func BenchmarkPerfCounter_PLocalUintptr(b *testing.B) {
 	c := NewPerfPLocalUintptrCounter()
 	b.RunParallel(func(pb *testing.PB) {
@@ -714,23 +734,22 @@ func BenchmarkPerfCounter_PLocalUintptr(b *testing.B) {
 	})
 }
 
-// 4. Comparison: map.go internal AddSize simulation
-// map.go uses a known index. This is much faster than PLocal or Random Sharding.
-// We should simulate this specific usage pattern.
-
-func BenchmarkPerfCounter_MapInternal_KnownIndex(b *testing.B) {
-	// Simulate map structure
-	cpus := runtime.GOMAXPROCS(0)
-	shards := 1
-	for shards < cpus*1 {
-		shards <<= 1
-	}
-	c := NewPerfShardedCounter(shards)
-
+// Is the actual implementation without benchmark overhead
+func BenchmarkPerfCounter_PLocal_Real(b *testing.B) {
+	c := NewPerfPLocalCounter()
 	b.RunParallel(func(pb *testing.PB) {
-		idx := uintptr(runtime_cheaprand()) & c.mask
 		for pb.Next() {
-			atomic.AddUintptr(&c.stripes[idx].c, 1)
+			c.AddReal(1)
+		}
+	})
+}
+
+// Is the actual implementation without benchmark overhead
+func BenchmarkPerfCounter_PLocalUintptr_Real(b *testing.B) {
+	c := NewPerfPLocalUintptrCounter()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			c.AddReal(1)
 		}
 	})
 }
@@ -748,8 +767,8 @@ func TestPerfCounters(t *testing.T) {
 
 	runners := []struct {
 		name string
-		add  func(int64)
-		val  func() int64
+		add  func(uintptr)
+		val  func() uintptr
 	}{
 		{"Mutex", c1.Add, c1.Value},
 		{"Atomic", c2.Add, c2.Value},

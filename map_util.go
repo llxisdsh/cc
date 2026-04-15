@@ -264,7 +264,7 @@ func intHash[K any](ptr unsafe.Pointer) uintptr {
 	case 1:
 		return uintptr(*(*uint8)(ptr))
 	default:
-		panic("unreachable")
+		return 0
 	}
 }
 
@@ -341,7 +341,7 @@ func setByte(w uint64, b uint8, idx uintptr) uint64 {
 }
 
 // ============================================================================
-// Slice Utilities
+// Slice and Array Utilities
 // ============================================================================
 
 // unsafeSlice provides semi-ergonomic limited slice-like functionality
@@ -350,15 +350,22 @@ type unsafeSlice[T any] struct {
 	ptr unsafe.Pointer
 }
 
+// makeUnsafeSlice creates a new unsafeSlice with the specified length.
+//
+//go:nosplit
 func makeUnsafeSlice[T any](len uintptr) unsafeSlice[T] {
 	return unsafeSlice[T]{ptr: unsafe.Pointer(unsafe.SliceData(make([]T, len)))}
 }
 
+// toUnsafeSlice converts a pointer to a fixed-size slice/array into an unsafeSlice.
+//
 //go:nosplit
-func toUnsafeSlice[T any](s []T) unsafeSlice[T] {
-	return unsafeSlice[T]{ptr: unsafe.Pointer(unsafe.SliceData(s))}
+func toUnsafeSlice[T any](ptr *T) unsafeSlice[T] {
+	return unsafeSlice[T]{ptr: unsafe.Pointer(ptr)}
 }
 
+// At returns a pointer to the i-th element of the slice without bounds checking.
+//
 //go:nosplit
 func (s unsafeSlice[T]) At(i uintptr) *T {
 	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*new(T))*i))

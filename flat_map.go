@@ -179,17 +179,18 @@ retry:
 			// This prevents Double-Free / Use-After-Free bugs in strict mode
 			// that occurred with the previous iterative loop.
 			var cache [entriesPerBucket]entry_[K, V]
-			var cacheCount int
+			var cacheCount uintptr
+			unsafeCache := toUnsafeSlice(&cache[0])
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				cache[cacheCount] = b.At(j).ReadUnfenced()
+				*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
 				cacheCount++
 			}
 			if !b.seq.EndRead(s1) {
 				continue retry
 			}
-			for i := range cacheCount {
-				e := &cache[i]
+			for j := range cacheCount {
+				e := unsafeCache.At(j)
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == key {
 						return e.value, true
@@ -260,17 +261,18 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 				}
 			} else {
 				var cache [entriesPerBucket]entry_[K, V]
-				var cacheCount int
+				var cacheCount uintptr
+				unsafeCache := toUnsafeSlice(&cache[0])
 				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
-					cache[cacheCount] = b.At(j).ReadUnfenced()
+					*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
 					cacheCount++
 				}
 				if !b.seq.EndRead(s1) {
 					goto slowPath
 				}
-				for i := range cacheCount {
-					e := &cache[i]
+				for j := range cacheCount {
+					e := unsafeCache.At(j)
 					if !opt.EmbeddedHash_ || e.GetHash() == hash {
 						if e.key == key {
 							// valEqual: skip write if value unchanged
@@ -628,17 +630,18 @@ func (m *FlatMap[K, V]) compute(
 				}
 			} else {
 				var cache [entriesPerBucket]entry_[K, V]
-				var cacheCount int
+				var cacheCount uintptr
+				unsafeCache := toUnsafeSlice(&cache[0])
 				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
-					cache[cacheCount] = b.At(j).ReadUnfenced()
+					*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
 					cacheCount++
 				}
 				if !b.seq.EndRead(s1) {
 					goto slowPath
 				}
-				for i := range cacheCount {
-					e := &cache[i]
+				for j := range cacheCount {
+					e := unsafeCache.At(j)
 					if !opt.EmbeddedHash_ || e.GetHash() == hash {
 						if e.key == *key {
 							if flags&computeSkipIfFound != 0 {
@@ -847,7 +850,7 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 
 	var meta uint64
 	var cache [entriesPerBucket]entry_[K, V]
-	var cacheCount int
+	var cacheCount uintptr
 	for i := uintptr(0); i <= table.mask; i++ {
 		b := table.buckets.At(i)
 	retry:
@@ -861,16 +864,17 @@ func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 			}
 			meta = loadUint64Fast(&b.meta)
 			cacheCount = 0
+			unsafeCache := toUnsafeSlice(&cache[0])
 			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				cache[cacheCount] = b.At(j).ReadUnfenced()
+				*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
 				cacheCount++
 			}
 			if !b.seq.EndRead(s1) {
 				continue retry
 			}
 			for j := range cacheCount {
-				kv := &cache[j]
+				kv := unsafeCache.At(j)
 				if !yield(kv.key, kv.value) {
 					return
 				}
