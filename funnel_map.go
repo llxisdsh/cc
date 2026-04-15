@@ -10,6 +10,13 @@ import (
 	"github.com/llxisdsh/cc/internal/opt"
 )
 
+// FunnelMap is a high-throughput, concurrent-safe hash map that leverages a
+// SkipMap as its collision resolution mechanism. By combining the cache-friendly
+// inline storage of a hash table with the lock-free ordered overflow management
+// of a skip list, it retains the fast-path advantages of a traditional Map while
+// exhibiting extreme resilience and sustained throughput even under pathological
+// hash collision rates. It incorporates a PLocal counter to minimize global
+// contention, pushing sequential throughput near hardware limits.
 type FunnelMap[K cmp.Ordered, V any] struct {
 	_        noCopy
 	table    unsafe.Pointer // *hMapTable
@@ -52,7 +59,7 @@ type fBucket struct {
 	entries [fEntriesPerBucket]unsafe.Pointer // *opt.Entry_
 }
 
-// NewFunnelMap creates a new HMap instance. Direct initialization is also
+// NewFunnelMap creates a new FunnelMap instance. Direct initialization is also
 // supported.
 //
 // Parameters:
