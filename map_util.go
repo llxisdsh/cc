@@ -369,7 +369,7 @@ func toUnsafeSlice[T any](ptr *T) unsafeSlice[T] {
 //
 //go:nosplit
 func (s unsafeSlice[T]) At(i uintptr) *T {
-	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*new(T))*i))
+	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*(*T)(nil))*i))
 }
 
 //nolint:unused

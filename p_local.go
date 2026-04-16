@@ -242,11 +242,12 @@ func (p *PLocal[T]) grow(needed int) {
 // For counters, consider using atomic types (e.g. atomic.Int64) as T.
 func (p *PLocal[T]) ForEach(fn func(*T)) {
 	shards := p.shards.Load()
-	if shards != nil {
-		for i := range uintptr(shards.len) {
-			s := *shards.slice.At(i)
-			fn(&s.val)
-		}
+	if shards == nil {
+		return
+	}
+	for i := range uintptr(shards.len) {
+		s := *shards.slice.At(i)
+		fn(&s.val)
 	}
 }
 
@@ -299,12 +300,13 @@ func (p *PLocalCounter) Add(delta uintptr) {
 // Note: The result is an approximation if concurrent Adds are happening.
 func (p *PLocalCounter) Value() uintptr {
 	shards := p.shards.Load()
+	if shards == nil {
+		return 0
+	}
 	var sum uintptr
-	if shards != nil {
-		for i := range uintptr(shards.len) {
-			s := *shards.slice.At(i)
-			sum += s.val.Load()
-		}
+	for i := range uintptr(shards.len) {
+		s := *shards.slice.At(i)
+		sum += s.val.Load()
 	}
 	return sum
 }
@@ -313,12 +315,13 @@ func (p *PLocalCounter) Value() uintptr {
 // This is useful for periodic metric collection cycles.
 func (p *PLocalCounter) Reset() uintptr {
 	shards := p.shards.Load()
+	if shards == nil {
+		return 0
+	}
 	var sum uintptr
-	if shards != nil {
-		for i := range uintptr(shards.len) {
-			s := *shards.slice.At(i)
-			sum += s.val.Swap(0)
-		}
+	for i := range uintptr(shards.len) {
+		s := *shards.slice.At(i)
+		sum += s.val.Swap(0)
 	}
 	return sum
 }
@@ -363,12 +366,13 @@ func (p *PLocalCounter64) Add(delta uint64) {
 // Note: The result is an approximation if concurrent Adds are happening.
 func (p *PLocalCounter64) Value() uint64 {
 	shards := p.shards.Load()
+	if shards == nil {
+		return 0
+	}
 	var sum uint64
-	if shards != nil {
-		for i := range uintptr(shards.len) {
-			s := *shards.slice.At(i)
-			sum += s.val.Load()
-		}
+	for i := range uintptr(shards.len) {
+		s := *shards.slice.At(i)
+		sum += s.val.Load()
 	}
 	return sum
 }
@@ -377,12 +381,13 @@ func (p *PLocalCounter64) Value() uint64 {
 // This is useful for periodic metric collection cycles.
 func (p *PLocalCounter64) Reset() uint64 {
 	shards := p.shards.Load()
+	if shards == nil {
+		return 0
+	}
 	var sum uint64
-	if shards != nil {
-		for i := range uintptr(shards.len) {
-			s := *shards.slice.At(i)
-			sum += s.val.Swap(0)
-		}
+	for i := range uintptr(shards.len) {
+		s := *shards.slice.At(i)
+		sum += s.val.Swap(0)
 	}
 	return sum
 }

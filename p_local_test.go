@@ -671,89 +671,6 @@ func (c *PerfPLocalUintptrCounter) Value() uintptr {
 	return c.p.Value()
 }
 
-// --- Benchmarks ---
-
-func BenchmarkPerfCounter_Mutex(b *testing.B) {
-	c := &PerfMutexCounter{}
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.Add(1)
-		}
-	})
-}
-
-func BenchmarkPerfCounter_Atomic(b *testing.B) {
-	c := &PerfAtomicCounter{}
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.Add(1)
-		}
-	})
-}
-
-func BenchmarkPerfCounter_Sharded_1xCPUs(b *testing.B) {
-	cpus := runtime.GOMAXPROCS(0)
-	shards := nextPowOf2(uintptr(cpus))
-	c := NewPerfShardedCounter(shards)
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.Add(1)
-		}
-	})
-}
-
-func BenchmarkPerfCounter_Sharded_4xCPUs(b *testing.B) {
-	cpus := runtime.GOMAXPROCS(0)
-	shards := nextPowOf2(uintptr(cpus)) * 4
-	c := NewPerfShardedCounter(shards)
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.Add(1)
-		}
-	})
-}
-
-// Benchmark version: includes hash masking to match ShardedCounter's overhead
-func BenchmarkPerfCounter_PLocal(b *testing.B) {
-	c := NewPerfPLocalCounter()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.Add(1)
-		}
-	})
-}
-
-// Benchmark version: includes hash masking to match ShardedCounter's overhead
-func BenchmarkPerfCounter_PLocalUintptr(b *testing.B) {
-	c := NewPerfPLocalUintptrCounter()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.Add(1)
-		}
-	})
-}
-
-// Is the actual implementation without benchmark overhead
-func BenchmarkPerfCounter_PLocal_Real(b *testing.B) {
-	c := NewPerfPLocalCounter()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.AddReal(1)
-		}
-	})
-}
-
-// Is the actual implementation without benchmark overhead
-func BenchmarkPerfCounter_PLocalUintptr_Real(b *testing.B) {
-	c := NewPerfPLocalUintptrCounter()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			c.AddReal(1)
-		}
-	})
-}
-
 // Verify correctness
 func TestPerfCounters(t *testing.T) {
 	const N = 1000
@@ -792,25 +709,4 @@ func TestPerfCounters(t *testing.T) {
 			}
 		})
 	}
-}
-
-func BenchmarkPLocal_Get(b *testing.B) {
-	l := NewPLocal(func() int { return 0 })
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_ = l.Get()
-		}
-	})
-}
-
-func BenchmarkSyncPool_GetPut(b *testing.B) {
-	p := sync.Pool{
-		New: func() any { return 0 },
-	}
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			v := p.Get()
-			p.Put(v)
-		}
-	})
 }
