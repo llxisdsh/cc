@@ -372,6 +372,18 @@ func (s unsafeSlice[T]) At(i uintptr) *T {
 	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*new(T))*i))
 }
 
+//nolint:unused
+//go:nosplit
+func ptrAt[T any](ptr *T, i int) *T {
+	return (*T)(unsafe.Add(unsafe.Pointer(ptr), uintptr(i)*unsafe.Sizeof(*(*T)(nil))))
+}
+
+//nolint:unused
+//go:nosplit
+func getAt[T any](ptr *T, i int) T {
+	return *(*T)(unsafe.Add(unsafe.Pointer(ptr), uintptr(i)*unsafe.Sizeof(*(*T)(nil))))
+}
+
 // ============================================================================
 // Locker Utilities
 // ============================================================================

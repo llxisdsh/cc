@@ -41,14 +41,11 @@ type fRebuildState struct {
 
 // fMapTable represents the internal hash table structure.
 type fMapTable[K cmp.Ordered, V any] struct {
-	buckets unsafeSlice[fBucket]
-	mask    uintptr
-	size    PLocalCounter
-	// number of chunks and chunks size for resizing
-	chunks   uintptr
+	buckets  unsafeSlice[fBucket]
+	mask     uintptr
+	chunks   uintptr // number of chunks and chunks size for resizing
 	overflow *SkipMap[K, V]
-	// overflowWriters tracks in-flight lock-free overflow writers
-	overflowWriters int32
+	size     PLocalCounter
 }
 
 // fBucket represents a hash table fBucket with cache-line alignment.
@@ -308,12 +305,8 @@ slowPath:
 		}
 
 		// overflow
-		atomic.AddInt32(&table.overflowWriters, 1)
-		b.UnlockWithMeta(meta | opNextMask)
-
 		table.overflow.Store(key, value)
-
-		atomic.AddInt32(&table.overflowWriters, -1)
+		b.UnlockWithMeta(meta | opNextMask)
 
 		// Check if the table needs to grow
 		if loadPtr(&m.rs) == nil {
@@ -643,10 +636,8 @@ slowPath:
 				}
 
 				if overflow {
-					atomic.AddInt32(&table.overflowWriters, 1)
-					b.Unlock()
 					table.overflow.Store(*key, it.entry.value)
-					atomic.AddInt32(&table.overflowWriters, -1)
+					b.Unlock()
 					return retV, it.loaded
 				}
 
@@ -677,10 +668,8 @@ slowPath:
 				table.AddSize(idx, 1)
 				return retV, it.loaded
 			}
-			atomic.AddInt32(&table.overflowWriters, 1)
 			b.UnlockWithMeta(meta | opNextMask)
 			table.overflow.Store(*key, it.entry.value)
-			atomic.AddInt32(&table.overflowWriters, -1)
 
 			// Check if the table needs to grow
 			if loadPtr(&m.rs) == nil {
@@ -698,10 +687,8 @@ slowPath:
 				return retV, it.loaded
 			}
 			if overflow {
-				atomic.AddInt32(&table.overflowWriters, 1)
-				b.Unlock()
 				table.overflow.Delete(*key)
-				atomic.AddInt32(&table.overflowWriters, -1)
+				b.Unlock()
 				return retV, it.loaded
 			}
 			// Delete
@@ -1242,9 +1229,9 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 	// on the old table. Since all chunks are fully copied, no new writers can pass
 	// the resize state check and lock a bucket. Thus, this counter will strictly
 	// drain to 0 without deadlocking.
-	for atomic.LoadInt32(&table.overflowWriters) > 0 {
-		runtime.Gosched()
-	}
+	// for atomic.LoadInt32(&table.overflowWriters) > 0 {
+	// 	runtime.Gosched()
+	// }
 
 	// Copying completed
 	table.overflow.Range(func(key K, value V) bool {

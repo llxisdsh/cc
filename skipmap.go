@@ -81,18 +81,18 @@ func (n *skipNode[K, V]) loadVal() V {
 //go:nosplit
 func (n *skipNode[K, V]) next(layer int) *skipNode[K, V] {
 	if layer < skipBaseLinks {
-		return (*skipNode[K, V])(loadPtr(&n.links.base[layer]))
+		return (*skipNode[K, V])(loadPtr(ptrAt(&n.links.base[0], layer)))
 	}
-	return (*skipNode[K, V])(loadPtr(&n.links.extra[layer-skipBaseLinks]))
+	return (*skipNode[K, V])(loadPtr(ptrAt(&n.links.extra[0], layer-skipBaseLinks)))
 }
 
 //go:nosplit
 func (n *skipNode[K, V]) setNext(layer int, dest *skipNode[K, V]) {
 	if layer < skipBaseLinks {
-		storePtr(&n.links.base[layer], unsafe.Pointer(dest))
+		storePtr(ptrAt(&n.links.base[0], layer), unsafe.Pointer(dest))
 		return
 	}
-	storePtr(&n.links.extra[layer-skipBaseLinks], unsafe.Pointer(dest))
+	storePtr(ptrAt(&n.links.extra[0], layer-skipBaseLinks), unsafe.Pointer(dest))
 }
 
 //go:nosplit
@@ -147,8 +147,8 @@ func (s *SkipMap[K, V]) search(k K, prevs, nexts *[skipMaxLevel]*skipNode[K, V])
 			curr = nex
 			nex = curr.next(i)
 		}
-		prevs[i] = curr
-		nexts[i] = nex
+		*ptrAt(&prevs[0], i) = curr
+		*ptrAt(&nexts[0], i) = nex
 
 		// Early exit if found
 		if nex != nil && nex.key == k {
@@ -169,8 +169,8 @@ func (s *SkipMap[K, V]) searchForDelete(k K, prevs, nexts *[skipMaxLevel]*skipNo
 			curr = nex
 			nex = curr.next(i)
 		}
-		prevs[i] = curr
-		nexts[i] = nex
+		*ptrAt(&prevs[0], i) = curr
+		*ptrAt(&nexts[0], i) = nex
 
 		if foundAt == -1 && nex != nil && nex.key == k {
 			foundAt = i
@@ -182,7 +182,7 @@ func (s *SkipMap[K, V]) searchForDelete(k K, prevs, nexts *[skipMaxLevel]*skipNo
 func purgeLocks[K cmp.Ordered, V any](prevs [skipMaxLevel]*skipNode[K, V], top int) {
 	var locked *skipNode[K, V]
 	for i := top; i >= 0; i-- {
-		p := prevs[i]
+		p := getAt(&prevs[0], i)
 		if p != locked {
 			p.mu.Unlock()
 			locked = p
@@ -209,8 +209,8 @@ func (s *SkipMap[K, V]) Store(key K, value V) {
 		var p, nex, prevP *skipNode[K, V]
 
 		for i := 0; isValid && i < lvl; i++ {
-			p = prevs[i]
-			nex = nexts[i]
+			p = getAt(&prevs[0], i)
+			nex = getAt(&nexts[0], i)
 			if p != prevP {
 				p.mu.Lock()
 				lockedTop = i
@@ -226,8 +226,8 @@ func (s *SkipMap[K, V]) Store(key K, value V) {
 
 		created := newSkipNode(key, value, lvl)
 		for i := range lvl {
-			created.setNext(i, nexts[i])
-			prevs[i].setNext(i, created)
+			created.setNext(i, getAt(&nexts[0], i))
+			getAt(&prevs[0], i).setNext(i, created)
 		}
 		created.setFlag(skipFlagLinked)
 		purgeLocks(prevs, lockedTop)
@@ -270,12 +270,12 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 		hitLvl := s.searchForDelete(key, &prevs, &nexts)
 
 		isRemovable := hitLvl != -1 &&
-			nexts[hitLvl].hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
-			(int(nexts[hitLvl].level)-1) == hitLvl
+			getAt(&nexts[0], hitLvl).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
+			(int(getAt(&nexts[0], hitLvl).level)-1) == hitLvl
 
 		if marked || isRemovable {
 			if !marked {
-				victim = nexts[hitLvl]
+				victim = getAt(&nexts[0], hitLvl)
 				victimLvl = hitLvl
 				victim.mu.Lock()
 				if victim.hasFlag(skipFlagMarked) {
@@ -291,8 +291,8 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			var p, nex, prevP *skipNode[K, V]
 
 			for i := 0; isValid && i <= victimLvl; i++ {
-				p = prevs[i]
-				nex = nexts[i]
+				p = getAt(&prevs[0], i)
+				nex = getAt(&nexts[0], i)
 				if p != prevP {
 					p.mu.Lock()
 					lockedTop = i
@@ -307,7 +307,7 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			}
 
 			for i := victimLvl; i >= 0; i-- {
-				prevs[i].setNext(i, victim.next(i))
+				getAt(&prevs[0], i).setNext(i, victim.next(i))
 			}
 			victim.mu.Unlock()
 			purgeLocks(prevs, lockedTop)
@@ -331,12 +331,12 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 		hitLvl := s.searchForDelete(key, &prevs, &nexts)
 
 		isRemovable := hitLvl != -1 &&
-			nexts[hitLvl].hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
-			(int(nexts[hitLvl].level)-1) == hitLvl
+			getAt(&nexts[0], hitLvl).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
+			(int(getAt(&nexts[0], hitLvl).level)-1) == hitLvl
 
 		if marked || isRemovable {
 			if !marked {
-				victim = nexts[hitLvl]
+				victim = getAt(&nexts[0], hitLvl)
 				victimLvl = hitLvl
 				victim.mu.Lock()
 				if victim.hasFlag(skipFlagMarked) {
@@ -352,8 +352,8 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			var p, nex, prevP *skipNode[K, V]
 
 			for i := 0; isValid && i <= victimLvl; i++ {
-				p = prevs[i]
-				nex = nexts[i]
+				p = getAt(&prevs[0], i)
+				nex = getAt(&nexts[0], i)
 				if p != prevP {
 					p.mu.Lock()
 					lockedTop = i
@@ -368,7 +368,7 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			}
 
 			for i := victimLvl; i >= 0; i-- {
-				prevs[i].setNext(i, victim.next(i))
+				getAt(&prevs[0], i).setNext(i, victim.next(i))
 			}
 			victim.mu.Unlock()
 			purgeLocks(prevs, lockedTop)
@@ -408,8 +408,8 @@ func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		}
 
 		for i := 0; isValid && i < lvl; i++ {
-			p = prevs[i]
-			nex = nexts[i]
+			p = getAt(&prevs[0], i)
+			nex = getAt(&nexts[0], i)
 			if p != prevP {
 				p.mu.Lock()
 				lockedTop = i
@@ -425,8 +425,8 @@ func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 
 		created := newSkipNode(key, value, lvl)
 		for i := range lvl {
-			created.setNext(i, nexts[i])
-			prevs[i].setNext(i, created)
+			created.setNext(i, getAt(&nexts[0], i))
+			getAt(&prevs[0], i).setNext(i, created)
 		}
 		created.setFlag(skipFlagLinked)
 		purgeLocks(prevs, lockedTop)
@@ -464,8 +464,8 @@ func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loade
 		}
 
 		for i := 0; isValid && i < lvl; i++ {
-			p = prevs[i]
-			nex = nexts[i]
+			p = getAt(&prevs[0], i)
+			nex = getAt(&nexts[0], i)
 			if p != prevP {
 				p.mu.Lock()
 				lockedTop = i
@@ -482,8 +482,8 @@ func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loade
 		v := newValFn()
 		created := newSkipNode(key, v, lvl)
 		for i := range lvl {
-			created.setNext(i, nexts[i])
-			prevs[i].setNext(i, created)
+			created.setNext(i, getAt(&nexts[0], i))
+			getAt(&prevs[0], i).setNext(i, created)
 		}
 		created.setFlag(skipFlagLinked)
 		purgeLocks(prevs, lockedTop)
