@@ -2,6 +2,7 @@ package cc
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -205,6 +206,258 @@ func TestFunnelMap_BulkStoreLoad(t *testing.T) {
 		v, ok := m.Load(i)
 		if !ok || v != i*3 {
 			t.Fatalf("Load(%d) = %v, %v; want %d, true", i, v, ok, i*3)
+		}
+	}
+}
+
+func TestFunnelMap_LoadOrStoreFn(t *testing.T) {
+	m := NewFunnelMap[string, int]()
+
+	// 1. Should store since key doesn't exist
+	v1, loaded := m.LoadOrStoreFn("key1", func() int { return 100 })
+	if loaded || v1 != 100 {
+		t.Fatalf("LoadOrStoreFn: expected loaded=false, v=100, got loaded=%v, v=%v", loaded, v1)
+	}
+
+	// 2. Should load since key exists, fn should not be executed
+	executed := false
+	v2, loaded := m.LoadOrStoreFn("key1", func() int {
+		executed = true
+		return 200
+	})
+	if !loaded || v2 != 100 || executed {
+		t.Fatalf("LoadOrStoreFn: expected loaded=true, v=100, executed=false, got loaded=%v, v=%v, executed=%v", loaded, v2, executed)
+	}
+}
+
+func TestFunnelMap_CompareAndSwap(t *testing.T) {
+	m := NewFunnelMap[string, int]()
+	m.Store("key1", 100)
+
+	// 1. Swap with wrong old value
+	if swapped := m.CompareAndSwap("key1", 50, 200); swapped {
+		t.Fatalf("CompareAndSwap: expected false when old value doesn't match")
+	}
+	if v, _ := m.Load("key1"); v != 100 {
+		t.Fatalf("CompareAndSwap: value should remain 100, got %v", v)
+	}
+
+	// 2. Swap with correct old value
+	if swapped := m.CompareAndSwap("key1", 100, 200); !swapped {
+		t.Fatalf("CompareAndSwap: expected true when old value matches")
+	}
+	if v, _ := m.Load("key1"); v != 200 {
+		t.Fatalf("CompareAndSwap: value should be updated to 200, got %v", v)
+	}
+
+	// 3. Swap non-existent key
+	if swapped := m.CompareAndSwap("key2", 0, 200); swapped {
+		t.Fatalf("CompareAndSwap: expected false for non-existent key")
+	}
+}
+
+func TestFunnelMap_CompareAndDelete(t *testing.T) {
+	m := NewFunnelMap[string, int]()
+	m.Store("key1", 100)
+
+	// 1. Delete with wrong old value
+	if deleted := m.CompareAndDelete("key1", 50); deleted {
+		t.Fatalf("CompareAndDelete: expected false when old value doesn't match")
+	}
+	if _, ok := m.Load("key1"); !ok {
+		t.Fatalf("CompareAndDelete: key should still exist")
+	}
+
+	// 2. Delete with correct old value
+	if deleted := m.CompareAndDelete("key1", 100); !deleted {
+		t.Fatalf("CompareAndDelete: expected true when old value matches")
+	}
+	if _, ok := m.Load("key1"); ok {
+		t.Fatalf("CompareAndDelete: key should be deleted")
+	}
+}
+
+// Test FunnelMap_Compute with missing values correctly
+func TestFunnelMap_Compute_Init(t *testing.T) {
+	m := NewFunnelMap[string, int]()
+
+	// 1. Compute on non-existent key
+	v1, loaded := m.Compute("key1", func(e *MapEntry[string, int]) {
+		if e.Loaded() {
+			t.Fatalf("Compute: expected entry to not be loaded")
+		}
+		e.Update(10)
+	})
+	if loaded || v1 != 10 {
+		t.Fatalf("Compute: expected loaded=false, v=10, got loaded=%v, v=%v", loaded, v1)
+	}
+
+	// 2. Verify stored value
+	if v, ok := m.Load("key1"); !ok || v != 10 {
+		t.Fatalf("Compute: expected key1 to be 10, got %v, %v", v, ok)
+	}
+}
+
+func TestFunnelMap_AllAndEntries(t *testing.T) {
+	m := NewFunnelMap[int, int]()
+	for i := range 5 {
+		m.Store(i, i*10)
+	}
+
+	// Test All()
+	countAll := 0
+	for k, v := range m.All() {
+		if v != k*10 {
+			t.Fatalf("All: unexpected value %v for key %v", v, k)
+		}
+		countAll++
+	}
+	if countAll != 5 {
+		t.Fatalf("All: expected 5 elements, got %v", countAll)
+	}
+
+	// Test Entries()
+	countEntries := 0
+	for e := range m.Entries() {
+		if e.Value() != e.Key()*10 {
+			t.Fatalf("Entries: unexpected value %v for key %v", e.Value(), e.Key())
+		}
+		countEntries++
+	}
+	if countEntries != 5 {
+		t.Fatalf("Entries: expected 5 elements, got %v", countEntries)
+	}
+}
+
+func TestFunnelMap_ToMap(t *testing.T) {
+	m := NewFunnelMap[int, int]()
+	for i := range 10 {
+		m.Store(i, i)
+	}
+
+	// 1. Without limit
+	mapAll := m.ToMap()
+	if len(mapAll) != 10 {
+		t.Fatalf("ToMap: expected len 10, got %v", len(mapAll))
+	}
+
+	// 2. With limit
+	mapLimited := m.ToMap(5)
+	if len(mapLimited) != 5 {
+		t.Fatalf("ToMap(limit): expected len 5, got %v", len(mapLimited))
+	}
+}
+
+func TestFunnelMap_Clear(t *testing.T) {
+	m := NewFunnelMap[int, int]()
+	for i := range 100 {
+		m.Store(i, i)
+	}
+
+	if m.Size() != 100 {
+		t.Fatalf("Clear: setup failed, expected size 100, got %v", m.Size())
+	}
+
+	m.Clear()
+
+	if m.Size() != 0 {
+		t.Fatalf("Clear: expected size 0, got %v", m.Size())
+	}
+	// Verify practically empty
+	count := 0
+	m.Range(func(_, _ int) bool {
+		count++
+		return true
+	})
+	if count != 0 {
+		t.Fatalf("Clear: range yielded %v elements", count)
+	}
+}
+
+func TestFunnelMap_CloneTo(t *testing.T) {
+	src := NewFunnelMap[int, int]()
+	for i := range 50 {
+		src.Store(i, i*2)
+	}
+
+	dst := NewFunnelMap[int, int]()
+	src.CloneTo(dst)
+
+	if dst.Size() != 50 {
+		t.Fatalf("CloneTo: expected dst size 50, got %v", dst.Size())
+	}
+
+	for i := range 50 {
+		if v, ok := dst.Load(i); !ok || v != i*2 {
+			t.Fatalf("CloneTo: expected key %v to have value %v, got %v, ok=%v", i, i*2, v, ok)
+		}
+	}
+}
+
+func TestFunnelMap_Compute_UpdateAndDelete(t *testing.T) {
+	m := NewFunnelMap[string, int]()
+	m.Store("key1", 10)
+
+	// 1. Compute on existing key
+	v2, loaded := m.Compute("key1", func(e *MapEntry[string, int]) {
+		if !e.Loaded() || e.Value() != 10 {
+			t.Fatalf("Compute: expected entry to be loaded with value 10")
+		}
+		e.Update(20)
+	})
+	if !loaded || v2 != 20 {
+		t.Fatalf("Compute: expected loaded=true, v=20, got loaded=%v, v=%v", loaded, v2)
+	}
+
+	// 2. Verify stored value
+	if v, ok := m.Load("key1"); !ok || v != 20 {
+		t.Fatalf("Compute: expected key1 to be 20, got %v, %v", v, ok)
+	}
+
+	// 3. Compute to delete
+	_, loaded = m.Compute("key1", func(e *MapEntry[string, int]) {
+		e.Delete()
+	})
+	if !loaded {
+		t.Fatalf("Compute: expected loaded=true before deletion")
+	}
+
+	// 4. Verify deleted value
+	if _, ok := m.Load("key1"); ok {
+		t.Fatalf("Compute: expected key to be deleted")
+	}
+}
+
+func TestFunnelMap_ComputeRange(t *testing.T) {
+	m := NewFunnelMap[int, string]()
+	for i := range 10 {
+		m.Store(i, strconv.Itoa(i))
+	}
+
+	// Double values for evens, delete odds
+	m.ComputeRange(func(e *MapEntry[int, string]) bool {
+		if e.Key()%2 == 0 {
+			e.Update(e.Value() + e.Value())
+		} else {
+			e.Delete()
+		}
+		return true
+	})
+
+	if m.Size() != 5 {
+		t.Fatalf("ComputeRange: expected size 5 after deletions, got %v", m.Size())
+	}
+
+	for i := range 10 {
+		v, ok := m.Load(i)
+		if i%2 == 0 {
+			if !ok || v != strconv.Itoa(i)+strconv.Itoa(i) {
+				t.Fatalf("ComputeRange: expected updated value for key %v", i)
+			}
+		} else {
+			if ok {
+				t.Fatalf("ComputeRange: expected key %v to be deleted", i)
+			}
 		}
 	}
 }

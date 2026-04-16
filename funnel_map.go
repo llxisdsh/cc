@@ -346,7 +346,30 @@ func (m *FunnelMap[K, V]) Delete(key K) {
 // LoadOrStore retrieves an existing value or stores a new one if the key
 // doesn't exist.
 func (m *FunnelMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	return m.compute(&key, &value, computeInit|computeSkipIfFound)
+	return m.compute(&key, unsafe.Pointer(&value), computeInit|computeSkipIfFound)
+}
+
+// LoadOrStoreFn returns the existing value for the key if
+// present. Otherwise, it tries to compute the value using the
+// provided function and, if successful, stores and returns
+// the computed value. The loaded result is true if the value was
+// loaded, or false if computed.
+//
+// This call locks a hash table bucket while the compute function
+// is executed. It means that modifications on other entries in
+// the bucket will be blocked until the newValueFn executes. Consider
+// this when the function includes long-running operations.
+func (m *FunnelMap[K, V]) LoadOrStoreFn(
+	key K,
+	newValueFn func() V,
+) (actual V, loaded bool) {
+	fn := func(e *MapEntry[K, V]) {
+		if e.Loaded() {
+			return
+		}
+		e.Update(newValueFn())
+	}
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit|computeSkipIfFound|computeUsesFunc)
 }
 
 // LoadAndUpdate retrieves the value associated with the given key and updates
@@ -362,7 +385,7 @@ func (m *FunnelMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 //   - loaded: True if the key existed and the value was updated,
 //     false otherwise.
 func (m *FunnelMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	return m.compute(&key, &value, computeSkipIfNotFound)
+	return m.compute(&key, unsafe.Pointer(&value), computeSkipIfNotFound)
 }
 
 // LoadAndDelete retrieves the value for a key and deletes it from the map.
@@ -372,12 +395,89 @@ func (m *FunnelMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 
 // Swap stores a key-value pair and returns the previous value if any.
 func (m *FunnelMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	return m.compute(&key, &value, computeInit)
+	return m.compute(&key, unsafe.Pointer(&value), computeInit)
+}
+
+// CompareAndSwap atomically replaces an existing value with a new value.
+// If the existing value matches the expected value.
+func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
+	table := (*mapTable)(loadPtr(&m.table))
+	if table == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("called CompareAndSwap when value is not of comparable type")
+	}
+	fn := func(e *MapEntry[K, V]) {
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old))) {
+				e.Update(new)
+				swapped = true
+			}
+		}
+	}
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound|computeUsesFunc)
+	return swapped
+}
+
+// CompareAndDelete atomically deletes an existing entry.
+// If its value matches the expected value.
+func (m *FunnelMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
+	table := (*mapTable)(loadPtr(&m.table))
+	if table == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("called CompareAndDelete when value is not of comparable type")
+	}
+	fn := func(e *MapEntry[K, V]) {
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old))) {
+				e.Delete()
+				deleted = true
+			}
+		}
+	}
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound|computeUsesFunc)
+	return deleted
+}
+
+// Compute performs a compute-style, atomic update for the given key.
+//
+// Concurrency model:
+//   - Acquires the root-bucket lock to serialize write/resize cooperation.
+//   - If a resize is observed, cooperates to finish copying and restarts on
+//     the latest table.
+//
+// Callback signature:
+//
+//		fn(e *MapEntry[K, V])
+//
+//	  - Use e.Loaded() and e.Value() to inspect the current state
+//	  - Use e.Update(newV) to upsert; Use e.Delete() to remove
+//
+// Parameters:
+//
+//   - key: The key to process
+//   - fn: Callback function (called regardless of value existence)
+//
+// Returns:
+//   - actual: The value as returned by the callback.
+//   - loaded: True if the key existed before the callback, false otherwise.
+func (m *FunnelMap[K, V]) Compute(
+	key K,
+	fn func(e *MapEntry[K, V]),
+) (actual V, loaded bool) {
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit|computeUsesFunc)
 }
 
 func (m *FunnelMap[K, V]) compute(
 	key *K,
-	val *V,
+	val unsafe.Pointer, // *V or func(e *MapEntry[K, V])
 	flags uint8,
 ) (actual V, loaded bool) {
 	table := (*fMapTable[K, V])(loadPtr(&m.table))
@@ -501,33 +601,32 @@ slowPath:
 
 		// --- Compute Logic ---
 		retV := it.entry.value
-		if flags&(computeSkipIfFound|computeSkipIfNotFound) == 0 {
+		if flags&(computeUsesFunc|computeSkipIfFound|computeSkipIfNotFound) == 0 {
 			// Store, Swap
-			it.entry.value = *val
+			it.entry.value = *(*V)(val)
 			it.op = updateOp
-		} else if flags&(computeSkipIfFound) == 0 {
+		} else if flags&(computeUsesFunc|computeSkipIfFound) == 0 {
 			// Delete, LoadAnd.., CompareAnd..
 			if it.loaded {
 				if val != nil {
-					it.entry.value = *val
+					it.entry.value = *(*V)(val)
 					it.op = updateOp
 				} else {
 					it.op = deleteOp
 				}
 			}
-		} else /*if flags&computeUsesFunc == 0*/ {
+		} else if flags&computeUsesFunc == 0 {
 			// LoadOr..
 			if !it.loaded {
-				it.entry.value = *val
+				it.entry.value = *(*V)(val)
 				it.op = updateOp
 				retV = it.entry.value
 			}
+		} else {
+			// Compute, LoadOrStoreFn
+			(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
+			retV = it.entry.value
 		}
-		// } else {
-		// 	// Compute, LoadOrStoreFn
-		// 	(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
-		// 	retV = it.entry.value
-		// }
 
 		switch it.op {
 		case updateOp:
@@ -680,6 +779,148 @@ func (m *FunnelMap[K, V]) Size() int {
 	return int(table.SumSize()) + table.overflow.Size()
 }
 
+// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
+func (m *FunnelMap[K, V]) ToMap(limit ...int) map[K]V {
+	l := maxInt
+	if len(limit) != 0 {
+		l = limit[0]
+		if l <= 0 {
+			return map[K]V{}
+		}
+	}
+
+	a := make(map[K]V, min(m.Size(), l))
+	for k, v := range m.All() {
+		a[k] = v
+		l--
+		if l == 0 {
+			break
+		}
+	}
+	return a
+}
+
+// Entries returns an iterator function for use with range-over-func.
+// It provides the same functionality as ComputeRange but in iterator form.
+//
+//go:nosplit
+func (m *FunnelMap[K, V]) Entries(
+	blockWriters ...bool,
+) func(yield func(e *MapEntry[K, V]) bool) {
+	return func(yield func(e *MapEntry[K, V]) bool) {
+		m.ComputeRange(yield, blockWriters...)
+	}
+}
+
+// ComputeRange iterates all entries and applies a user callback.
+//
+// Callback signature:
+//
+//		fn(e *MapEntry[K, V]) bool
+//
+//	  - e.Update(newV): update the entry to newV
+//	  - e.Delete(): delete the entry
+//	  - default (no op): keep the entry unchanged
+//	  - return true to continue; return false to stop iteration
+//
+// Concurrency & consistency:
+//   - Cooperates with concurrent grow/shrink; if a resize is detected, it
+//     helps complete copying, then continues on the latest table.
+//   - Holds the root-bucket lock while processing its bucket chain to
+//     coordinate with writers/resize operations.
+//
+// Parameters:
+//   - fn: user function applied to each key-value pair.
+//   - blockWriters: optional flag (default false). If true, concurrent writers
+//     are blocked during iteration; resize operations are always exclusive.
+//
+// Recommendation: keep fn lightweight to reduce lock hold time.
+func (m *FunnelMap[K, V]) ComputeRange(
+	fn func(e *MapEntry[K, V]) bool,
+	blockWriters ...bool,
+) {
+	hint := mapRebuildAllowWritersHint
+	if len(blockWriters) != 0 && blockWriters[0] {
+		hint = mapRebuildBlockWritersHint
+	}
+
+	m.rebuild(hint, func() {
+		table := (*fMapTable[K, V])(loadPtr(&m.table))
+		if table == nil {
+			return
+		}
+		it := MapEntry[K, V]{
+			loaded: true,
+		}
+		for i := uintptr(0); i <= table.mask; i++ {
+			b := table.buckets.At(i)
+			b.Lock()
+			meta := loadUint64Fast(&b.meta)
+			for marked := meta & fMetaMask; marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				e := (*entry_[K, V])(*b.At(j))
+				it.entry = *e
+				it.op = cancelOp
+				shouldContinue := fn(noEscape(&it))
+
+				switch it.op {
+				case updateOp:
+					newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
+					if opt.EmbeddedHash_ {
+						newEntry.SetHash(e.GetHash())
+					}
+					storePtr(b.At(j), unsafe.Pointer(newEntry))
+				case deleteOp:
+					storePtr(b.At(j), nil)
+					meta = setByte(meta, h2Empty, j)
+					storeUint64(&b.meta, meta)
+					table.AddSize(i, ^uintptr(0))
+				default:
+					// cancelOp: no-op
+				}
+
+				if !shouldContinue {
+					b.Unlock()
+					return
+				}
+			}
+			b.Unlock()
+		}
+
+		// Process overflow
+		overflow := table.overflow
+		for k, v := range overflow.All() {
+			it.entry.key = k
+			it.entry.value = v
+			it.op = cancelOp
+			shouldContinue := fn(noEscape(&it))
+			switch it.op {
+			case updateOp:
+				overflow.Store(k, it.entry.value)
+			case deleteOp:
+				overflow.Delete(k)
+			default:
+				// cancelOp: no-op
+			}
+			if !shouldContinue {
+				return
+			}
+		}
+	})
+}
+
+// Clear compatible with `sync.Map`
+func (m *FunnelMap[K, V]) Clear() {
+	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	if table == nil {
+		return
+	}
+	m.rebuild(mapRebuildBlockWritersHint, func() {
+		newTable := newFunnelMapTable[K, V](m.minLen, maxProcs())
+		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
+	})
+}
+
 // Grow increases the map's capacity by sizeAdd entries to accommodate future
 // growth. This pre-allocation avoids rehashing when adding new entries up to
 // the new capacity.
@@ -754,6 +995,70 @@ func (m *FunnelMap[K, V]) doResize(
 		}
 
 		if m.tryResize(hint, newLen) {
+			return
+		}
+	}
+}
+
+// CloneTo copies all key-value pairs from this map to the destination map.
+// The destination map is cleared before copying.
+//
+// Parameters:
+//   - clone: The destination map to copy into. Must not be nil.
+//
+// Notes:
+//   - This operation is not atomic with respect to concurrent modifications.
+//   - The destination map will have the same configuration as the source.
+//   - The destination map is cleared before copying to ensure a clean state.
+func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
+	clone.Clear()
+	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	if table == nil {
+		return
+	}
+
+	clone.seed = m.seed
+	clone.keyHash = m.keyHash
+	clone.valEqual = m.valEqual
+	clone.minLen = m.minLen
+	clone.shrinkOn = m.shrinkOn
+	clone.intKey = m.intKey
+	newTable := newFunnelMapTable[K, V](clone.minLen, maxProcs())
+	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
+
+	// Pre-fetch size to optimize initial capacity
+	clone.Grow(m.Size())
+	for k, v := range m.All() {
+		clone.Store(k, v)
+	}
+}
+
+// rebuild reorganizes the map. Only these hints are supported:
+//   - mapRebuildWithWritersHint: allows concurrent reads/writes
+//   - mapExclusiveRebuildHint: allows concurrent reads
+func (m *FunnelMap[K, V]) rebuild(
+	hint mapRebuildHint,
+	fn func(),
+) {
+	for {
+		// Help finishing rebuild if needed
+		if rs := (*fRebuildState)(loadPtr(&m.rs)); rs != nil {
+			switch rs.hint {
+			case mapGrowHint, mapShrinkHint:
+				if loadPtr(&rs.newTable) != nil {
+					m.helpCopyAndWait(rs)
+				} else {
+					runtime.Gosched()
+					continue
+				}
+			default:
+				rs.latch.Wait()
+			}
+		}
+
+		if rs := m.beginRebuild(hint); rs != nil {
+			fn()
+			m.endRebuild(rs)
 			return
 		}
 	}

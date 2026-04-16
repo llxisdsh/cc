@@ -105,6 +105,7 @@ const (
 	computeIgnoreHint                       // skip rebuild cooperation
 	computeSkipIfFound                      // fast path: skip lock if key found
 	computeSkipIfNotFound                   // fast path: skip lock if key not found
+	computeUsesFunc                         // val is func(e *MapEntry[K, V]) instead of *V
 )
 
 var maxProcs_ = uintptr(max(runtime.GOMAXPROCS(0), 1))
