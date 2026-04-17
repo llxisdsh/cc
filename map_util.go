@@ -246,7 +246,7 @@ func noEscape[T any](p *T) *T {
 //
 //go:nosplit
 func intHash[K any](ptr unsafe.Pointer) uintptr {
-	switch unsafe.Sizeof(*(*K)(nil)) {
+	switch unsafe.Sizeof(*new(K)) {
 	case 8:
 		if bitSize == 64 {
 			return *(*uintptr)(ptr)
@@ -369,19 +369,19 @@ func toUnsafeSlice[T any](ptr *T) unsafeSlice[T] {
 //
 //go:nosplit
 func (s unsafeSlice[T]) At(i uintptr) *T {
-	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*(*T)(nil))*i))
+	return (*T)(unsafe.Add(s.ptr, i*unsafe.Sizeof(*new(T))))
 }
 
 //nolint:unused
 //go:nosplit
 func ptrAt[T any](ptr *T, i int) *T {
-	return (*T)(unsafe.Add(unsafe.Pointer(ptr), uintptr(i)*unsafe.Sizeof(*(*T)(nil))))
+	return (*T)(unsafe.Add(unsafe.Pointer(ptr), uintptr(i)*unsafe.Sizeof(*new(T))))
 }
 
 //nolint:unused
 //go:nosplit
 func getAt[T any](ptr *T, i int) T {
-	return *(*T)(unsafe.Add(unsafe.Pointer(ptr), uintptr(i)*unsafe.Sizeof(*(*T)(nil))))
+	return *(*T)(unsafe.Add(unsafe.Pointer(ptr), uintptr(i)*unsafe.Sizeof(*new(T))))
 }
 
 // ============================================================================

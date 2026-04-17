@@ -51,7 +51,7 @@ func toUnsafeSlice[T any](ptr *T) unsafeSlice[T] {
 //
 //go:nosplit
 func (s unsafeSlice[T]) At(i uintptr) *T {
-	return (*T)(unsafe.Add(s.ptr, unsafe.Sizeof(*(*T)(nil))*i))
+	return (*T)(unsafe.Add(s.ptr, i*unsafe.Sizeof(*new(T))))
 }
 
 // 1. Mutex

@@ -1234,14 +1234,14 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 	// }
 
 	// Copying completed
-	table.overflow.Range(func(key K, value V) bool {
+	for k, v := range table.overflow.All() {
 		var hash uintptr
 		var h1v uintptr
 		if m.intKey {
-			hash = intHash[K](noescape(unsafe.Pointer(&key)))
+			hash = intHash[K](noescape(unsafe.Pointer(&k)))
 			h1v = hash / fEntriesPerBucket
 		} else {
-			hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+			hash = m.keyHash(noescape(unsafe.Pointer(&k)), m.seed)
 			h1v = h1(hash)
 		}
 		idx := newTable.mask & h1v
@@ -1252,7 +1252,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 		if empty := (^destMeta) & fMetaMask; empty != 0 {
 			emptyIdx := firstMarkedByteIndex(empty)
 			destB.meta = setByte(destMeta, h2v, emptyIdx)
-			newEntry := &entry_[K, V]{key: key, value: value}
+			newEntry := &entry_[K, V]{key: k, value: v}
 			if opt.EmbeddedHash_ {
 				newEntry.SetHash(hash)
 			}
@@ -1260,10 +1260,9 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 			newTable.AddSize(idx, 1)
 		} else {
 			destB.meta = destMeta | opNextMask
-			newTable.overflow.Store(key, value)
+			newTable.overflow.Store(k, v)
 		}
-		return true
-	})
+	}
 }
 
 // AddSize atomically adds delta to the size counter for the given bucket index.
