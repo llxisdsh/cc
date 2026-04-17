@@ -299,7 +299,7 @@ slowPath:
 				storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
 				newMeta := setByte(meta, h2v, emptyIdx)
 				b.UnlockWithMeta(newMeta)
-				table.AddSize(idx, 1)
+				table.AddSize(1)
 				return
 			}
 		}
@@ -394,7 +394,7 @@ func (m *FunnelMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 // CompareAndSwap atomically replaces an existing value with a new value.
 // If the existing value matches the expected value.
 func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
-	table := (*mapTable)(loadPtr(&m.table))
+	table := (*fMapTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return false
 	}
@@ -418,7 +418,7 @@ func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 // CompareAndDelete atomically deletes an existing entry.
 // If its value matches the expected value.
 func (m *FunnelMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
-	table := (*mapTable)(loadPtr(&m.table))
+	table := (*fMapTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return false
 	}
@@ -665,7 +665,7 @@ slowPath:
 				storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
 				newMeta := setByte(meta, h2v, emptyIdx)
 				b.UnlockWithMeta(newMeta)
-				table.AddSize(idx, 1)
+				table.AddSize(1)
 				return retV, it.loaded
 			}
 			b.UnlockWithMeta(meta | opNextMask)
@@ -695,7 +695,7 @@ slowPath:
 			storePtr(b.At(j), nil)
 			newMeta := setByte(meta, h2Empty, j)
 			b.UnlockWithMeta(newMeta)
-			table.AddSize(idx, ^uintptr(0))
+			table.AddSize(^uintptr(0))
 
 			// Check if table shrinking is needed
 			if m.shrinkOn {
@@ -861,7 +861,7 @@ func (m *FunnelMap[K, V]) ComputeRange(
 					storePtr(b.At(j), nil)
 					meta = setByte(meta, h2Empty, j)
 					storeUint64(&b.meta, meta)
-					table.AddSize(i, ^uintptr(0))
+					table.AddSize(^uintptr(0))
 				default:
 					// cancelOp: no-op
 				}
@@ -896,7 +896,7 @@ func (m *FunnelMap[K, V]) ComputeRange(
 	})
 }
 
-// Clear compatible with `sync.Map`
+// Clear clears all key-value pairs from the map.
 func (m *FunnelMap[K, V]) Clear() {
 	table := (*fMapTable[K, V])(loadPtr(&m.table))
 	if table == nil {
@@ -1220,7 +1220,7 @@ func (m *FunnelMap[K, V]) copyBucket(
 		}
 	}
 	if copied != 0 {
-		newTable.AddSize(start, copied)
+		newTable.AddSize(copied)
 	}
 }
 
@@ -1257,7 +1257,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 				newEntry.SetHash(hash)
 			}
 			*destB.At(emptyIdx) = unsafe.Pointer(newEntry)
-			newTable.AddSize(idx, 1)
+			newTable.AddSize(1)
 		} else {
 			destB.meta = destMeta | opNextMask
 			newTable.overflow.Store(k, v)
@@ -1268,7 +1268,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 // AddSize atomically adds delta to the size counter for the given bucket index.
 //
 //go:nosplit
-func (t *fMapTable[K, V]) AddSize(idx, delta uintptr) {
+func (t *fMapTable[K, V]) AddSize(delta uintptr) {
 	t.size.Add(delta)
 }
 

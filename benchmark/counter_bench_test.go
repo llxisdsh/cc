@@ -93,7 +93,6 @@ type PerfShardedCounter struct {
 }
 
 func NewPerfShardedCounter(shards uintptr) *PerfShardedCounter {
-	// shards must be power of 2
 	return &PerfShardedCounter{
 		stripes: makeUnsafeSlice[counterStripe](shards),
 		mask:    shards - 1,
