@@ -29,8 +29,8 @@ type FunnelMap[K cmp.Ordered, V any] struct {
 	intKey   bool
 }
 
-// fRebuildState represents the current state of a resizing operation
-type fRebuildState struct {
+// funnelRebuildState represents the current state of a resizing operation
+type funnelRebuildState struct {
 	hint      mapRebuildHint
 	latch     Latch
 	table     unsafe.Pointer // *hMapTable
@@ -39,17 +39,17 @@ type fRebuildState struct {
 	completed uint32
 }
 
-// fMapTable represents the internal hash table structure.
-type fMapTable[K cmp.Ordered, V any] struct {
-	buckets  unsafeSlice[fBucket]
+// funnelTable represents the internal hash table structure.
+type funnelTable[K cmp.Ordered, V any] struct {
+	buckets  unsafeSlice[funnelBucket]
 	mask     uintptr
 	chunks   uintptr // number of chunks and chunks size for resizing
 	overflow *SkipMap[K, V]
 	size     PLocalCounter
 }
 
-// fBucket represents a hash table fBucket with cache-line alignment.
-type fBucket struct {
+// funnelBucket represents a hash table bucket with cache-line alignment.
+type funnelBucket struct {
 	// meta: metadata for fast entry lookups, must be 64-bit aligned
 	_       [0]atomic.Uint64
 	meta    uint64
@@ -83,7 +83,7 @@ func (m *FunnelMap[K, V]) withOptions(
 
 func (m *FunnelMap[K, V]) init(
 	cfg *MapConfig,
-) *fMapTable[K, V] {
+) *funnelTable[K, V] {
 	// parse interface
 	if cfg.keyHash == nil {
 		cfg.keyHash = parseKeyInterface[K]()
@@ -102,19 +102,19 @@ func (m *FunnelMap[K, V]) init(
 	}
 
 	m.seed = uintptr(rand.Uint64())
-	tableLen := calcTableLen(cfg.capacity)
+	tableLen := fCalcTableLen(cfg.capacity)
 	m.minLen = tableLen
 	m.shrinkOn = cfg.autoShrink
 
-	newTable := newFunnelMapTable[K, V](tableLen, maxProcs())
+	newTable := newFunnelTable[K, V](tableLen, maxProcs())
 	atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 
 	return newTable
 }
 
-func newFunnelMapTable[K cmp.Ordered, V any](tableLen, cpus uintptr) *fMapTable[K, V] {
-	table := &fMapTable[K, V]{
-		buckets:  makeUnsafeSlice[fBucket](tableLen),
+func newFunnelTable[K cmp.Ordered, V any](tableLen, cpus uintptr) *funnelTable[K, V] {
+	table := &funnelTable[K, V]{
+		buckets:  makeUnsafeSlice[funnelBucket](tableLen),
 		mask:     tableLen - 1,
 		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 		overflow: NewSkipMap[K, V](),
@@ -126,7 +126,7 @@ func newFunnelMapTable[K cmp.Ordered, V any](tableLen, cpus uintptr) *fMapTable[
 //
 //go:nosplit
 func (m *FunnelMap[K, V]) Load(key K) (value V, ok bool) {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return *new(V), false
 	}
@@ -165,7 +165,7 @@ func (m *FunnelMap[K, V]) Load(key K) (value V, ok bool) {
 
 // Store inserts or updates a key-value pair.
 func (m *FunnelMap[K, V]) Store(key K, value V) {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		table = m.slowInit()
 	}
@@ -231,19 +231,19 @@ slowPath:
 
 		// This is the first check, checking if there is a rebuild operation in
 		// progress before acquiring the Bucket lock
-		if rs := (*fRebuildState)(loadPtr(&m.rs)); rs != nil {
+		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
 				if loadPtr(&rs.newTable) != nil {
 					b.Unlock()
 					m.helpCopyAndWait(rs)
-					table = (*fMapTable[K, V])(loadPtr(&m.table))
+					table = (*funnelTable[K, V])(loadPtr(&m.table))
 					continue
 				}
 			case mapRebuildBlockWritersHint:
 				b.Unlock()
 				rs.latch.Wait()
-				table = (*fMapTable[K, V])(loadPtr(&m.table))
+				table = (*funnelTable[K, V])(loadPtr(&m.table))
 				continue
 			default:
 				// mapRebuildWithWritersHint: allow concurrent writers
@@ -253,7 +253,7 @@ slowPath:
 		// Verifies if table was replaced after lock acquisition.
 		// Needed since another goroutine may have resized the table
 		// between initial check and lock acquisition.
-		if newTable := (*fMapTable[K, V])(loadPtr(&m.table)); table != newTable {
+		if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
 			b.Unlock()
 			table = newTable
 			continue
@@ -394,7 +394,7 @@ func (m *FunnelMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 // CompareAndSwap atomically replaces an existing value with a new value.
 // If the existing value matches the expected value.
 func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return false
 	}
@@ -418,7 +418,7 @@ func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 // CompareAndDelete atomically deletes an existing entry.
 // If its value matches the expected value.
 func (m *FunnelMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return false
 	}
@@ -473,7 +473,7 @@ func (m *FunnelMap[K, V]) compute(
 	val unsafe.Pointer, // *V or func(e *MapEntry[K, V])
 	flags uint8,
 ) (actual V, loaded bool) {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		if flags&computeInit == 0 {
 			return *new(V), false
@@ -537,19 +537,19 @@ slowPath:
 		// ensures that copyBucket cannot silently migrate entries we are
 		// about to mutate.
 		if flags&computeIgnoreHint == 0 {
-			if rs := (*fRebuildState)(loadPtr(&m.rs)); rs != nil {
+			if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
 				case mapGrowHint, mapShrinkHint:
 					if loadPtr(&rs.newTable) != nil {
 						b.Unlock()
 						m.helpCopyAndWait(rs)
-						table = (*fMapTable[K, V])(loadPtr(&m.table))
+						table = (*funnelTable[K, V])(loadPtr(&m.table))
 						continue
 					}
 				case mapRebuildBlockWritersHint:
 					b.Unlock()
 					rs.latch.Wait()
-					table = (*fMapTable[K, V])(loadPtr(&m.table))
+					table = (*funnelTable[K, V])(loadPtr(&m.table))
 					continue
 				default:
 					// mapRebuildWithWritersHint: allow concurrent writers
@@ -560,7 +560,7 @@ slowPath:
 		// Verifies if table was replaced after lock acquisition.
 		// Needed since another goroutine may have resized the table
 		// between initial check and lock acquisition.
-		if newTable := (*fMapTable[K, V])(loadPtr(&m.table)); table != newTable {
+		if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
 			b.Unlock()
 			table = newTable
 			continue
@@ -727,7 +727,7 @@ slowPath:
 //     In extreme cases, the same value may be traversed twice
 //     (if it gets deleted and re-added later during iteration).
 func (m *FunnelMap[K, V]) Range(yield func(key K, value V) bool) {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return
 	}
@@ -759,7 +759,7 @@ func (m *FunnelMap[K, V]) All() func(yield func(K, V) bool) {
 //
 //go:nosplit
 func (m *FunnelMap[K, V]) Size() int {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return 0
 	}
@@ -832,7 +832,7 @@ func (m *FunnelMap[K, V]) ComputeRange(
 	}
 
 	m.rebuild(hint, func() {
-		table := (*fMapTable[K, V])(loadPtr(&m.table))
+		table := (*funnelTable[K, V])(loadPtr(&m.table))
 		if table == nil {
 			return
 		}
@@ -898,12 +898,12 @@ func (m *FunnelMap[K, V]) ComputeRange(
 
 // Clear clears all key-value pairs from the map.
 func (m *FunnelMap[K, V]) Clear() {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return
 	}
 	m.rebuild(mapRebuildBlockWritersHint, func() {
-		newTable := newFunnelMapTable[K, V](m.minLen, maxProcs())
+		newTable := newFunnelTable[K, V](m.minLen, maxProcs())
 		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 	})
 }
@@ -932,7 +932,7 @@ func (m *FunnelMap[K, V]) Grow(sizeAdd int) {
 // Shrink reduces the capacity to fit the current size,
 // always executes regardless of WithAutoShrink.
 func (m *FunnelMap[K, V]) Shrink() {
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return
 	}
@@ -945,14 +945,14 @@ func (m *FunnelMap[K, V]) doResize(
 ) {
 	for {
 		// Resize check
-		table := (*fMapTable[K, V])(loadPtr(&m.table))
+		table := (*funnelTable[K, V])(loadPtr(&m.table))
 		tableLen := table.mask + 1
 		var newLen uintptr
 		if hint == mapGrowHint {
 			if sizeAdd <= 0 {
 				return
 			}
-			newLen = calcTableLen(table.SumSize() + uintptr(table.overflow.Size()) + sizeAdd)
+			newLen = fCalcTableLen(table.SumSize() + uintptr(table.overflow.Size()) + sizeAdd)
 			if newLen <= tableLen {
 				return
 			}
@@ -961,13 +961,13 @@ func (m *FunnelMap[K, V]) doResize(
 			if tableLen <= m.minLen {
 				return
 			}
-			newLen = calcTableLen(table.SumSize() + uintptr(table.overflow.Size()))
+			newLen = fCalcTableLen(table.SumSize() + uintptr(table.overflow.Size()))
 			if newLen >= tableLen {
 				return
 			}
 		}
 		// Help finishing rebuild if needed
-		if rs := (*fRebuildState)(loadPtr(&m.rs)); rs != nil {
+		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
 				if loadPtr(&rs.newTable) != nil {
@@ -999,7 +999,7 @@ func (m *FunnelMap[K, V]) doResize(
 //   - The destination map is cleared before copying to ensure a clean state.
 func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	clone.Clear()
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table == nil {
 		return
 	}
@@ -1010,7 +1010,7 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	clone.minLen = m.minLen
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
-	newTable := newFunnelMapTable[K, V](clone.minLen, maxProcs())
+	newTable := newFunnelTable[K, V](clone.minLen, maxProcs())
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
 
 	// Pre-fetch size to optimize initial capacity
@@ -1029,7 +1029,7 @@ func (m *FunnelMap[K, V]) rebuild(
 ) {
 	for {
 		// Help finishing rebuild if needed
-		if rs := (*fRebuildState)(loadPtr(&m.rs)); rs != nil {
+		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
 				if loadPtr(&rs.newTable) != nil {
@@ -1055,21 +1055,21 @@ func (m *FunnelMap[K, V]) rebuild(
 // synchronization with a "lock" mechanism.
 //
 //go:noinline
-func (m *FunnelMap[K, V]) slowInit() *fMapTable[K, V] {
+func (m *FunnelMap[K, V]) slowInit() *funnelTable[K, V] {
 	rs := m.beginRebuild(mapRebuildBlockWritersHint)
 	if rs == nil {
 		// Another goroutine is initializing, wait for it to complete
-		rs = (*fRebuildState)(loadPtr(&m.rs))
+		rs = (*funnelRebuildState)(loadPtr(&m.rs))
 		if rs != nil {
 			rs.latch.Wait()
 		}
 		// Now the table should be initialized
-		return (*fMapTable[K, V])(loadPtr(&m.table))
+		return (*funnelTable[K, V])(loadPtr(&m.table))
 	}
 
 	// Although the table is always changed when rs is not nil,
 	// it might have been changed before that.
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	if table != nil {
 		m.endRebuild(rs)
 		return table
@@ -1082,18 +1082,18 @@ func (m *FunnelMap[K, V]) slowInit() *fMapTable[K, V] {
 	return table
 }
 
-func (m *FunnelMap[K, V]) beginRebuild(hint mapRebuildHint) *fRebuildState {
+func (m *FunnelMap[K, V]) beginRebuild(hint mapRebuildHint) *funnelRebuildState {
 	if loadPtr(&m.rs) != nil {
 		return nil
 	}
-	rs := &fRebuildState{hint: hint}
+	rs := &funnelRebuildState{hint: hint}
 	if !atomic.CompareAndSwapPointer(&m.rs, nil, unsafe.Pointer(rs)) {
 		return nil
 	}
 	return rs
 }
 
-func (m *FunnelMap[K, V]) endRebuild(rs *fRebuildState) {
+func (m *FunnelMap[K, V]) endRebuild(rs *funnelRebuildState) {
 	atomic.StorePointer(&m.rs, nil)
 	rs.latch.Open()
 }
@@ -1105,7 +1105,7 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 		return false
 	}
 
-	table := (*fMapTable[K, V])(loadPtr(&m.table))
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
 	tableLen := table.mask + 1
 	if hint == mapGrowHint {
 		if newLen <= tableLen {
@@ -1121,17 +1121,17 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 
 	rs.table = unsafe.Pointer(table)
 	cpus := maxProcs()
-	newTable := newFunnelMapTable[K, V](newLen, cpus)
+	newTable := newFunnelTable[K, V](newLen, cpus)
 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
 	m.helpCopyAndWait(rs)
 	return true
 }
 
 //go:noinline
-func (m *FunnelMap[K, V]) helpCopyAndWait(rs *fRebuildState) {
-	newTable := (*fMapTable[K, V])(loadPtr(&rs.newTable))
+func (m *FunnelMap[K, V]) helpCopyAndWait(rs *funnelRebuildState) {
+	newTable := (*funnelTable[K, V])(loadPtr(&rs.newTable))
 	newLen := newTable.mask + 1
-	table := (*fMapTable[K, V])(rs.table)
+	table := (*funnelTable[K, V])(rs.table)
 	oldLen := table.mask + 1
 	chunks := table.chunks
 	// Determines the concurrent task range for destination buckets.
@@ -1165,10 +1165,10 @@ func (m *FunnelMap[K, V]) helpCopyAndWait(rs *fRebuildState) {
 }
 
 func (m *FunnelMap[K, V]) copyBucket(
-	table *fMapTable[K, V],
+	table *funnelTable[K, V],
 	start, end uintptr,
 	oldLen, baseLen uintptr,
-	newTable *fMapTable[K, V],
+	newTable *funnelTable[K, V],
 ) {
 	mask := newTable.mask
 	var copied uintptr
@@ -1224,7 +1224,7 @@ func (m *FunnelMap[K, V]) copyBucket(
 	}
 }
 
-func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTable *fMapTable[K, V]) {
+func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTable *funnelTable[K, V]) {
 	// Wait for any in-flight lock-free overflow writers to finish their mutations
 	// on the old table. Since all chunks are fully copied, no new writers can pass
 	// the resize state check and lock a bucket. Thus, this counter will strictly
@@ -1268,7 +1268,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *fMapTable[K, V], newTabl
 // AddSize atomically adds delta to the size counter for the given bucket index.
 //
 //go:nosplit
-func (t *fMapTable[K, V]) AddSize(delta uintptr) {
+func (t *funnelTable[K, V]) AddSize(delta uintptr) {
 	t.size.Add(delta)
 }
 
@@ -1276,12 +1276,12 @@ func (t *fMapTable[K, V]) AddSize(delta uintptr) {
 // by summing all counter-stripes.
 //
 //go:nosplit
-func (t *fMapTable[K, V]) SumSize() uintptr {
+func (t *funnelTable[K, V]) SumSize() uintptr {
 	return t.size.Value()
 }
 
 //go:nosplit
-func (b *fBucket) At(i uintptr) *unsafe.Pointer {
+func (b *funnelBucket) At(i uintptr) *unsafe.Pointer {
 	return (*unsafe.Pointer)(unsafe.Add(
 		unsafe.Pointer(&b.entries),
 		i*unsafe.Sizeof(unsafe.Pointer(nil))),
@@ -1291,7 +1291,7 @@ func (b *fBucket) At(i uintptr) *unsafe.Pointer {
 // Lock acquires a spinlock for the bucket using embedded metadata.
 // Uses atomic operations on the meta field to avoid false sharing overhead.
 // Implements optimistic locking with fallback to spinning.
-func (b *fBucket) Lock() {
+func (b *funnelBucket) Lock() {
 	// Inline BitLockUint64(&b.meta, opLockMask)
 	cur := atomic.LoadUint64(&b.meta)
 	if !atomic.CompareAndSwapUint64(&b.meta, cur&^opLockMask, cur|opLockMask) {
@@ -1300,12 +1300,12 @@ func (b *fBucket) Lock() {
 }
 
 //go:nosplit
-func (b *fBucket) Unlock() {
+func (b *funnelBucket) Unlock() {
 	BitUnlockUint64(&b.meta, opLockMask)
 }
 
 //go:nosplit
-func (b *fBucket) UnlockWithMeta(meta uint64) {
+func (b *funnelBucket) UnlockWithMeta(meta uint64) {
 	BitUnlockWithStoreUint64(&b.meta, opLockMask, meta)
 }
 
@@ -1343,4 +1343,19 @@ const (
 //go:nosplit
 func fMarkZeroBytes(w uint64) uint64 {
 	return (w - 0x0101010101010101) &^ w & fMetaMask
+}
+
+//go:nosplit
+func fCalcTableLen(capacity uintptr) uintptr {
+	tableLen := uintptr(minTableLen)
+	const minThreshold = uintptr(float64(minTableLen*fEntriesPerBucket) * loadFactor)
+	if capacity >= minThreshold {
+		const invFactor = 1.0 / (float64(fEntriesPerBucket) * loadFactor)
+		// +entriesPerBucket-1 is used to compensate for calculation
+		// inaccuracies
+		tableLen = nextPowOf2(
+			uintptr(float64(capacity+fEntriesPerBucket-1) * invFactor),
+		)
+	}
+	return tableLen
 }

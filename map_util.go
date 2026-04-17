@@ -54,7 +54,7 @@ const (
 		next unsafe.Pointer
 	}{})
 	maxBucketBytes   = min(cacheLineSize, 32+32*(pointerSize/8))
-	entriesPerBucket = min(opByteIdx, (maxBucketBytes-bucketOverhead)/pointerSize)
+	entriesPerBucket = min(7, (maxBucketBytes-bucketOverhead)/pointerSize)
 
 	// Metadata constants for bucket entry management
 	metaEmpty uint64 = 0
@@ -295,7 +295,7 @@ func h2(h uintptr) uint8 {
 //
 //go:nosplit
 func broadcast(b uint8) uint64 {
-	return 0x101010101010101 * uint64(b)
+	return 0x0101010101010101 * uint64(b)
 }
 
 // firstMarkedByteIndex finds the index of the first marked byte in an uint64.
