@@ -76,8 +76,6 @@ const (
 	minTableLen = 32
 	// minBucketsPerCPU: threshold for parallel resizing
 	minBucketsPerCPU = 4
-	// asyncThreshold: threshold for asynchronous resize
-	asyncThreshold = 128 * 1024
 	// resizeOverPartition: over-partition factor to reduce resize tail latency
 	resizeOverPartition = 8
 )

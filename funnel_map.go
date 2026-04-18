@@ -1234,6 +1234,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 	// }
 
 	// Copying completed
+	var copied uintptr
 	for k, v := range table.overflow.All() {
 		var hash uintptr
 		var h1v uintptr
@@ -1257,11 +1258,14 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 				newEntry.SetHash(hash)
 			}
 			*destB.At(emptyIdx) = unsafe.Pointer(newEntry)
-			newTable.AddSize(1)
+			copied++
 		} else {
 			destB.meta = destMeta | opNextMask
 			newTable.overflow.Store(k, v)
 		}
+	}
+	if copied != 0 {
+		newTable.AddSize(copied)
 	}
 }
 

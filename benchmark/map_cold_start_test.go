@@ -194,6 +194,88 @@ func TestColdStart_cc_Map(t *testing.T) {
 	}
 }
 
+func TestColdStart_cc_FunnelMap(t *testing.T) {
+	t.Logf("Initializing %d instances...", numMaps)
+
+	// create array of 1 million map instance pointers
+	maps := make([]*cc.FunnelMap[int, int], numMaps)
+	for i := 0; i < numMaps; i++ {
+		maps[i] = cc.NewFunnelMap[int, int]()
+	}
+
+	// force GC to ensure cold cache
+	runtime.GC()
+	runtime.GC()
+
+	t.Logf("Starting formal test of %d Compute operations...", testOps)
+	var wg sync.WaitGroup
+	wg.Add(numCPU)
+
+	start := time.Now()
+
+	for range numCPU {
+		go func() {
+			for range testOps {
+				mapIdx := runtime_cheaprand() & (numMaps - 1)
+				key := int(runtime_cheaprand())
+
+				maps[mapIdx].Store(key, key+1)
+
+			}
+
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+	avgNs := elapsed.Nanoseconds() / testOps
+	opsPerSec := float64(testOps) / elapsed.Seconds()
+
+	t.Logf("Compute operation results:")
+	t.Logf("  Total operations: %d", testOps)
+	t.Logf("  Total time: %v", elapsed)
+	t.Logf("  Average latency: %d ns/op", avgNs)
+	t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+	t.Logf("  Memory usage: %d MB", getMemUsage())
+
+	t.Logf("Starting formal test of %d Load operations...", testOps)
+
+	// Load test
+	{
+		time.Sleep(2 * time.Second)
+		// force GC to ensure cold cache
+		runtime.GC()
+		runtime.GC()
+
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+
+		start = time.Now()
+		for range numCPU {
+			go func() {
+				for i := 0; i < testOps; i++ {
+					mapIdx := runtime_cheaprand() & (numMaps - 1)
+					key := int(runtime_cheaprand())
+					_, _ = maps[mapIdx].Load(key)
+				}
+
+				wg.Done()
+			}()
+		}
+		wg.Wait()
+		elapsed := time.Since(start)
+		avgNs := elapsed.Nanoseconds() / testOps
+		opsPerSec := float64(testOps) / elapsed.Seconds()
+
+		t.Logf("Load operation results:")
+		t.Logf("  Total operations: %d", testOps)
+		t.Logf("  Total time: %v", elapsed)
+		t.Logf("  Average latency: %d ns/op", avgNs)
+		t.Logf("  Throughput: %.0f ops/sec", opsPerSec)
+		t.Logf("  Memory usage: %d MB", getMemUsage())
+	}
+}
+
 func TestColdStart_RWLockShardedMap(t *testing.T) {
 	t.Logf("Initializing %d instances...", numMaps)
 

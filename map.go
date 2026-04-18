@@ -1205,19 +1205,10 @@ func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 
 	rs.table = unsafe.Pointer(table)
 	cpus := maxProcs()
-	if newLen*unsafe.Sizeof(bucket{}) < asyncThreshold || cpus <= 1 {
-		m.finalizeResize(rs, newLen, cpus)
-	} else {
-		// The big table, use goroutines to create new table and copy entries
-		go m.finalizeResize(rs, newLen, cpus)
-	}
-	return true
-}
-
-func (m *Map[K, V]) finalizeResize(rs *rebuildState, newLen, cpus uintptr) {
 	newTable := newMapTable(newLen, cpus)
 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
 	m.helpCopyAndWait(rs)
+	return true
 }
 
 //go:noinline

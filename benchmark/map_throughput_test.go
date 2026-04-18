@@ -454,9 +454,168 @@ func testInsert_cc_Map(
 	}
 }
 
+func TestInsertString_cc_FunnelMap(t *testing.T) {
+	t.Run("1 no_pre_size", func(t *testing.T) {
+		testInsertString_cc_FunnelMap(t, total, 1, false, true, true)
+	})
+	t.Run("64 no_pre_size", func(t *testing.T) {
+		testInsertString_cc_FunnelMap(
+			t,
+			total,
+			runtime.GOMAXPROCS(0),
+			false,
+			true,
+			true,
+		)
+	})
+	t.Run("1 pre_size", func(t *testing.T) {
+		testInsertString_cc_FunnelMap(t, total, 1, true, false, false)
+	})
+	t.Run("64 pre_size", func(t *testing.T) {
+		testInsertString_cc_FunnelMap(
+			t,
+			total,
+			runtime.GOMAXPROCS(0),
+			true,
+			false,
+			false,
+		)
+	})
+}
+
+func testInsertString_cc_FunnelMap(
+	t *testing.T,
+	total int,
+	numCPU int,
+	preSize bool,
+	testLoad bool,
+	testDelete bool,
+) {
+	time.Sleep(2 * time.Second)
+	runtime.GC()
+
+	var m *cc.FunnelMap[string, int]
+	if preSize {
+		m = cc.NewFunnelMap[string, int](cc.WithCapacity(total))
+	} else {
+		m = cc.NewFunnelMap[string, int]()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(numCPU)
+
+	start := time.Now()
+
+	batchSize := (total + numCPU - 1) / numCPU
+
+	for i := range numCPU {
+		go func(start, end int) {
+			// defer wg.Done()
+
+			for j := start; j < end; j++ {
+				m.Store(strconv.Itoa(j), j)
+
+				// m.Compute(
+				// 	strconv.Itoa(j),
+				// 	func(e *cc.MapEntry[string, int]) {
+				// 		e.Update(j)
+				// 	},
+				// )
+			}
+			wg.Done()
+		}(i*batchSize, min((i+1)*batchSize, total))
+	}
+
+	wg.Wait()
+
+	elapsed := time.Since(start)
+
+	size := m.Size()
+	if size != total {
+		t.Errorf("Expected size %d, got %d", total, size)
+	}
+	t.Logf("----------------------------------")
+	// t.Logf("cap  %v", m.Stats())
+	t.Logf("Inserted %d items in %v", total, elapsed)
+	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
+	t.Logf(
+		"Throughput: %.2f million ops/sec",
+		float64(total)/(elapsed.Seconds()*1000000),
+	)
+
+	// rand check
+	for i := range 1000 {
+		idx := i * (total / 1000)
+		if val, ok := m.Load(strconv.Itoa(idx)); !ok || val != idx {
+			t.Errorf(
+				"Expected value %d at key %d, got %d, exists: %v",
+				idx,
+				idx,
+				val,
+				ok,
+			)
+		}
+	}
+
+	if testLoad {
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+		start := time.Now()
+
+		batchSize := (total + numCPU - 1) / numCPU
+
+		for i := range numCPU {
+			go func(start, end int) {
+				// defer wg.Done()
+
+				for j := start; j < end; j++ {
+					_, _ = m.Load(strconv.Itoa(j))
+				}
+				wg.Done()
+			}(i*batchSize, min((i+1)*batchSize, total))
+		}
+		wg.Wait()
+		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
+		t.Logf("Load %d items in %v", total, elapsed)
+		t.Logf(
+			"Average: %.2f ns/op",
+			float64(elapsed.Nanoseconds())/float64(total),
+		)
+		t.Logf(
+			"Throughput: %.2f million ops/sec",
+			float64(total)/(elapsed.Seconds()*1000000),
+		)
+	}
+
+	if testDelete {
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+
+		start := time.Now()
+		for e := range m.Entries() {
+			e.Delete()
+		}
+		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
+		t.Logf("Delete %d items in %v", total, elapsed)
+		t.Logf(
+			"Average: %.2f ns/op",
+			float64(elapsed.Nanoseconds())/float64(total),
+		)
+		t.Logf(
+			"Throughput: %.2f million ops/sec",
+			float64(total)/(elapsed.Seconds()*1000000),
+		)
+		if m.Size() != 0 {
+			t.Errorf("Map is not zero after TestDelete, size: %d", m.Size())
+		}
+	}
+}
+
 func TestInsertString_cc_FlatMap(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsertString_cc_FlatMap(t, total, 1, false, true)
+		testInsertString_cc_FlatMap(t, total, 1, false, true, true)
 	})
 	t.Run("64 no_pre_size", func(t *testing.T) {
 		testInsertString_cc_FlatMap(
@@ -465,10 +624,11 @@ func TestInsertString_cc_FlatMap(t *testing.T) {
 			runtime.GOMAXPROCS(0),
 			false,
 			true,
+			true,
 		)
 	})
 	t.Run("1 pre_size", func(t *testing.T) {
-		testInsertString_cc_FlatMap(t, total, 1, true, false)
+		testInsertString_cc_FlatMap(t, total, 1, true, false, false)
 	})
 	t.Run("64 pre_size", func(t *testing.T) {
 		testInsertString_cc_FlatMap(
@@ -476,6 +636,7 @@ func TestInsertString_cc_FlatMap(t *testing.T) {
 			total,
 			runtime.GOMAXPROCS(0),
 			true,
+			false,
 			false,
 		)
 	})
@@ -487,6 +648,7 @@ func testInsertString_cc_FlatMap(
 	numCPU int,
 	preSize bool,
 	testLoad bool,
+	testDelete bool,
 ) {
 	time.Sleep(2 * time.Second)
 	runtime.GC()
@@ -584,20 +746,44 @@ func testInsertString_cc_FlatMap(
 			float64(total)/(elapsed.Seconds()*1000000),
 		)
 	}
+
+	if testDelete {
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+
+		start := time.Now()
+		for e := range m.Entries() {
+			e.Delete()
+		}
+		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
+		t.Logf("Delete %d items in %v", total, elapsed)
+		t.Logf(
+			"Average: %.2f ns/op",
+			float64(elapsed.Nanoseconds())/float64(total),
+		)
+		t.Logf(
+			"Throughput: %.2f million ops/sec",
+			float64(total)/(elapsed.Seconds()*1000000),
+		)
+		if m.Size() != 0 {
+			t.Errorf("Map is not zero after TestDelete, size: %d", m.Size())
+		}
+	}
 }
 
 func TestInsertString_cc_Map(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsertString_cc_Map(t, total, 1, false, true)
+		testInsertString_cc_Map(t, total, 1, false, true, true)
 	})
 	t.Run("64 no_pre_size", func(t *testing.T) {
-		testInsertString_cc_Map(t, total, runtime.GOMAXPROCS(0), false, true)
+		testInsertString_cc_Map(t, total, runtime.GOMAXPROCS(0), false, true, true)
 	})
 	t.Run("1 pre_size", func(t *testing.T) {
-		testInsertString_cc_Map(t, total, 1, true, false)
+		testInsertString_cc_Map(t, total, 1, true, false, false)
 	})
 	t.Run("64 pre_size", func(t *testing.T) {
-		testInsertString_cc_Map(t, total, runtime.GOMAXPROCS(0), true, false)
+		testInsertString_cc_Map(t, total, runtime.GOMAXPROCS(0), true, false, false)
 	})
 }
 
@@ -628,6 +814,7 @@ func testInsertString_cc_Map(
 	numCPU int,
 	preSize bool,
 	testLoad bool,
+	testDelete bool,
 ) {
 	time.Sleep(2 * time.Second)
 	runtime.GC()
@@ -723,6 +910,30 @@ func testInsertString_cc_Map(
 			"Throughput: %.2f million ops/sec",
 			float64(total)/(elapsed.Seconds()*1000000),
 		)
+	}
+
+	if testDelete {
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+
+		start := time.Now()
+		for e := range m.Entries() {
+			e.Delete()
+		}
+		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
+		t.Logf("Delete %d items in %v", total, elapsed)
+		t.Logf(
+			"Average: %.2f ns/op",
+			float64(elapsed.Nanoseconds())/float64(total),
+		)
+		t.Logf(
+			"Throughput: %.2f million ops/sec",
+			float64(total)/(elapsed.Seconds()*1000000),
+		)
+		if m.Size() != 0 {
+			t.Errorf("Map is not zero after TestDelete, size: %d", m.Size())
+		}
 	}
 }
 

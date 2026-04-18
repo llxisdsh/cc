@@ -1259,22 +1259,9 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 	cpus := maxProcs()
 	chunks := calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition)
 	rs.chunks.Store(uint32(chunks))
-	if newLen*unsafe.Sizeof(flatBucket[K, V]{}) >= asyncThreshold || cpus <= 1 {
-		m.finalizeResize(rs, newLen, cpus)
-	} else {
-		// The big table, use goroutines to create new table and copy entries
-		go m.finalizeResize(rs, newLen, cpus)
-	}
-	return true
-}
-
-func (m *FlatMap[K, V]) finalizeResize(rs *flatRebuildState[K, V], newLen, cpus uintptr) {
-	// rs.process.Store(0)
-	// rs.completed.Store(0)
-	// rs.newTableSeq.ClearLocked()
-	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable,
-		newFlatTable[K, V](newLen, cpus))
+	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newFlatTable[K, V](newLen, cpus))
 	m.helpCopyAndWait(rs)
+	return true
 }
 
 //go:noinline
