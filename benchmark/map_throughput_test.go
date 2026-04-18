@@ -142,12 +142,12 @@ func testInsert_cc_FunnelMap(
 		wg.Add(numCPU)
 
 		start := time.Now()
-		for k := range m.All() {
-			m.Delete(k)
+		for e := range m.Entries() {
+			e.Delete()
 		}
 		elapsed := time.Since(start)
 		t.Logf("----------------------------------")
-		t.Logf("TestDelete %d items in %v", total, elapsed)
+		t.Logf("Delete %d items in %v", total, elapsed)
 		t.Logf(
 			"Average: %.2f ns/op",
 			float64(elapsed.Nanoseconds())/float64(total),
@@ -292,7 +292,7 @@ func testInsert_cc_FlatMap(
 		}
 		elapsed := time.Since(start)
 		t.Logf("----------------------------------")
-		t.Logf("TestDelete %d items in %v", total, elapsed)
+		t.Logf("Delete %d items in %v", total, elapsed)
 		t.Logf(
 			"Average: %.2f ns/op",
 			float64(elapsed.Nanoseconds())/float64(total),
@@ -439,7 +439,7 @@ func testInsert_cc_Map(
 		}
 		elapsed := time.Since(start)
 		t.Logf("----------------------------------")
-		t.Logf("TestDelete %d items in %v", total, elapsed)
+		t.Logf("Delete %d items in %v", total, elapsed)
 		t.Logf(
 			"Average: %.2f ns/op",
 			float64(elapsed.Nanoseconds())/float64(total),
@@ -531,6 +531,7 @@ func testInsertString_cc_FlatMap(
 	if size != total {
 		t.Errorf("Expected size %d, got %d", total, size)
 	}
+	t.Logf("----------------------------------")
 	// t.Logf("cap  %v", m.Stats())
 	t.Logf("Inserted %d items in %v", total, elapsed)
 	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
@@ -670,6 +671,7 @@ func testInsertString_cc_Map(
 	if size != total {
 		t.Errorf("Expected size %d, got %d", total, size)
 	}
+	t.Logf("----------------------------------")
 	// t.Logf("cap  %v", m.Stats())
 	t.Logf("Inserted %d items in %v", total, elapsed)
 	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
@@ -711,6 +713,7 @@ func testInsertString_cc_Map(
 		}
 		wg.Wait()
 		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
 		t.Logf("Load %d items in %v", total, elapsed)
 		t.Logf(
 			"Average: %.2f ns/op",
@@ -784,7 +787,8 @@ func testInsert_xsync_MapV4(
 	if size != total {
 		t.Errorf("Expected size %d, got %d", total, size)
 	}
-	t.Logf("cap  %v", m.Stats().RootBuckets)
+	t.Logf("----------------------------------")
+	// t.Logf("cap  %v", m.Stats().RootBuckets)
 	t.Logf("Inserted %d items in %v", total, elapsed)
 	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
 	t.Logf(
@@ -826,6 +830,7 @@ func testInsert_xsync_MapV4(
 		}
 		wg.Wait()
 		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
 		t.Logf("Load %d items in %v", total, elapsed)
 		t.Logf(
 			"Average: %.2f ns/op",
@@ -842,12 +847,16 @@ func testInsert_xsync_MapV4(
 		wg.Add(numCPU)
 
 		start := time.Now()
-		for k := range m.Range {
-			m.Delete(k)
-		}
+		// for k := range m.Range {
+		// 	m.Delete(k)
+		// }
+		m.DeleteMatching(func(key int, value int) (delete, stop bool) {
+			return true, false
+		})
+
 		elapsed := time.Since(start)
 		t.Logf("----------------------------------")
-		t.Logf("TestDelete %d items in %v", total, elapsed)
+		t.Logf("Delete %d items in %v", total, elapsed)
 		t.Logf(
 			"Average: %.2f ns/op",
 			float64(elapsed.Nanoseconds())/float64(total),
@@ -927,6 +936,7 @@ func testInsert_RWLockShardedMap(
 	if size != total {
 		t.Errorf("Expected size %d, got %d", total, size)
 	}
+	t.Logf("----------------------------------")
 	t.Logf("Inserted %d items in %v", total, elapsed)
 	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
 	t.Logf(
@@ -967,6 +977,7 @@ func testInsert_RWLockShardedMap(
 		}
 		wg.Wait()
 		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
 		t.Logf("Load %d items in %v", total, elapsed)
 		t.Logf(
 			"Average: %.2f ns/op",
@@ -1030,7 +1041,7 @@ func testInsert_original_syncMap(
 	// if size != total {
 	//	t.Errorf("Expected size %d, got %d", total, size)
 	// }
-
+	t.Logf("----------------------------------")
 	t.Logf("Inserted %d items in %v", total, elapsed)
 	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
 	t.Logf(
@@ -1050,6 +1061,129 @@ func testInsert_original_syncMap(
 				ok,
 			)
 		}
+	}
+}
+
+func TestInsert_zhangyunhao116_skipmap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping heavy skipmap insert test in short mode")
+	}
+	t.Run("1 no_pre_size", func(t *testing.T) {
+		testInsert_zhangyunhao116_skipmap(t, total, 1, false, true)
+	})
+
+	t.Run("64 no_pre_size", func(t *testing.T) {
+		testInsert_zhangyunhao116_skipmap(
+			t,
+			total,
+			runtime.GOMAXPROCS(0),
+			false,
+			true,
+		)
+	})
+	// t.Run("1 pre_size", func(t *testing.T) {
+	//	testInsert_zhangyunhao116_skipmap(t, total, 1, true)
+	// })
+	//
+	// t.Run("64 pre_size", func(t *testing.T) {
+	// 	testInsert_zhangyunhao116_skipmap(t, total, runtime.GOMAXPROCS(0), true)
+	// })
+}
+
+func testInsert_zhangyunhao116_skipmap(
+	t *testing.T,
+	total int,
+	numCPU int,
+	preSize bool,
+	testLoad bool,
+) {
+	time.Sleep(2 * time.Second)
+	runtime.GC()
+	var m *skipmap.OrderedMap[int, int]
+	if preSize {
+		m = skipmap.New[int, int]()
+	} else {
+		m = skipmap.New[int, int]()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(numCPU)
+
+	start := time.Now()
+
+	batchSize := (total + numCPU - 1) / numCPU
+
+	for i := range numCPU {
+		go func(start, end int) {
+			// defer wg.Done()
+
+			for j := start; j < end; j++ {
+				m.Store(j, j)
+			}
+			wg.Done()
+		}(i*batchSize, min((i+1)*batchSize, total))
+	}
+
+	wg.Wait()
+
+	elapsed := time.Since(start)
+
+	size := m.Len()
+	if size != total {
+		t.Errorf("Expected size %d, got %d", total, size)
+	}
+	t.Logf("----------------------------------")
+	t.Logf("Inserted %d items in %v", total, elapsed)
+	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
+	t.Logf(
+		"Throughput: %.2f million ops/sec",
+		float64(total)/(elapsed.Seconds()*1000000),
+	)
+
+	// rand check
+	for i := range 1000 {
+		idx := i * (total / 1000)
+		if val, ok := m.Load(idx); !ok || val != idx {
+			t.Errorf(
+				"Expected value %d at key %d, got %d, exists: %v",
+				idx,
+				idx,
+				val,
+				ok,
+			)
+		}
+	}
+
+	if testLoad {
+		time.Sleep(2 * time.Second)
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+		start := time.Now()
+
+		batchSize := (total + numCPU - 1) / numCPU
+
+		for i := range numCPU {
+			go func(start, end int) {
+				// defer wg.Done()
+
+				for j := start; j < end; j++ {
+					_, _ = m.Load(j)
+				}
+				wg.Done()
+			}(i*batchSize, min((i+1)*batchSize, total))
+		}
+		wg.Wait()
+		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
+		t.Logf("Load %d items in %v", total, elapsed)
+		t.Logf(
+			"Average: %.2f ns/op",
+			float64(elapsed.Nanoseconds())/float64(total),
+		)
+		t.Logf(
+			"Throughput: %.2f million ops/sec",
+			float64(total)/(elapsed.Seconds()*1000000),
+		)
 	}
 }
 
@@ -1111,7 +1245,7 @@ func testInsert_alphadose_haxmap(
 	if int(size) != total {
 		t.Errorf("Expected size %d, got %d", total, size)
 	}
-
+	t.Logf("----------------------------------")
 	t.Logf("Inserted %d items in %v", total, elapsed)
 	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
 	t.Logf(
@@ -1134,232 +1268,144 @@ func testInsert_alphadose_haxmap(
 	}
 }
 
-func TestInsert_zhangyunhao116_skipmap(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping heavy skipmap insert test in short mode")
-	}
-	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsert_zhangyunhao116_skipmap(t, total, 1, false)
-	})
-
-	t.Run("64 no_pre_size", func(t *testing.T) {
-		testInsert_zhangyunhao116_skipmap(
-			t,
-			total,
-			runtime.GOMAXPROCS(0),
-			false,
-		)
-	})
-	// t.Run("1 pre_size", func(t *testing.T) {
-	//	testInsert_zhangyunhao116_skipmap(t, total, 1, true)
-	// })
-	//
-	// t.Run("64 pre_size", func(t *testing.T) {
-	// 	testInsert_zhangyunhao116_skipmap(t, total, runtime.GOMAXPROCS(0), true)
-	// })
-}
-
-func testInsert_zhangyunhao116_skipmap(
-	t *testing.T,
-	total int,
-	numCPU int,
-	preSize bool,
-) {
-	time.Sleep(2 * time.Second)
-	runtime.GC()
-	var m *skipmap.OrderedMap[int, int]
-	if preSize {
-		m = skipmap.New[int, int]()
-	} else {
-		m = skipmap.New[int, int]()
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(numCPU)
-
-	start := time.Now()
-
-	batchSize := (total + numCPU - 1) / numCPU
-
-	for i := range numCPU {
-		go func(start, end int) {
-			// defer wg.Done()
-
-			for j := start; j < end; j++ {
-				m.Store(j, j)
-			}
-			wg.Done()
-		}(i*batchSize, min((i+1)*batchSize, total))
-	}
-
-	wg.Wait()
-
-	elapsed := time.Since(start)
-
-	size := m.Len()
-	if int(size) != total {
-		t.Errorf("Expected size %d, got %d", total, size)
-	}
-
-	t.Logf("Inserted %d items in %v", total, elapsed)
-	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
-	t.Logf(
-		"Throughput: %.2f million ops/sec",
-		float64(total)/(elapsed.Seconds()*1000000),
-	)
-
-	// rand check
-	for i := range 1000 {
-		idx := i * (total / 1000)
-		if val, ok := m.Load(idx); !ok || val != idx {
-			t.Errorf(
-				"Expected value %d at key %d, got %d, exists: %v",
-				idx,
-				idx,
-				val,
-				ok,
-			)
-		}
-	}
-}
-
-func TestInsert_hashMaps(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping heavy insert test in short mode")
-	}
-	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsert_hashMaps(t, total, 1, false, true)
-	})
-
-	// t.Run("64 no_pre_size", func(t *testing.T) {
-	//	testInsert_RWLockShardedMap(
-	//		t,
-	//		total,
-	//		runtime.GOMAXPROCS(0),
-	//		false,
-	//		true,
-	//	)
-	// })
-}
-
-func testInsert_hashMaps(
-	t *testing.T,
-	total int,
-	numCPU int,
-	preSize bool,
-	testLoad bool,
-) {
-	time.Sleep(2 * time.Second)
-	runtime.GC()
-	// var m *hashmaps.HashMap[int, int]
-	// if preSize {
-	//	m = robin.New[int,int]()
-	// } else {
-	//	m = NewRWLockShardedMap[int, int](runtime.GOMAXPROCS(0) * 4)
-	// }
-
-	// m := robin.New[string, int]()
-	// m := hopscotch.New[int, int]()
-	// m := unordered.New[int, int]()
-	m := make(map[string]int)
-	// m := swiss.New[string, int](100)
-	// m := pb.NewMap[string, int]()
-	var wg sync.WaitGroup
-	wg.Add(numCPU)
-
-	start := time.Now()
-
-	batchSize := (total + numCPU - 1) / numCPU
-
-	for i := range numCPU {
-		func(start, end int) {
-			// defer wg.Done()
-
-			for j := start; j < end; j++ {
-				m[strconv.Itoa(j)] = j
-				// m.Put(strconv.Itoa(j), j)
-				// m.Store(strconv.Itoa(j), j)
-				// m.Compute(
-				//	strconv.Itoa(j),
-				// 	func(*MapEntry[string, int]) (*MapEntry[string, int], int,
-				// bool) {
-				//		return &MapEntry[string, int]{Value: j}, 0, false
-				//	},
-				// )
-			}
-			wg.Done()
-		}(i*batchSize, min((i+1)*batchSize, total))
-	}
-
-	wg.Wait()
-
-	elapsed := time.Since(start)
-	size := 0
-	// m.Each(func(i int, i2 int) bool {
-	//	size++
-	//	return true
-	// })
-	size = len(m)
-	// size = m.Len()
-	// size = m.Size()
-	// size = m.Count()
-
-	if size != total {
-		t.Errorf("Expected size %d, got %d", total, size)
-	}
-	t.Logf("Inserted %d items in %v", total, elapsed)
-	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
-	t.Logf(
-		"Throughput: %.2f million ops/sec",
-		float64(total)/(elapsed.Seconds()*1000000),
-	)
-
-	// rand check
-	for i := range 1000 {
-		idx := i * (total / 1000)
-		if val, ok := m[strconv.Itoa(idx)]; !ok || val != idx {
-			// if val, ok := m.Get(strconv.Itoa(idx)); !ok || val != idx {
-			// if val, ok := m.Load(strconv.Itoa(idx)); !ok || val != idx {
-			// if val, ok := m.(strconv.Itoa(idx)); !ok || val != idx {
-			t.Errorf(
-				"Expected value %d at key %d, got %d, exists: %v",
-				idx,
-				idx,
-				val,
-				ok,
-			)
-		}
-	}
-
-	if testLoad {
-		var wg sync.WaitGroup
-		wg.Add(numCPU)
-		start := time.Now()
-
-		batchSize := (total + numCPU - 1) / numCPU
-
-		for i := range numCPU {
-			go func(start, end int) {
-				// defer wg.Done()
-
-				for j := start; j < end; j++ {
-					_, _ = m[strconv.Itoa(j)]
-					// _, _ = m.Get(strconv.Itoa(j))
-					// _, _ = m.Load(strconv.Itoa(j))
-				}
-				wg.Done()
-			}(i*batchSize, min((i+1)*batchSize, total))
-		}
-		wg.Wait()
-		elapsed := time.Since(start)
-		t.Logf("Load %d items in %v", total, elapsed)
-		t.Logf(
-			"Average: %.2f ns/op",
-			float64(elapsed.Nanoseconds())/float64(total),
-		)
-		t.Logf(
-			"Throughput: %.2f million ops/sec",
-			float64(total)/(elapsed.Seconds()*1000000),
-		)
-	}
-}
+//
+// func TestInsert_hashMaps(t *testing.T) {
+// 	if testing.Short() {
+// 		t.Skip("Skipping heavy insert test in short mode")
+// 	}
+// 	t.Run("1 no_pre_size", func(t *testing.T) {
+// 		testInsert_hashMaps(t, total, 1, false, true)
+// 	})
+//
+// 	// t.Run("64 no_pre_size", func(t *testing.T) {
+// 	//	testInsert_RWLockShardedMap(
+// 	//		t,
+// 	//		total,
+// 	//		runtime.GOMAXPROCS(0),
+// 	//		false,
+// 	//		true,
+// 	//	)
+// 	// })
+// }
+//
+// func testInsert_hashMaps(
+// 	t *testing.T,
+// 	total int,
+// 	numCPU int,
+// 	preSize bool,
+// 	testLoad bool,
+// ) {
+// 	time.Sleep(2 * time.Second)
+// 	runtime.GC()
+// 	// var m *hashmaps.HashMap[int, int]
+// 	// if preSize {
+// 	//	m = robin.New[int,int]()
+// 	// } else {
+// 	//	m = NewRWLockShardedMap[int, int](runtime.GOMAXPROCS(0) * 4)
+// 	// }
+//
+// 	// m := robin.New[string, int]()
+// 	// m := hopscotch.New[int, int]()
+// 	// m := unordered.New[int, int]()
+// 	m := make(map[string]int)
+// 	// m := swiss.New[string, int](100)
+// 	// m := pb.NewMap[string, int]()
+// 	var wg sync.WaitGroup
+// 	wg.Add(numCPU)
+//
+// 	start := time.Now()
+//
+// 	batchSize := (total + numCPU - 1) / numCPU
+//
+// 	for i := range numCPU {
+// 		func(start, end int) {
+// 			// defer wg.Done()
+//
+// 			for j := start; j < end; j++ {
+// 				m[strconv.Itoa(j)] = j
+// 				// m.Put(strconv.Itoa(j), j)
+// 				// m.Store(strconv.Itoa(j), j)
+// 				// m.Compute(
+// 				//	strconv.Itoa(j),
+// 				// 	func(*MapEntry[string, int]) (*MapEntry[string, int], int,
+// 				// bool) {
+// 				//		return &MapEntry[string, int]{Value: j}, 0, false
+// 				//	},
+// 				// )
+// 			}
+// 			wg.Done()
+// 		}(i*batchSize, min((i+1)*batchSize, total))
+// 	}
+//
+// 	wg.Wait()
+//
+// 	elapsed := time.Since(start)
+// 	size := 0
+// 	// m.Each(func(i int, i2 int) bool {
+// 	//	size++
+// 	//	return true
+// 	// })
+// 	size = len(m)
+// 	// size = m.Len()
+// 	// size = m.Size()
+// 	// size = m.Count()
+//
+// 	if size != total {
+// 		t.Errorf("Expected size %d, got %d", total, size)
+// 	}
+// 	t.Logf("Inserted %d items in %v", total, elapsed)
+// 	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
+// 	t.Logf(
+// 		"Throughput: %.2f million ops/sec",
+// 		float64(total)/(elapsed.Seconds()*1000000),
+// 	)
+//
+// 	// rand check
+// 	for i := range 1000 {
+// 		idx := i * (total / 1000)
+// 		if val, ok := m[strconv.Itoa(idx)]; !ok || val != idx {
+// 			// if val, ok := m.Get(strconv.Itoa(idx)); !ok || val != idx {
+// 			// if val, ok := m.Load(strconv.Itoa(idx)); !ok || val != idx {
+// 			// if val, ok := m.(strconv.Itoa(idx)); !ok || val != idx {
+// 			t.Errorf(
+// 				"Expected value %d at key %d, got %d, exists: %v",
+// 				idx,
+// 				idx,
+// 				val,
+// 				ok,
+// 			)
+// 		}
+// 	}
+//
+// 	if testLoad {
+// 		var wg sync.WaitGroup
+// 		wg.Add(numCPU)
+// 		start := time.Now()
+//
+// 		batchSize := (total + numCPU - 1) / numCPU
+//
+// 		for i := range numCPU {
+// 			go func(start, end int) {
+// 				// defer wg.Done()
+//
+// 				for j := start; j < end; j++ {
+// 					_, _ = m[strconv.Itoa(j)]
+// 					// _, _ = m.Get(strconv.Itoa(j))
+// 					// _, _ = m.Load(strconv.Itoa(j))
+// 				}
+// 				wg.Done()
+// 			}(i*batchSize, min((i+1)*batchSize, total))
+// 		}
+// 		wg.Wait()
+// 		elapsed := time.Since(start)
+// 		t.Logf("Load %d items in %v", total, elapsed)
+// 		t.Logf(
+// 			"Average: %.2f ns/op",
+// 			float64(elapsed.Nanoseconds())/float64(total),
+// 		)
+// 		t.Logf(
+// 			"Throughput: %.2f million ops/sec",
+// 			float64(total)/(elapsed.Seconds()*1000000),
+// 		)
+// 	}
+// }
