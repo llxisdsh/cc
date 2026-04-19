@@ -14,7 +14,7 @@ go get github.com/llxisdsh/cc
 
 ### 🚀 Concurrent Maps
 
-State-of-the-art concurrent map implementations. `Map` and `FlatMap` are streamlined versions of the high-performance **[llxisdsh/pb](https://github.com/llxisdsh/pb)** project, delivering extreme performance in a lightweight package.
+State-of-the-art concurrent map implementations, delivering extreme performance in a lightweight package.
 
 | Component       | Description                                                                      | Ideal Use Case                                                          |
 |-----------------|----------------------------------------------------------------------------------|-------------------------------------------------------------------------|
@@ -23,7 +23,7 @@ State-of-the-art concurrent map implementations. `Map` and `FlatMap` are streaml
 | **`SkipMap`**   | **Ordered map**, providing lock-free concurrent lookups, reads, and iteration.   | Highly concurrent ordered data access.                                  |
 | **`FunnelMap`** | **Highly robust**, utilizes SkipMap for collisions and PLocal for size tracking. | Extreme resilience against poor hash distributions without degradation. |
 
-> 📊 **Benchmarks**: Comprehensive comparison tests of various map implementations (evaluating throughput, tail latency, memory usage, and cold starts) are available in the [`benchmark`](./benchmark) directory.
+> **Note**: `Map` and `FlatMap` are streamlined versions of the high-performance [**llxisdsh/pb**](https://github.com/llxisdsh/pb) project. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [`benchmark`](./benchmark) directory or the upstream repository.
 
 ### ⚡ Processor Local
 
@@ -82,7 +82,7 @@ func main() {
     var m cc.Map[string, int]
     m.Store("foo", 1)
 
-    // 2. FlatMap (Seqlock-based, inline storage)
+    // 2. FlatMap (Seqlock-based, inline open-addressing)
     fm := cc.NewFlatMap[string, int](cc.WithCapacity(1000))
     fm.Store("bar", 2)
 
