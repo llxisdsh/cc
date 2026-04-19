@@ -14,16 +14,16 @@ go get github.com/llxisdsh/cc
 
 ### 🚀 Concurrent Maps
 
-State-of-the-art concurrent map implementations, streamlined from [**llxisdsh/pb**](https://github.com/llxisdsh/pb).
+State-of-the-art concurrent map implementations. `Map` and `FlatMap` are streamlined versions of the high-performance **[llxisdsh/pb](https://github.com/llxisdsh/pb)** project, delivering extreme performance in a lightweight package.
 
-| Component       | Description                                                                      | Ideal Use Case                            |
-|-----------------|----------------------------------------------------------------------------------|-------------------------------------------|
-| **`Map`**       | **Lock-free reads**, fine-grained write locking. Drop-in `sync.Map` replacement. | General purpose, mixed R/W workloads.     |
-| **`FlatMap`**   | **Seqlock-based**, open-addressing with inline storage.                          | Read-heavy, cache-sensitive scenarios.    |
-| **`SkipMap`**   | **Lock-free**, scalable concurrent skip list mapping keys to values.             | Highly concurrent, ordered iteration.     |
-| **`FunnelMap`** | **High-throughput**, uses SkipMap for collisions, PLocal counter for size.       | Extreme collision rates, high-throughput. |
+| Component       | Description                                                                      | Ideal Use Case                                                          |
+|-----------------|----------------------------------------------------------------------------------|-------------------------------------------------------------------------|
+| **`Map`**       | **Lock-free reads**, fine-grained write locking. Drop-in `sync.Map` replacement. | General purpose, mixed R/W workloads.                                   |
+| **`FlatMap`**   | **Seqlock-based**, inline open-addressing. Heavily optimized for cold starts.    | Cache-sensitive, extremely low tail latency.                            |
+| **`SkipMap`**   | **Ordered map**, providing lock-free concurrent lookups, reads, and iteration.   | Highly concurrent ordered data access.                                  |
+| **`FunnelMap`** | **Highly robust**, utilizes SkipMap for collisions and PLocal for size tracking. | Extreme resilience against poor hash distributions without degradation. |
 
-> **Note**: These components retain the core high-performance logic of `llxisdsh/pb` but are packaged here for lightweight integration. For comprehensive benchmarks and advanced architectural details, please refer to the [upstream repository](https://github.com/llxisdsh/pb).
+> 📊 **Benchmarks**: Comprehensive comparison tests of various map implementations (evaluating throughput, tail latency, memory usage, and cold starts) are available in the [`benchmark`](./benchmark) directory.
 
 ### ⚡ Processor Local
 
@@ -34,7 +34,7 @@ State-of-the-art concurrent map implementations, streamlined from [**llxisdsh/pb
 Tools to manage task execution and flow.
 
 - **`WorkerPool`**: Robust, high-performance worker pool with zero-allocation on happy path.
-- **`OnceGroup[K, V]`**: Coalesces duplicate requests (singleflight). ~20× faster than `singleflight` with panic propagation.
+- **`OnceGroup[K, V]`**: Coalesces duplicate requests (singleflight). \~20× faster than `singleflight` with panic propagation.
 
 ### 🔒 Synchronization Primitives
 
@@ -63,32 +63,10 @@ Atomic, low-overhead coordination tools built on runtime semaphores.
 
 Generic helpers to add Timeout and Context cancellation support to any blocking operation, plus tools for periodic and parallel execution.
 
-```go
-// Wait: Add Context cancellation to a blocking function
-err := cc.Wait(ctx, func() {
-    wg.Wait()
-})
-
-// WaitTimeout: Add Timeout to a blocking function
-if err := cc.WaitTimeout(time.Second, wg.Wait); err != nil {
-    // timed out
-}
-
-// Do: Execute a function that returns error, with Context support
-err := cc.Do(ctx, func() error {
-    return complexOp()
-})
-
-// Repeat: Run action periodically until Context cancelled or error
-cc.Repeat(ctx, 5*time.Second, func(ctx context.Context) error {
-    return reloadConfig()
-})
-
-// Parallel: Execute N tasks concurrently (fail-fast on error)
-err := cc.Parallel(ctx, 10, func(ctx context.Context, i int) error {
-    return processItem(i)
-})
-```
+- **`Wait` / `WaitTimeout`**: Add Context cancellation or Timeouts to blocking functions.
+- **`Do`**: Execute functions returning errors with Context support.
+- **`Repeat`**: Run actions periodically until Context is cancelled or an error occurs.
+- **`Parallel`**: Execute N tasks concurrently with fail-fast error handling.
 
 ## Quick Start
 
@@ -191,6 +169,35 @@ val, err, shared := g.Do("key", func() (string, error) {
 })
 ```
 
+### Concurrency Helpers
+
+```go
+// Wait: Add Context cancellation to a blocking function
+err := cc.Wait(ctx, func() {
+    wg.Wait()
+})
+
+// WaitTimeout: Add Timeout to a blocking function
+if err := cc.WaitTimeout(time.Second, wg.Wait); err != nil {
+    // timed out
+}
+
+// Do: Execute a function that returns error, with Context support
+err := cc.Do(ctx, func() error {
+    return complexOp()
+})
+
+// Repeat: Run action periodically until Context cancelled or error
+cc.Repeat(ctx, 5*time.Second, func(ctx context.Context) error {
+    return reloadConfig()
+})
+
+// Parallel: Execute N tasks concurrently (fail-fast on error)
+err := cc.Parallel(ctx, 10, func(ctx context.Context, i int) error {
+    return processItem(i)
+})
+```
+
 ### Primitives Gallery
 
 #### 1. Coordination
@@ -271,3 +278,4 @@ b := cc.NewBarter[string]()
 // G1: b.Exchange("ping") -> returns "pong"
 // G2: b.Exchange("pong") -> returns "ping"
 ```
+
