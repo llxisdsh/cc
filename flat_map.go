@@ -39,12 +39,13 @@ type FlatMap[K comparable, V any] struct {
 
 type flatRebuildState[K comparable, V any] struct {
 	hint        mapRebuildHint
-	chunks      atomic.Uint32
+	latch       Latch
+	oldTable    flatTable[K, V]
 	newTable    SeqLockSlot[flatTable[K, V]]
 	newTableSeq SeqLock32 // seqlock of new table
+	chunks      uint32
 	process     atomic.Uint32
 	completed   atomic.Uint32
-	latch       Latch
 }
 
 type flatTable[K comparable, V any] struct {
@@ -1258,7 +1259,8 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 
 	cpus := maxProcs()
 	chunks := calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition)
-	rs.chunks.Store(uint32(chunks))
+	rs.chunks = uint32(chunks)
+	rs.oldTable = *table
 	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newFlatTable[K, V](newLen, cpus))
 	m.helpCopyAndWait(rs)
 	return true
@@ -1266,18 +1268,11 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 
 //go:noinline
 func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
-	table := SeqLockRead32(&m.tableSeq, &m.table)
 	newTable := SeqLockRead32(&rs.newTableSeq, &rs.newTable)
-	if newTable.buckets.ptr == nil ||
-		newTable.buckets.ptr == table.buckets.ptr {
-		return
-	}
-	chunks := rs.chunks.Load()
-	if chunks == 0 {
-		return
-	}
-	oldLen := table.mask + 1
 	newLen := newTable.mask + 1
+	table := rs.oldTable
+	oldLen := table.mask + 1
+	chunks := rs.chunks
 	// Determines the concurrent task range for destination buckets.
 	// We iterate based on the "Destination Constraint" to allow lock-free
 	// writes:
@@ -1300,7 +1295,6 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 		m.copyBucket(&table, start, end, oldLen, baseLen, &newTable)
 		if rs.completed.Add(1) == chunks {
 			SeqLockWriteLocked32(&m.tableSeq, &m.table, newTable)
-			// rs.newTableSeq.ClearLocked()
 			m.endRebuild(rs)
 			return
 		}
