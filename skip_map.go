@@ -2,7 +2,6 @@ package cc
 
 import (
 	"cmp"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 )
@@ -13,6 +12,7 @@ const (
 
 	skipFlagLinked uint32 = 1 << iota
 	skipFlagMarked
+	skipFlagLock
 
 	skipBaseLinks  = 4
 	skipExtraLinks = skipMaxLevel - skipBaseLinks
@@ -30,13 +30,10 @@ type skipNode[K cmp.Ordered, V any] struct {
 	// Group read-heavy fields in the first 64 bytes (cache line).
 	// This dramatically reduces false sharing when the node is frequently accessed.
 	key   K
-	flags uint32
+	flags uint32 // [bit0: linked] [bit1: marked] [bit2: lock]
 	level uint32
 	value unsafe.Pointer // *V
 	links skipOptionalArray
-
-	// Isolate contended lock fields in their own cache line boundary
-	mu sync.Mutex
 }
 
 type skipOptionalArray struct {
@@ -98,6 +95,21 @@ func (n *skipNode[K, V]) setNext(layer int, dest *skipNode[K, V]) {
 //go:nosplit
 func (n *skipNode[K, V]) setFlag(f uint32) {
 	atomic.OrUint32(&n.flags, f)
+}
+
+//go:nosplit
+func (n *skipNode[K, V]) lock() {
+	// inline BitLockUint32
+	cur := atomic.LoadUint32(&n.flags)
+	if atomic.CompareAndSwapUint32(&n.flags, cur&^skipFlagLock, cur|skipFlagLock) {
+		return
+	}
+	slowBitLockUint32(&n.flags, skipFlagLock)
+}
+
+//go:nosplit
+func (n *skipNode[K, V]) unlock() {
+	BitUnlockUint32(&n.flags, skipFlagLock)
 }
 
 //go:nosplit
@@ -184,7 +196,7 @@ func purgeLocks[K cmp.Ordered, V any](prevs [skipMaxLevel]*skipNode[K, V], top i
 	for i := top; i >= 0; i-- {
 		p := getAt(&prevs[0], i)
 		if p != locked {
-			p.mu.Unlock()
+			p.unlock()
 			locked = p
 		}
 	}
@@ -212,7 +224,7 @@ func (s *SkipMap[K, V]) Store(key K, value V) {
 			p = getAt(&prevs[0], i)
 			nex = getAt(&nexts[0], i)
 			if p != prevP {
-				p.mu.Lock()
+				p.lock()
 				lockedTop = i
 				prevP = p
 			}
@@ -277,9 +289,9 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			if !marked {
 				victim = getAt(&nexts[0], hitLvl)
 				victimLvl = hitLvl
-				victim.mu.Lock()
+				victim.lock()
 				if victim.hasFlag(skipFlagMarked) {
-					victim.mu.Unlock()
+					victim.unlock()
 					return *new(V), false
 				}
 				victim.setFlag(skipFlagMarked)
@@ -294,7 +306,7 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 				p = getAt(&prevs[0], i)
 				nex = getAt(&nexts[0], i)
 				if p != prevP {
-					p.mu.Lock()
+					p.lock()
 					lockedTop = i
 					prevP = p
 				}
@@ -309,7 +321,7 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			for i := victimLvl; i >= 0; i-- {
 				getAt(&prevs[0], i).setNext(i, victim.next(i))
 			}
-			victim.mu.Unlock()
+			victim.unlock()
 			purgeLocks(prevs, lockedTop)
 
 			atomic.AddUintptr(&s.count, ^uintptr(0))
@@ -338,9 +350,9 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			if !marked {
 				victim = getAt(&nexts[0], hitLvl)
 				victimLvl = hitLvl
-				victim.mu.Lock()
+				victim.lock()
 				if victim.hasFlag(skipFlagMarked) {
-					victim.mu.Unlock()
+					victim.unlock()
 					return false
 				}
 				victim.setFlag(skipFlagMarked)
@@ -355,7 +367,7 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 				p = getAt(&prevs[0], i)
 				nex = getAt(&nexts[0], i)
 				if p != prevP {
-					p.mu.Lock()
+					p.lock()
 					lockedTop = i
 					prevP = p
 				}
@@ -370,7 +382,7 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			for i := victimLvl; i >= 0; i-- {
 				getAt(&prevs[0], i).setNext(i, victim.next(i))
 			}
-			victim.mu.Unlock()
+			victim.unlock()
 			purgeLocks(prevs, lockedTop)
 
 			atomic.AddUintptr(&s.count, ^uintptr(0))
@@ -411,7 +423,7 @@ func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 			p = getAt(&prevs[0], i)
 			nex = getAt(&nexts[0], i)
 			if p != prevP {
-				p.mu.Lock()
+				p.lock()
 				lockedTop = i
 				prevP = p
 			}
@@ -467,7 +479,7 @@ func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loade
 			p = getAt(&prevs[0], i)
 			nex = getAt(&nexts[0], i)
 			if p != prevP {
-				p.mu.Lock()
+				p.lock()
 				lockedTop = i
 				prevP = p
 			}
