@@ -170,7 +170,7 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
-		h1v = h1IntKey(hash)
+		h1v = hash / entriesPerBucket
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
@@ -210,7 +210,7 @@ func (m *Map[K, V]) Store(key K, value V) {
 	var h1v uintptr
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
-		h1v = h1IntKey(hash)
+		h1v = hash / entriesPerBucket
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
@@ -564,7 +564,7 @@ func (m *Map[K, V]) compute(
 	var h1v uintptr
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
-		h1v = h1IntKey(hash)
+		h1v = hash / entriesPerBucket
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
@@ -1273,14 +1273,14 @@ func (m *Map[K, V]) copyBucket(
 					if opt.EmbeddedHash_ {
 						hash = e.GetHash()
 						if m.intKey {
-							h1v = h1IntKey(hash)
+							h1v = hash / entriesPerBucket
 						} else {
 							h1v = h1(hash)
 						}
 					} else {
 						if m.intKey {
 							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
-							h1v = h1IntKey(hash)
+							h1v = hash / entriesPerBucket
 						} else {
 							hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
 							h1v = h1(hash)

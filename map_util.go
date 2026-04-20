@@ -237,36 +237,6 @@ func noEscape[T any](p *T) *T {
 // SWAR Utilities
 // ============================================================================
 
-// intHash computes the hash for integer keys.
-// The switch on unsafe.Sizeof is evaluated at compile time for each generic instantiation.
-// The Go compiler (since 1.18) will perform Dead Code Elimination (DCE) to remove
-// unreachable branches, resulting in a zero-cost abstraction (no runtime branch).
-//
-//go:nosplit
-func intHash[K any](ptr unsafe.Pointer) uintptr {
-	switch unsafe.Sizeof(*new(K)) {
-	case 8:
-		if bitSize == 64 {
-			return *(*uintptr)(ptr)
-		} else {
-			v := *(*uint64)(ptr)
-			return uintptr(v>>32) ^ uintptr(v)
-		}
-	case 4:
-		if bitSize == 32 {
-			return *(*uintptr)(ptr)
-		} else {
-			return uintptr(*(*uint32)(ptr))
-		}
-	case 2:
-		return uintptr(*(*uint16)(ptr))
-	case 1:
-		return uintptr(*(*uint8)(ptr))
-	default:
-		return 0
-	}
-}
-
 // h1 extracts the bucket index from a hash value.
 // The hash format is unified: [high bits: bucket index] [low h2Bits: h2 entropy]
 // This allows branch-free extraction for all key types.
@@ -274,11 +244,6 @@ func intHash[K any](ptr unsafe.Pointer) uintptr {
 //go:nosplit
 func h1(h uintptr) uintptr {
 	return h >> h2Bits
-}
-
-//go:nosplit
-func h1IntKey(h uintptr) uintptr {
-	return h / entriesPerBucket
 }
 
 // h2 extracts the byte-level hash for in-bucket lookups.
@@ -436,6 +401,36 @@ func runtime_doSpin()
 // ============================================================================
 // Hash Utilities
 // ============================================================================
+
+// intHash computes the hash for integer keys.
+// The switch on unsafe.Sizeof is evaluated at compile time for each generic instantiation.
+// The Go compiler (since 1.18) will perform Dead Code Elimination (DCE) to remove
+// unreachable branches, resulting in a zero-cost abstraction (no runtime branch).
+//
+//go:nosplit
+func intHash[K any](ptr unsafe.Pointer) uintptr {
+	switch unsafe.Sizeof(*new(K)) {
+	case 8:
+		if bitSize == 64 {
+			return *(*uintptr)(ptr)
+		} else {
+			v := *(*uint64)(ptr)
+			return uintptr(v>>32) ^ uintptr(v)
+		}
+	case 4:
+		if bitSize == 32 {
+			return *(*uintptr)(ptr)
+		} else {
+			return uintptr(*(*uint32)(ptr))
+		}
+	case 2:
+		return uintptr(*(*uint16)(ptr))
+	case 1:
+		return uintptr(*(*uint8)(ptr))
+	default:
+		return 0
+	}
+}
 
 type (
 	// HashFunc is the function to hash a value of type K.
