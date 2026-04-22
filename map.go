@@ -27,15 +27,15 @@ import (
 //   - Map must not be copied after first use.
 type Map[K comparable, V any] struct {
 	_        noCopy
-	table    unsafe.Pointer // *mapTable
-	rs       unsafe.Pointer // *rebuildState
+	table    unsafe.Pointer // [*mapTable]
+	rs       unsafe.Pointer // [*rebuildState]
 	growths  uint32
 	shrinks  uint32
 	seed     uintptr
-	keyHash  HashFunc  // WithKeyHasher
-	valEqual EqualFunc // WithValueEqual
-	minLen   uintptr   // WithCapacity
-	shrinkOn bool      // WithAutoShrink
+	keyHash  HashFunc
+	valEqual EqualFunc
+	minLen   uintptr // [WithCapacity]
+	shrinkOn bool    // [WithAutoShrink]
 	intKey   bool
 }
 
@@ -43,10 +43,10 @@ type Map[K comparable, V any] struct {
 type rebuildState struct {
 	hint      mapRebuildHint
 	latch     Latch
-	table     unsafe.Pointer // *mapTable
-	newTable  unsafe.Pointer // *mapTable
-	process   uint32
-	completed uint32
+	table     unsafe.Pointer // [*mapTable]
+	newTable  unsafe.Pointer // [*mapTable]
+	process   atomic.Uint32
+	completed atomic.Uint32
 }
 
 // mapTable represents the internal hash table structure.
@@ -64,8 +64,8 @@ type bucket struct {
 	// meta: metadata for fast entry lookups, must be 64-bit aligned
 	_       [0]atomic.Uint64
 	meta    uint64
-	entries [entriesPerBucket]unsafe.Pointer // *opt.Entry_
-	next    unsafe.Pointer                   // *bucket
+	entries [entriesPerBucket]unsafe.Pointer // [*entry_]
+	next    unsafe.Pointer                   // [*bucket]
 }
 
 // NewMap creates a new Map instance. Direct initialization is also
@@ -1229,7 +1229,7 @@ func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
 	baseLen := min(newLen, oldLen)
 	chunkSz := (baseLen + (chunks) - 1) / (chunks)
 	for {
-		process := uintptr(atomic.AddUint32(&rs.process, 1))
+		process := uintptr(rs.process.Add(1))
 		if process > chunks {
 			// Wait copying completed
 			rs.latch.Wait()
@@ -1239,7 +1239,7 @@ func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
 		start := (process) * chunkSz
 		end := min(start+chunkSz, baseLen)
 		m.copyBucket(table, start, end, oldLen, baseLen, newTable)
-		if uintptr(atomic.AddUint32(&rs.completed, 1)) == chunks {
+		if uintptr(rs.completed.Add(1)) == chunks {
 			// Copying completed
 			atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 			m.endRebuild(rs)

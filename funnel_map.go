@@ -19,13 +19,13 @@ import (
 // contention, pushing sequential throughput near hardware limits.
 type FunnelMap[K cmp.Ordered, V any] struct {
 	_        noCopy
-	table    unsafe.Pointer // *hMapTable
-	rs       unsafe.Pointer // *hRebuildState
+	table    unsafe.Pointer // [*funnelTable]
+	rs       unsafe.Pointer // [*funnelRebuildState]
 	seed     uintptr
-	keyHash  HashFunc  // WithKeyHasher
-	valEqual EqualFunc // WithValueEqual
-	minLen   uintptr   // WithCapacity
-	shrinkOn bool      // WithAutoShrink
+	keyHash  HashFunc
+	valEqual EqualFunc
+	minLen   uintptr // [WithCapacity]
+	shrinkOn bool    // [WithAutoShrink]
 	intKey   bool
 }
 
@@ -33,10 +33,10 @@ type FunnelMap[K cmp.Ordered, V any] struct {
 type funnelRebuildState struct {
 	hint      mapRebuildHint
 	latch     Latch
-	table     unsafe.Pointer // *hMapTable
-	newTable  unsafe.Pointer // *hMapTable
-	process   uint32
-	completed uint32
+	table     unsafe.Pointer // [*funnelTable]
+	newTable  unsafe.Pointer // [*funnelTable]
+	process   atomic.Uint32
+	completed atomic.Uint32
 }
 
 // funnelTable represents the internal hash table structure.
@@ -53,7 +53,7 @@ type funnelBucket struct {
 	// meta: metadata for fast entry lookups, must be 64-bit aligned
 	_       [0]atomic.Uint64
 	meta    uint64
-	entries [fEntriesPerBucket]unsafe.Pointer // *opt.Entry_
+	entries [fEntriesPerBucket]unsafe.Pointer // [*entry_]
 }
 
 // NewFunnelMap creates a new FunnelMap instance. Direct initialization is also
@@ -1145,7 +1145,7 @@ func (m *FunnelMap[K, V]) helpCopyAndWait(rs *funnelRebuildState) {
 	baseLen := min(newLen, oldLen)
 	chunkSz := (baseLen + (chunks) - 1) / (chunks)
 	for {
-		process := uintptr(atomic.AddUint32(&rs.process, 1))
+		process := uintptr(rs.process.Add(1))
 		if process > chunks {
 			// Wait copying completed
 			rs.latch.Wait()
@@ -1155,7 +1155,7 @@ func (m *FunnelMap[K, V]) helpCopyAndWait(rs *funnelRebuildState) {
 		start := (process) * chunkSz
 		end := min(start+chunkSz, baseLen)
 		m.copyBucket(table, start, end, oldLen, baseLen, newTable)
-		if uintptr(atomic.AddUint32(&rs.completed, 1)) == chunks {
+		if uintptr(rs.completed.Add(1)) == chunks {
 			m.copyBucketWithOverflow(table, newTable)
 			atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 			m.endRebuild(rs)

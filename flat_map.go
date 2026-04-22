@@ -32,9 +32,10 @@ type FlatMap[K comparable, V any] struct {
 	keyHash  HashFunc
 	valEqual EqualFunc
 	tableSeq SeqLock32 // seqlock of table
-	shrinkOn bool      // WithAutoShrink
+	shrinkOn bool      // [WithAutoShrink]
 	intKey   bool
-	rs       unsafe.Pointer // *flatRebuildState[K, V]
+	minLen   uintptr        // [WithCapacity]
+	rs       unsafe.Pointer // [*flatRebuildState]
 }
 
 type flatRebuildState[K comparable, V any] struct {
@@ -59,7 +60,7 @@ type flatBucket[K comparable, V any] struct {
 	_       [0]atomic.Uint64
 	meta    uint64         // op byte + h2 bytes
 	seq     SeqLock        // seqlock of bucket
-	next    unsafe.Pointer // *flatBucket[K,V]
+	next    unsafe.Pointer // [*flatBucket]
 	entries [entriesPerBucket]SeqLockSlot[entry_[K, V]]
 }
 
