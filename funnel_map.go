@@ -20,13 +20,13 @@ import (
 type FunnelMap[K cmp.Ordered, V any] struct {
 	_        noCopy
 	table    unsafe.Pointer // [*funnelTable]
-	rs       unsafe.Pointer // [*funnelRebuildState]
+	intKey   bool
+	shrinkOn bool // [WithAutoShrink]
 	seed     uintptr
 	keyHash  HashFunc
 	valEqual EqualFunc
-	minLen   uintptr // [WithCapacity]
-	shrinkOn bool    // [WithAutoShrink]
-	intKey   bool
+	rs       unsafe.Pointer // [*funnelRebuildState]
+	minLen   uintptr        // [WithCapacity]
 }
 
 // funnelRebuildState represents the current state of a resizing operation
@@ -102,13 +102,11 @@ func (m *FunnelMap[K, V]) init(
 	}
 
 	m.seed = uintptr(rand.Uint64())
-	tableLen := fCalcTableLen(cfg.capacity)
-	m.minLen = tableLen
+	newLen := fCalcTableLen(cfg.capacity)
+	m.minLen = newLen
 	m.shrinkOn = cfg.autoShrink
-
-	newTable := newFunnelTable[K, V](tableLen, maxProcs())
+	newTable := newFunnelTable[K, V](newLen, maxProcs())
 	atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
-
 	return newTable
 }
 
@@ -1010,11 +1008,9 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	clone.minLen = m.minLen
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
-	newTable := newFunnelTable[K, V](clone.minLen, maxProcs())
+	newLen := fCalcTableLen(table.SumSize())
+	newTable := newFunnelTable[K, V](newLen, maxProcs())
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
-
-	// Pre-fetch size to optimize initial capacity
-	clone.Grow(m.Size())
 	for k, v := range m.All() {
 		clone.Store(k, v)
 	}

@@ -28,15 +28,15 @@ import (
 type Map[K comparable, V any] struct {
 	_        noCopy
 	table    unsafe.Pointer // [*mapTable]
-	rs       unsafe.Pointer // [*rebuildState]
-	growths  uint32
-	shrinks  uint32
+	intKey   bool
+	shrinkOn bool // [WithAutoShrink]
 	seed     uintptr
 	keyHash  HashFunc
 	valEqual EqualFunc
-	minLen   uintptr // [WithCapacity]
-	shrinkOn bool    // [WithAutoShrink]
-	intKey   bool
+	rs       unsafe.Pointer // [*rebuildState]
+	minLen   uintptr        // [WithCapacity]
+	growths  uint32
+	shrinks  uint32
 }
 
 // rebuildState represents the current state of a resizing operation
@@ -136,11 +136,10 @@ func (m *Map[K, V]) init(
 	}
 
 	m.seed = uintptr(rand.Uint64())
-	tableLen := calcTableLen(cfg.capacity)
-	m.minLen = tableLen
+	newLen := calcTableLen(cfg.capacity)
+	m.minLen = newLen
 	m.shrinkOn = cfg.autoShrink
-
-	newTable := newMapTable(tableLen, maxProcs())
+	newTable := newMapTable(newLen, maxProcs())
 	atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 	return newTable
 }
@@ -1067,11 +1066,9 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	clone.minLen = m.minLen
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
-	newTable := newMapTable(clone.minLen, maxProcs())
+	newLen := calcTableLen(table.SumSize())
+	newTable := newMapTable(newLen, maxProcs())
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
-
-	// Pre-fetch size to optimize initial capacity
-	clone.Grow(m.Size())
 	for k, v := range m.All() {
 		clone.Store(k, v)
 	}

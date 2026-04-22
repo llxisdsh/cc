@@ -28,14 +28,14 @@ import (
 type FlatMap[K comparable, V any] struct {
 	_        noCopy
 	table    SeqLockSlot[flatTable[K, V]]
+	tableSeq SeqLock32 // seqlock of table
+	intKey   bool
+	shrinkOn bool // [WithAutoShrink]
 	seed     uintptr
 	keyHash  HashFunc
 	valEqual EqualFunc
-	tableSeq SeqLock32 // seqlock of table
-	shrinkOn bool      // [WithAutoShrink]
-	intKey   bool
-	minLen   uintptr        // [WithCapacity]
 	rs       unsafe.Pointer // [*flatRebuildState]
+	minLen   uintptr        // [WithCapacity]
 }
 
 type flatRebuildState[K comparable, V any] struct {
@@ -119,9 +119,10 @@ func (m *FlatMap[K, V]) init(
 
 	m.seed = uintptr(rand.Uint64())
 	m.shrinkOn = cfg.autoShrink
-	tableLen := calcTableLen(cfg.capacity)
-	SeqLockWriteLocked32(&m.tableSeq, &m.table,
-		newFlatTable[K, V](tableLen, maxProcs()))
+	newLen := calcTableLen(cfg.capacity)
+	m.minLen = newLen
+	newTable := newFlatTable[K, V](newLen, maxProcs())
+	SeqLockWriteLocked32(&m.tableSeq, &m.table, newTable)
 }
 
 // Load retrieves the value for a key.
@@ -820,7 +821,7 @@ slowPath:
 				if newMeta&metaDataMask == metaEmpty {
 					if loadPtr(&m.rs) == nil {
 						tableLen := table.mask + 1
-						if minTableLen < tableLen {
+						if m.minLen < tableLen {
 							size := table.SumSize()
 							if size < tableLen*entriesPerBucket/shrinkFraction {
 								m.tryResize(mapShrinkHint, tableLen>>1)
@@ -1031,8 +1032,8 @@ func (m *FlatMap[K, V]) Clear() {
 	}
 
 	m.rebuild(mapRebuildBlockWritersHint, func(_ *MapRebuild[K, V]) {
-		SeqLockWriteLocked32(&m.tableSeq, &m.table,
-			newFlatTable[K, V](minTableLen, maxProcs()))
+		newTable := newFlatTable[K, V](m.minLen, maxProcs())
+		SeqLockWriteLocked32(&m.tableSeq, &m.table, newTable)
 	})
 }
 
@@ -1084,7 +1085,7 @@ func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd uintptr) {
 			}
 		} else {
 			// mapShrinkHint
-			if tableLen <= minTableLen {
+			if tableLen <= m.minLen {
 				return
 			}
 			newLen = calcTableLen(table.SumSize())
@@ -1134,9 +1135,10 @@ func (m *FlatMap[K, V]) CloneTo(clone *FlatMap[K, V]) {
 	clone.valEqual = m.valEqual
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
-	SeqLockWriteLocked32(&clone.tableSeq, &clone.table,
-		newFlatTable[K, V](minTableLen, maxProcs()))
-	clone.Grow(m.Size())
+	clone.minLen = m.minLen
+	newLen := calcTableLen(table.SumSize())
+	newTable := newFlatTable[K, V](newLen, maxProcs())
+	SeqLockWriteLocked32(&clone.tableSeq, &clone.table, newTable)
 	for k, v := range m.All() {
 		clone.Store(k, v)
 	}
@@ -1252,7 +1254,7 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 			return true
 		}
 	} else {
-		if newLen >= tableLen || newLen < minTableLen {
+		if newLen >= tableLen || newLen < m.minLen {
 			m.endRebuild(rs)
 			return true
 		}
@@ -1262,7 +1264,8 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 	chunks := calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition)
 	rs.chunks = uint32(chunks)
 	rs.oldTable = *table
-	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newFlatTable[K, V](newLen, cpus))
+	newTable := newFlatTable[K, V](newLen, cpus)
+	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newTable)
 	m.helpCopyAndWait(rs)
 	return true
 }
