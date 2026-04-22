@@ -1225,15 +1225,6 @@ func (m *FunnelMap[K, V]) copyBucket(
 }
 
 func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTable *funnelTable[K, V]) {
-	// Wait for any in-flight lock-free overflow writers to finish their mutations
-	// on the old table. Since all chunks are fully copied, no new writers can pass
-	// the resize state check and lock a bucket. Thus, this counter will strictly
-	// drain to 0 without deadlocking.
-	// for atomic.LoadInt32(&table.overflowWriters) > 0 {
-	// 	runtime.Gosched()
-	// }
-
-	// Copying completed
 	var copied uintptr
 	for k, v := range table.overflow.All() {
 		var hash uintptr

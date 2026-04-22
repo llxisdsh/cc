@@ -1298,8 +1298,7 @@ func (m *Map[K, V]) copyBucket(
 							*destB.At(emptyIdx) = unsafe.Pointer(e)
 							break
 						}
-						next := (*bucket)(destB.next)
-						if next == nil {
+						if meta&opNextMask == 0 {
 							destB.next = unsafe.Pointer(&bucket{
 								meta:    setByte(metaEmpty, h2v, 0),
 								entries: [entriesPerBucket]unsafe.Pointer{unsafe.Pointer(e)},
@@ -1307,7 +1306,7 @@ func (m *Map[K, V]) copyBucket(
 							destB.meta = meta | opNextMask
 							break
 						}
-						destB = next
+						destB = (*bucket)(destB.next)
 					}
 					copied++
 				}

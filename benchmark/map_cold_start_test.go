@@ -13,7 +13,7 @@ import (
 	"github.com/zhangyunhao116/skipmap"
 )
 
-//go:noescape
+//go:nosplit
 //go:linkname runtime_cheaprand runtime.cheaprand
 func runtime_cheaprand() uint32
 

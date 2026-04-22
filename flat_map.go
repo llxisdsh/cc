@@ -1351,8 +1351,7 @@ func (m *FlatMap[K, V]) copyBucket(
 							*destB.At(emptyIdx).Ptr() = *e
 							break
 						}
-						next := (*flatBucket[K, V])(destB.next)
-						if next == nil {
+						if meta&opNextMask == 0 {
 							destB.next = unsafe.Pointer(&flatBucket[K, V]{
 								meta: setByte(metaEmpty, h2v, 0),
 								entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
@@ -1362,7 +1361,7 @@ func (m *FlatMap[K, V]) copyBucket(
 							destB.meta = meta | opNextMask
 							break
 						}
-						destB = next
+						destB = (*flatBucket[K, V])(destB.next)
 					}
 					copied++
 				}
