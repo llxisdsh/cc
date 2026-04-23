@@ -145,23 +145,11 @@ type counterStripe struct {
 // ============================================================================
 
 // calcParallelism calculates the number of goroutines for parallel processing.
-//
-// Parameters:
-//   - items: Number of items to process.
-//   - threshold: Minimum threshold to enable parallel processing.
-//   - number of available CPU cores
-//
-// Returns:
-//   - chunks: Suggested degree of parallelism (number of goroutines).
+// return value must be a power of 2
 //
 //go:nosplit
-func calcParallelism(items, threshold, cpus uintptr) uintptr {
-	if items <= threshold {
-		return 1
-	}
-	chunks := min(items/threshold, cpus)
-	// chunkSz = (items + chunks - 1) / chunks
-	return chunks
+func calcParallelism(items, cpus uintptr) uintptr {
+	return nextPowOf2(min(items/minBucketsPerCPU, cpus))
 }
 
 // calcTableLen computes the bucket count for the table

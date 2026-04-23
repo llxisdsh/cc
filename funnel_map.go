@@ -2,6 +2,7 @@ package cc
 
 import (
 	"cmp"
+	"math/bits"
 	"math/rand/v2"
 	"runtime"
 	"sync/atomic"
@@ -32,18 +33,19 @@ type FunnelMap[K cmp.Ordered, V any] struct {
 // funnelRebuildState represents the current state of a resizing operation
 type funnelRebuildState struct {
 	hint      mapRebuildHint
+	chunks    uint32  // number of chunks for resizing
+	chunkSz   uintptr // size of each chunk for resizing
 	latch     Latch
-	table     unsafe.Pointer // [*funnelTable]
+	oldTable  unsafe.Pointer // [*funnelTable]
 	newTable  unsafe.Pointer // [*funnelTable]
-	process   atomic.Uint32
-	completed atomic.Uint32
+	process   uint32         // atomic
+	completed uint32         // atomic
 }
 
 // funnelTable represents the internal hash table structure.
 type funnelTable[K cmp.Ordered, V any] struct {
 	buckets  unsafeSlice[funnelBucket]
 	mask     uintptr
-	chunks   uintptr // number of chunks and chunks size for resizing
 	overflow *SkipMap[K, V]
 	size     PLocalCounter
 }
@@ -114,7 +116,6 @@ func newFunnelTable[K cmp.Ordered, V any](tableLen, cpus uintptr) *funnelTable[K
 	table := &funnelTable[K, V]{
 		buckets:  makeUnsafeSlice[funnelBucket](tableLen),
 		mask:     tableLen - 1,
-		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 		overflow: NewSkipMap[K, V](),
 	}
 	return table
@@ -1115,8 +1116,21 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 		}
 	}
 
-	rs.table = unsafe.Pointer(table)
 	cpus := maxProcs()
+	chunks := uint32(calcParallelism(tableLen, cpus*resizeOverPartition))
+	// Determines the concurrent task range for destination buckets.
+	// We iterate based on the "Destination Constraint" to allow lock-free
+	// writes:
+	// - Grow (Pow2):   baseLen == oldLen. Source i moves to Dest i, i+baseLen...
+	// - Shrink (Pow2): baseLen == newLen. Source i, i+baseLen... move to Dest i.
+	// By iterating 0..baseLen and processing all aliasing source buckets
+	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
+	// owns the write operations for its assigned destination buckets.
+	baseLen := min(newLen, tableLen)
+	chunkSz := max(1, baseLen>>bits.TrailingZeros32(chunks))
+	rs.chunks = chunks
+	rs.chunkSz = chunkSz
+	rs.oldTable = unsafe.Pointer(table)
 	newTable := newFunnelTable[K, V](newLen, cpus)
 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
 	m.helpCopyAndWait(rs)
@@ -1127,32 +1141,24 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 func (m *FunnelMap[K, V]) helpCopyAndWait(rs *funnelRebuildState) {
 	newTable := (*funnelTable[K, V])(loadPtr(&rs.newTable))
 	newLen := newTable.mask + 1
-	table := (*funnelTable[K, V])(rs.table)
-	oldLen := table.mask + 1
-	chunks := table.chunks
-	// Determines the concurrent task range for destination buckets.
-	// We iterate based on the "Destination Constraint" to allow lock-free
-	// writes:
-	// - Grow (Pow2):   baseLen == oldLen. Source i moves to Dest i, i+baseLen...
-	// - Shrink (Pow2): baseLen == newLen. Source i, i+baseLen... move to Dest i.
-	// By iterating 0..baseLen and processing all aliasing source buckets
-	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
-	// owns the write operations for its assigned destination buckets.
+	oldTable := (*funnelTable[K, V])(rs.oldTable)
+	oldLen := oldTable.mask + 1
+	chunks := uint32(rs.chunks)
+	chunkSz := rs.chunkSz
 	baseLen := min(newLen, oldLen)
-	chunkSz := (baseLen + (chunks) - 1) / (chunks)
 	for {
-		process := uintptr(rs.process.Add(1))
+		process := atomic.AddUint32(&rs.process, 1)
 		if process > chunks {
 			// Wait copying completed
 			rs.latch.Wait()
 			return
 		}
 		process--
-		start := (process) * chunkSz
+		start := uintptr(process) * chunkSz
 		end := min(start+chunkSz, baseLen)
-		m.copyBucket(table, start, end, oldLen, baseLen, newTable)
-		if uintptr(rs.completed.Add(1)) == chunks {
-			m.copyBucketWithOverflow(table, newTable)
+		m.copyBucket(oldTable, start, end, oldLen, baseLen, newTable)
+		if atomic.AddUint32(&rs.completed, 1) == chunks {
+			m.copyBucketWithOverflow(oldTable, newTable)
 			atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 			m.endRebuild(rs)
 			return

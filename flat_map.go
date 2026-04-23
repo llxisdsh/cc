@@ -1,6 +1,7 @@
 package cc
 
 import (
+	"math/bits"
 	"math/rand/v2"
 	"runtime"
 	"sync/atomic"
@@ -40,13 +41,14 @@ type FlatMap[K comparable, V any] struct {
 
 type flatRebuildState[K comparable, V any] struct {
 	hint        mapRebuildHint
+	chunks      uint32  // number of chunks for resizing
+	chunkSz     uintptr // size of each chunk for resizing
 	latch       Latch
 	oldTable    flatTable[K, V]
 	newTable    SeqLockSlot[flatTable[K, V]]
 	newTableSeq SeqLock32 // seqlock of new table
-	chunks      uint32
-	process     atomic.Uint32
-	completed   atomic.Uint32
+	process     uint32    // atomic
+	completed   uint32    // atomic
 }
 
 type flatTable[K comparable, V any] struct {
@@ -1261,8 +1263,19 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 	}
 
 	cpus := maxProcs()
-	chunks := calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition)
-	rs.chunks = uint32(chunks)
+	chunks := uint32(calcParallelism(tableLen, cpus*resizeOverPartition))
+	// Determines the concurrent task range for destination buckets.
+	// We iterate based on the "Destination Constraint" to allow lock-free
+	// writes:
+	// - Grow (Pow2):   baseLen == oldLen. Source i moves to Dest i, i+baseLen...
+	// - Shrink (Pow2): baseLen == newLen. Source i, i+baseLen... move to Dest i.
+	// By iterating 0..baseLen and processing all aliasing source buckets
+	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
+	// owns the write operations for its assigned destination buckets.
+	baseLen := min(newLen, tableLen)
+	chunkSz := max(1, baseLen>>bits.TrailingZeros32(chunks))
+	rs.chunks = chunks
+	rs.chunkSz = chunkSz
 	rs.oldTable = *table
 	newTable := newFlatTable[K, V](newLen, cpus)
 	SeqLockWriteLocked32(&rs.newTableSeq, &rs.newTable, newTable)
@@ -1274,21 +1287,13 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 	newTable := SeqLockRead32(&rs.newTableSeq, &rs.newTable)
 	newLen := newTable.mask + 1
-	table := rs.oldTable
-	oldLen := table.mask + 1
+	oldTable := rs.oldTable
+	oldLen := oldTable.mask + 1
 	chunks := rs.chunks
-	// Determines the concurrent task range for destination buckets.
-	// We iterate based on the "Destination Constraint" to allow lock-free
-	// writes:
-	// - Grow (Pow2):   baseLen == oldLen. Source i moves to Dest i, i+baseLen...
-	// - Shrink (Pow2): baseLen == newLen. Source i, i+baseLen... move to Dest i.
-	// By iterating 0..baseLen and processing all aliasing source buckets
-	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
-	// owns the write operations for its assigned destination buckets.
+	chunkSz := rs.chunkSz
 	baseLen := min(newLen, oldLen)
-	chunkSz := (baseLen + uintptr(chunks) - 1) / uintptr(chunks)
 	for {
-		process := rs.process.Add(1)
+		process := atomic.AddUint32(&rs.process, 1)
 		if process > chunks {
 			rs.latch.Wait()
 			return
@@ -1296,8 +1301,8 @@ func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 		process--
 		start := uintptr(process) * chunkSz
 		end := min(start+chunkSz, baseLen)
-		m.copyBucket(&table, start, end, oldLen, baseLen, &newTable)
-		if rs.completed.Add(1) == chunks {
+		m.copyBucket(&oldTable, start, end, oldLen, baseLen, &newTable)
+		if atomic.AddUint32(&rs.completed, 1) == chunks {
 			SeqLockWriteLocked32(&m.tableSeq, &m.table, newTable)
 			m.endRebuild(rs)
 			return

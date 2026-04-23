@@ -1,6 +1,7 @@
 package cc
 
 import (
+	"math/bits"
 	"math/rand/v2"
 	"runtime"
 	"sync/atomic"
@@ -42,11 +43,13 @@ type Map[K comparable, V any] struct {
 // rebuildState represents the current state of a resizing operation
 type rebuildState struct {
 	hint      mapRebuildHint
+	chunks    uint32  // number of chunks for resizing
+	chunkSz   uintptr // size of each chunk for resizing
 	latch     Latch
-	table     unsafe.Pointer // [*mapTable]
+	oldTable  unsafe.Pointer // [*mapTable]
 	newTable  unsafe.Pointer // [*mapTable]
-	process   atomic.Uint32
-	completed atomic.Uint32
+	process   uint32         // atomic
+	completed uint32         // atomic
 }
 
 // mapTable represents the internal hash table structure.
@@ -55,8 +58,6 @@ type mapTable struct {
 	mask     uintptr
 	size     unsafeSlice[counterStripe]
 	sizeMask uintptr
-	// number of chunks and chunks size for resizing
-	chunks uintptr
 }
 
 // bucket represents a hash table bucket with cache-line alignment.
@@ -151,7 +152,6 @@ func newMapTable(tableLen, cpus uintptr) *mapTable {
 		mask:     tableLen - 1,
 		size:     makeUnsafeSlice[counterStripe](sizeLen),
 		sizeMask: sizeLen - 1,
-		chunks:   calcParallelism(tableLen, minBucketsPerCPU, cpus*resizeOverPartition),
 	}
 }
 
@@ -1200,8 +1200,21 @@ func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 		atomic.AddUint32(&m.shrinks, 1)
 	}
 
-	rs.table = unsafe.Pointer(table)
 	cpus := maxProcs()
+	chunks := uint32(calcParallelism(tableLen, cpus*resizeOverPartition))
+	// Determines the concurrent task range for destination buckets.
+	// We iterate based on the "Destination Constraint" to allow lock-free
+	// writes:
+	// - Grow (Pow2):   baseLen == oldLen. Source i moves to Dest i, i+baseLen...
+	// - Shrink (Pow2): baseLen == newLen. Source i, i+baseLen... move to Dest i.
+	// By iterating 0..baseLen and processing all aliasing source buckets
+	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
+	// owns the write operations for its assigned destination buckets.
+	baseLen := min(newLen, tableLen)
+	chunkSz := max(1, baseLen>>bits.TrailingZeros32(chunks))
+	rs.chunks = chunks
+	rs.chunkSz = chunkSz
+	rs.oldTable = unsafe.Pointer(table)
 	newTable := newMapTable(newLen, cpus)
 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
 	m.helpCopyAndWait(rs)
@@ -1212,31 +1225,23 @@ func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
 	newTable := (*mapTable)(loadPtr(&rs.newTable))
 	newLen := newTable.mask + 1
-	table := (*mapTable)(rs.table)
-	oldLen := table.mask + 1
-	chunks := table.chunks
-	// Determines the concurrent task range for destination buckets.
-	// We iterate based on the "Destination Constraint" to allow lock-free
-	// writes:
-	// - Grow (Pow2):   baseLen == oldLen. Source i moves to Dest i, i+baseLen...
-	// - Shrink (Pow2): baseLen == newLen. Source i, i+baseLen... move to Dest i.
-	// By iterating 0..baseLen and processing all aliasing source buckets
-	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
-	// owns the write operations for its assigned destination buckets.
+	oldTable := (*mapTable)(rs.oldTable)
+	oldLen := oldTable.mask + 1
+	chunks := uint32(rs.chunks)
+	chunkSz := rs.chunkSz
 	baseLen := min(newLen, oldLen)
-	chunkSz := (baseLen + (chunks) - 1) / (chunks)
 	for {
-		process := uintptr(rs.process.Add(1))
+		process := atomic.AddUint32(&rs.process, 1)
 		if process > chunks {
 			// Wait copying completed
 			rs.latch.Wait()
 			return
 		}
 		process--
-		start := (process) * chunkSz
+		start := uintptr(process) * chunkSz
 		end := min(start+chunkSz, baseLen)
-		m.copyBucket(table, start, end, oldLen, baseLen, newTable)
-		if uintptr(rs.completed.Add(1)) == chunks {
+		m.copyBucket(oldTable, start, end, oldLen, baseLen, newTable)
+		if atomic.AddUint32(&rs.completed, 1) == chunks {
 			// Copying completed
 			atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 			m.endRebuild(rs)
