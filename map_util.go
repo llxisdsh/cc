@@ -288,7 +288,7 @@ func markZeroBytes(w uint64) uint64 {
 //
 //go:nosplit
 func setByte(w uint64, b uint8, idx uintptr) uint64 {
-	shift := idx << 3
+	shift := (idx & 7) << 3 // & 7: hints compiler to elide shift bounds checks
 	return (w &^ (0xff << shift)) | (uint64(b) << shift)
 }
 
