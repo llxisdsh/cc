@@ -327,7 +327,16 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			atomic.AddUintptr(&s.count, ^uintptr(0))
 			return victim.loadVal(), true
 		}
-		return *new(V), false
+
+		// The node is missing or we encountered a concurrent state change.
+		// If hitLvl is -1, the node genuinely doesn't exist.
+		// If the node exists but is marked, it's logically deleted by someone else.
+		if hitLvl == -1 || getAt(&nexts[0], hitLvl).hasFlag(skipFlagMarked) {
+			return *new(V), false
+		}
+
+		// Otherwise, the node is physically present but in a transient state
+		// (e.g., being inserted or partially linked). We must retry.
 	}
 }
 
@@ -388,7 +397,16 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			atomic.AddUintptr(&s.count, ^uintptr(0))
 			return true
 		}
-		return false
+
+		// The key genuinely doesn't exist.
+		if hitLvl == -1 {
+			return false
+		}
+		// The key exists but is already marked for deletion by another goroutine.
+		if getAt(&nexts[0], hitLvl).hasFlag(skipFlagMarked) {
+			return false
+		}
+		// The node is in a transient state (e.g., being inserted). We must retry.
 	}
 }
 
