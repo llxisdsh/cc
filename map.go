@@ -184,6 +184,7 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
 			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == key {
 						return e.value, true
@@ -225,6 +226,7 @@ func (m *Map[K, V]) Store(key K, value V) {
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+					//goland:noinspection GoBoolExpressions
 					if !opt.EmbeddedHash_ || e.GetHash() == hash {
 						if e.key == key {
 							// valEqual: skip write if value unchanged
@@ -296,6 +298,7 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
 				e := (*entry_[K, V])(*b.At(j))
+				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == key {
 						goto found
@@ -579,6 +582,7 @@ func (m *Map[K, V]) compute(
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+					//goland:noinspection GoBoolExpressions
 					if !opt.EmbeddedHash_ || e.GetHash() == hash {
 						if e.key == *key {
 							if flags&computeSkipIfFound != 0 {
@@ -652,6 +656,7 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j = firstMarkedByteIndex(marked)
 				e := (*entry_[K, V])(*b.At(j))
+				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == *key {
 						it.entry.value, it.loaded = e.value, true

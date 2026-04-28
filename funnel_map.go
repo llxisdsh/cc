@@ -47,7 +47,7 @@ type funnelTable[K cmp.Ordered, V any] struct {
 	buckets  unsafeSlice[funnelBucket]
 	mask     uintptr
 	overflow *SkipMap[K, V]
-	size     PLocalCounter
+	size     PLocalCounter // size counts only entries in the buckets array
 }
 
 // funnelBucket represents a hash table bucket with cache-line alignment.
@@ -107,12 +107,12 @@ func (m *FunnelMap[K, V]) init(
 	newLen := fCalcTableLen(cfg.capacity)
 	m.minLen = newLen
 	m.shrinkOn = cfg.autoShrink
-	newTable := newFunnelTable[K, V](newLen, maxProcs())
+	newTable := newFunnelTable[K, V](newLen)
 	atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 	return newTable
 }
 
-func newFunnelTable[K cmp.Ordered, V any](tableLen, cpus uintptr) *funnelTable[K, V] {
+func newFunnelTable[K cmp.Ordered, V any](tableLen uintptr) *funnelTable[K, V] {
 	table := &funnelTable[K, V]{
 		buckets:  makeUnsafeSlice[funnelBucket](tableLen),
 		mask:     tableLen - 1,
@@ -149,6 +149,7 @@ func (m *FunnelMap[K, V]) Load(key K) (value V, ok bool) {
 	for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 		j := firstMarkedByteIndex(marked)
 		if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+			//goland:noinspection GoBoolExpressions
 			if !opt.EmbeddedHash_ || e.GetHash() == hash {
 				if e.key == key {
 					return e.value, true
@@ -191,6 +192,7 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
 			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == key {
 						// valEqual: skip write if value unchanged
@@ -268,6 +270,7 @@ slowPath:
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j = firstMarkedByteIndex(marked)
 			e := (*entry_[K, V])(*b.At(j))
+			//goland:noinspection GoBoolExpressions
 			if !opt.EmbeddedHash_ || e.GetHash() == hash {
 				if e.key == key {
 					goto found
@@ -499,6 +502,7 @@ func (m *FunnelMap[K, V]) compute(
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
 			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == *key {
 						if flags&computeSkipIfFound != 0 {
@@ -575,6 +579,7 @@ slowPath:
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j = firstMarkedByteIndex(marked)
 			e := (*entry_[K, V])(*b.At(j))
+			//goland:noinspection GoBoolExpressions
 			if !opt.EmbeddedHash_ || e.GetHash() == hash {
 				if e.key == *key {
 					it.entry.value, it.loaded = e.value, true
@@ -941,7 +946,7 @@ func (m *FunnelMap[K, V]) Clear() {
 		return
 	}
 	m.rebuild(mapRebuildBlockWritersHint, func() {
-		newTable := newFunnelTable[K, V](m.minLen, maxProcs())
+		newTable := newFunnelTable[K, V](m.minLen)
 		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
 	})
 }
@@ -1049,7 +1054,7 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	clone.shrinkOn = m.shrinkOn
 	clone.intKey = m.intKey
 	newLen := fCalcTableLen(table.SumSize())
-	newTable := newFunnelTable[K, V](newLen, maxProcs())
+	newTable := newFunnelTable[K, V](newLen)
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
 	for k, v := range m.All() {
 		clone.Store(k, v)
@@ -1170,7 +1175,7 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 	rs.chunks = chunks
 	rs.chunkSz = chunkSz
 	rs.oldTable = unsafe.Pointer(table)
-	newTable := newFunnelTable[K, V](newLen, cpus)
+	newTable := newFunnelTable[K, V](newLen)
 	atomic.StorePointer(&rs.newTable, unsafe.Pointer(newTable))
 	m.helpCopyAndWait(rs)
 	return true

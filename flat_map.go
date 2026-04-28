@@ -349,6 +349,7 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				e := b.At(j).Ptr()
+				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == key {
 						oldB, oldIdx = b, j
@@ -722,6 +723,7 @@ slowPath:
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
 				e := b.At(j).Ptr()
+				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == *key {
 						oldB, oldIdx, oldMeta, it.entry.value, it.loaded = b, j, meta, e.value, true
