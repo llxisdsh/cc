@@ -123,6 +123,22 @@ func (m *MapRebuild[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
+// ComputeRange iterates all entries and applies a user callback.
+// If f returns false, range stops the iteration.
+func (m *MapRebuild[K, V]) ComputeRange(yield func(e *MapEntry[K, V]) bool) {
+	if m.m != nil {
+		m.m.computeRange(yield, true)
+		return
+	}
+	m.f.computeRange(yield, true)
+}
+
+// Entries returns an iterator function for use with range-over-func.
+// It provides the same functionality as ComputeRange but in iterator form.
+func (m *MapRebuild[K, V]) Entries() func(yield func(e *MapEntry[K, V]) bool) {
+	return m.ComputeRange
+}
+
 // Size returns the number of key-value pairs in the map.
 // This operation sums counters across all size stripes for an approximate
 // count.

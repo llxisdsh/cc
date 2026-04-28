@@ -2405,20 +2405,21 @@ func TestFlatMap_RangeProcess_BlockWriters_Strict(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *MapEntry[int, testValue]) bool {
-					// Verify invariant during processing
-					if e.Value().Y != ^e.Value().X {
-						tornReads.Add(1)
-						t.Errorf("Torn read detected in ComputeRange: key=%d, X=%x, Y=%x", e.Key(), e.Value().X, e.Value().Y)
+				m.Rebuild(func(m *MapRebuild[int, testValue]) {
+					for e := range m.Entries() {
+						// Verify invariant during processing
+						if e.Value().Y != ^e.Value().X {
+							tornReads.Add(1)
+							t.Errorf("Torn read detected in ComputeRange: key=%d, X=%x, Y=%x", e.Key(), e.Value().X, e.Value().Y)
+						}
+						// Update counter while maintaining invariant
+						e.Update(testValue{
+							X:       e.Value().X,
+							Y:       e.Value().Y,
+							Counter: e.Value().Counter + 1,
+						})
 					}
-					// Update counter while maintaining invariant
-					e.Update(testValue{
-						X:       e.Value().X,
-						Y:       e.Value().Y,
-						Counter: e.Value().Counter + 1,
-					})
-					return true
-				}, true) // blockWriters = true
+				})
 				rangeProcessRuns.Add(1)
 				runtime.Gosched()
 			}
@@ -2541,7 +2542,7 @@ func TestFlatMap_RangeProcess_AllowWriters_Concurrent(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *MapEntry[int, testValue]) bool {
+				for e := range m.Entries() {
 					// Verify invariant
 					if e.Value().B != ^e.Value().A {
 						tornReads.Add(1)
@@ -2553,8 +2554,7 @@ func TestFlatMap_RangeProcess_AllowWriters_Concurrent(t *testing.T) {
 						B:   e.Value().B,
 						Seq: e.Value().Seq + 1,
 					})
-					return true
-				}, false) // AllowWriters
+				}
 				rangeProcessRuns.Add(1)
 				runtime.Gosched()
 			}
@@ -2694,19 +2694,20 @@ func TestFlatMap_RangeProcess_TornReadDetection_Stress(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *MapEntry[int, complexValue]) bool {
-					validateValue(e.Key(), e.Value(), "ComputeRange")
+				m.Rebuild(func(m *MapRebuild[int, complexValue]) {
+					for e := range m.Entries() {
+						validateValue(e.Key(), e.Value(), "ComputeRange")
 
-					// Modify while maintaining invariants
-					newID := e.Value().ID + 0x1000
-					e.Update(complexValue{
-						ID:       newID,
-						Checksum: ^newID,
-						Data:     [4]uint64{newID, newID + 1, newID + 2, newID + 3},
-						Tail:     newID,
-					})
-					return true
-				}, true) // policyOpt = BlockWriters
+						// Modify while maintaining invariants
+						newID := e.Value().ID + 0x1000
+						e.Update(complexValue{
+							ID:       newID,
+							Checksum: ^newID,
+							Data:     [4]uint64{newID, newID + 1, newID + 2, newID + 3},
+							Tail:     newID,
+						})
+					}
+				})
 				runtime.Gosched()
 			}
 		}
@@ -2830,12 +2831,13 @@ func TestFlatMap_RangeProcess_WriterBlocking_Verification(t *testing.T) {
 		defer wg.Done()
 		close(rangeProcessStarted)
 
-		m.ComputeRange(func(e *MapEntry[int, int]) bool {
-			// Simulate some processing time
-			time.Sleep(10 * time.Millisecond)
-			e.Update(e.Value() + 1)
-			return true
-		}, true) // policyOpt = BlockWriters
+		m.Rebuild(func(m *MapRebuild[int, int]) {
+			for e := range m.Entries() {
+				// Simulate some processing time
+				time.Sleep(10 * time.Millisecond)
+				e.Update(e.Value() + 1)
+			}
+		})
 
 		close(rangeProcessDone)
 	}()
@@ -3268,7 +3270,7 @@ func TestFlatMap_Rebuild_Wrapper(t *testing.T) {
 
 		// Delete
 		m.Delete(2)
-	}, true) // Block writers
+	})
 
 	// Verify results after rebuild
 	if v, ok := m.Load(1); !ok || v != 101 {
@@ -3294,7 +3296,7 @@ func TestFlatMap_Rebuild_Concurrent(t *testing.T) {
 		m.Rebuild(func(_ *MapRebuild[int, int]) {
 			// Simulate work
 			time.Sleep(100 * time.Millisecond)
-		}, false) // Allow writers
+		})
 		close(done)
 	}()
 
@@ -3306,7 +3308,7 @@ func TestFlatMap_Rebuild_Concurrent(t *testing.T) {
 	m.Store(1, 100)
 	duration := time.Since(start)
 
-	if duration > 50*time.Millisecond {
+	if duration < 50*time.Millisecond {
 		t.Errorf("Store blocked for %v, expected non-blocking", duration)
 	}
 

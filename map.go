@@ -272,7 +272,7 @@ slowPath:
 				table = (*mapTable)(loadPtr(&m.table))
 				continue
 			default:
-				// mapRebuildWithWritersHint: allow concurrent writers
+				// mapRebuildAllowWritersHint: allow concurrent writers
 			}
 		}
 
@@ -626,7 +626,7 @@ slowPath:
 					table = (*mapTable)(loadPtr(&m.table))
 					continue
 				default:
-					// mapRebuildWithWritersHint: allow concurrent writers
+					// mapRebuildAllowWritersHint: allow concurrent writers
 				}
 			}
 		}
@@ -860,19 +860,15 @@ func (m *Map[K, V]) ToMap(limit ...int) map[K]V {
 // It provides the same functionality as ComputeRange but in iterator form.
 //
 //go:nosplit
-func (m *Map[K, V]) Entries(
-	blockWriters ...bool,
-) func(yield func(e *MapEntry[K, V]) bool) {
-	return func(yield func(e *MapEntry[K, V]) bool) {
-		m.ComputeRange(yield, blockWriters...)
-	}
+func (m *Map[K, V]) Entries() func(yield func(e *MapEntry[K, V]) bool) {
+	return m.ComputeRange
 }
 
 // ComputeRange iterates all entries and applies a user callback.
 //
 // Callback signature:
 //
-//		fn(e *MapEntry[K, V]) bool
+//		yield(e *MapEntry[K, V]) bool
 //
 //	  - e.Update(newV): update the entry to newV
 //	  - e.Delete(): delete the entry
@@ -880,76 +876,98 @@ func (m *Map[K, V]) Entries(
 //	  - return true to continue; return false to stop iteration
 //
 // Concurrency & consistency:
+//   - Allows concurrent writers during iteration.
+//   - Uses per-bucket locking: holds the root-bucket lock while processing
+//     its bucket chain to coordinate with writers and resize operations.
 //   - Cooperates with concurrent grow/shrink; if a resize is detected, it
 //     helps complete copying, then continues on the latest table.
-//   - Holds the root-bucket lock while processing its bucket chain to
-//     coordinate with writers/resize operations.
+//   - Provides weakly consistent iteration: entries may be updated, added,
+//     or removed concurrently, and may or may not be observed.
 //
 // Parameters:
-//   - fn: user function applied to each key-value pair.
-//   - blockWriters: optional flag (default false). If true, concurrent writers
-//     are blocked during iteration; resize operations are always exclusive.
+//   - yield: user function applied to each key-value pair.
 //
-// Recommendation: keep fn lightweight to reduce lock hold time.
-func (m *Map[K, V]) ComputeRange(
-	fn func(e *MapEntry[K, V]) bool,
-	blockWriters ...bool,
-) {
-	hint := mapRebuildAllowWritersHint
-	if len(blockWriters) != 0 && blockWriters[0] {
-		hint = mapRebuildBlockWritersHint
+// Recommendation: keep yield lightweight to reduce lock hold time.
+func (m *Map[K, V]) ComputeRange(yield func(e *MapEntry[K, V]) bool) {
+	m.computeRange(yield, false)
+}
+
+func (m *Map[K, V]) computeRange(yield func(e *MapEntry[K, V]) bool, ignoreRebuildState bool) {
+restart:
+	table := (*mapTable)(loadPtr(&m.table))
+	if table == nil {
+		return
+	}
+	it := MapEntry[K, V]{
+		loaded: true,
 	}
 
-	m.rebuild(hint, func(_ *MapRebuild[K, V]) {
-		table := (*mapTable)(loadPtr(&m.table))
-		if table == nil {
-			return
-		}
-		it := MapEntry[K, V]{
-			loaded: true,
-		}
-		for i := uintptr(0); i <= table.mask; i++ {
-			root := table.buckets.At(i)
-			root.Lock()
-			b := root
-			for {
-				meta := loadUint64Fast(&b.meta)
-				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
-					e := (*entry_[K, V])(*b.At(j))
-					it.entry = *e
-					it.op = cancelOp
-					shouldContinue := fn(noEscape(&it))
+	for i := uintptr(0); i <= table.mask; i++ {
+		root := table.buckets.At(i)
+		root.Lock()
 
-					switch it.op {
-					case updateOp:
-						newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
-						if opt.EmbeddedHash_ {
-							newEntry.SetHash(e.GetHash())
-						}
-						storePtr(b.At(j), unsafe.Pointer(newEntry))
-					case deleteOp:
-						storePtr(b.At(j), nil)
-						meta = setByte(meta, h2Empty, j)
-						storeUint64(&b.meta, meta)
-						table.AddSize(i, ^uintptr(0))
-					default:
-						// cancelOp: no-op
-					}
-
-					if !shouldContinue {
+		if !ignoreRebuildState {
+			if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
+				switch rs.hint {
+				case mapGrowHint, mapShrinkHint:
+					if loadPtr(&rs.newTable) != nil {
 						root.Unlock()
-						return
+						m.helpCopyAndWait(rs)
+						goto restart
 					}
+				case mapRebuildBlockWritersHint:
+					root.Unlock()
+					rs.latch.Wait()
+					goto restart
+				default:
+					// mapRebuildAllowWritersHint: allow concurrent writers
 				}
-				if meta&opNextMask == 0 {
-					break
-				}
-				b = (*bucket)(b.next)
 			}
-			root.Unlock()
+
+			if newTable := (*mapTable)(loadPtr(&m.table)); table != newTable {
+				root.Unlock()
+				goto restart
+			}
 		}
-	})
+
+		b := root
+		for {
+			meta := loadUint64Fast(&b.meta)
+			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				e := (*entry_[K, V])(*b.At(j))
+				it.entry = *e
+				it.op = cancelOp
+				shouldContinue := yield(noEscape(&it))
+
+				switch it.op {
+				case updateOp:
+					newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
+					if opt.EmbeddedHash_ {
+						newEntry.SetHash(e.GetHash())
+					}
+					storePtr(b.At(j), unsafe.Pointer(newEntry))
+				case deleteOp:
+					storePtr(b.At(j), nil)
+					meta = setByte(meta, h2Empty, j)
+					storeUint64(&b.meta, meta)
+					table.AddSize(i, ^uintptr(0))
+				default:
+					// cancelOp: no-op
+				}
+
+				if !shouldContinue {
+					root.Unlock()
+					return
+				}
+			}
+			if meta&opNextMask == 0 {
+				break
+			}
+			b = (*bucket)(b.next)
+		}
+		root.Unlock()
+	}
 }
 
 // Clear compatible with `sync.Map`
@@ -1075,33 +1093,24 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 }
 
 // Rebuild performs a map rebuild operation with the given function.
-// The function is executed with exclusive access
-// (or shared based on blockWriters) to the map.
+// The function is executed with exclusive access to the map.
+// Concurrent writers are always blocked during the rebuild.
 //
 // Parameters:
 //   - fn: The function to execute during rebuild.
 //     It receives a MapRebuild instance.
-//   - blockWriters: Optional. If true, concurrent writers are blocked.
-//     Default is false (allow writers).
 //
 // Notes:
 //   - You must use the `m *MapRebuild[K, V]` parameter passed to `fn` for
 //     processing. Do not call methods on the Map instance directly, as this
 //     may cause deadlocks.
-func (m *Map[K, V]) Rebuild(
-	fn func(m *MapRebuild[K, V]),
-	blockWriters ...bool,
-) {
-	hint := mapRebuildAllowWritersHint
-	if len(blockWriters) != 0 && blockWriters[0] {
-		hint = mapRebuildBlockWritersHint
-	}
-	m.rebuild(hint, fn)
+func (m *Map[K, V]) Rebuild(fn func(m *MapRebuild[K, V])) {
+	m.rebuild(mapRebuildBlockWritersHint, fn)
 }
 
 // rebuild reorganizes the map. Only these hints are supported:
-//   - mapRebuildWithWritersHint: allows concurrent reads/writes
-//   - mapExclusiveRebuildHint: allows concurrent reads
+//   - mapRebuildAllowWritersHint: allows concurrent reads/writes
+//   - mapRebuildBlockWritersHint: allows concurrent reads
 func (m *Map[K, V]) rebuild(
 	hint mapRebuildHint,
 	fn func(m *MapRebuild[K, V]),
@@ -1227,7 +1236,7 @@ func (m *Map[K, V]) helpCopyAndWait(rs *rebuildState) {
 	newLen := newTable.mask + 1
 	oldTable := (*mapTable)(rs.oldTable)
 	oldLen := oldTable.mask + 1
-	chunks := uint32(rs.chunks)
+	chunks := rs.chunks
 	chunkSz := rs.chunkSz
 	baseLen := min(newLen, oldLen)
 	for {

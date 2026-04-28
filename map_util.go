@@ -86,8 +86,8 @@ const (
 	mapNoHint mapRebuildHint = iota
 	mapGrowHint
 	mapShrinkHint
-	mapRebuildAllowWritersHint
 	mapRebuildBlockWritersHint
+	mapRebuildAllowWritersHint
 )
 
 type computeOp uint8

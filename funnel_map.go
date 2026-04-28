@@ -245,7 +245,7 @@ slowPath:
 				table = (*funnelTable[K, V])(loadPtr(&m.table))
 				continue
 			default:
-				// mapRebuildWithWritersHint: allow concurrent writers
+				// mapRebuildAllowWritersHint: allow concurrent writers
 			}
 		}
 
@@ -551,7 +551,7 @@ slowPath:
 					table = (*funnelTable[K, V])(loadPtr(&m.table))
 					continue
 				default:
-					// mapRebuildWithWritersHint: allow concurrent writers
+					// mapRebuildAllowWritersHint: allow concurrent writers
 				}
 			}
 		}
@@ -790,19 +790,15 @@ func (m *FunnelMap[K, V]) ToMap(limit ...int) map[K]V {
 // It provides the same functionality as ComputeRange but in iterator form.
 //
 //go:nosplit
-func (m *FunnelMap[K, V]) Entries(
-	blockWriters ...bool,
-) func(yield func(e *MapEntry[K, V]) bool) {
-	return func(yield func(e *MapEntry[K, V]) bool) {
-		m.ComputeRange(yield, blockWriters...)
-	}
+func (m *FunnelMap[K, V]) Entries() func(yield func(e *MapEntry[K, V]) bool) {
+	return m.ComputeRange
 }
 
 // ComputeRange iterates all entries and applies a user callback.
 //
 // Callback signature:
 //
-//		fn(e *MapEntry[K, V]) bool
+//		yield(e *MapEntry[K, V]) bool
 //
 //	  - e.Update(newV): update the entry to newV
 //	  - e.Delete(): delete the entry
@@ -810,89 +806,132 @@ func (m *FunnelMap[K, V]) Entries(
 //	  - return true to continue; return false to stop iteration
 //
 // Concurrency & consistency:
+//   - Allows concurrent writers during iteration.
+//   - Uses per-bucket locking: holds the root-bucket lock while processing
+//     its bucket chain to coordinate with writers and resize operations.
 //   - Cooperates with concurrent grow/shrink; if a resize is detected, it
 //     helps complete copying, then continues on the latest table.
-//   - Holds the root-bucket lock while processing its bucket chain to
-//     coordinate with writers/resize operations.
+//   - Provides weakly consistent iteration: entries may be updated, added,
+//     or removed concurrently, and may or may not be observed.
 //
 // Parameters:
-//   - fn: user function applied to each key-value pair.
-//   - blockWriters: optional flag (default false). If true, concurrent writers
-//     are blocked during iteration; resize operations are always exclusive.
+//   - yield: user function applied to each key-value pair.
 //
-// Recommendation: keep fn lightweight to reduce lock hold time.
-func (m *FunnelMap[K, V]) ComputeRange(
-	fn func(e *MapEntry[K, V]) bool,
-	blockWriters ...bool,
-) {
-	hint := mapRebuildAllowWritersHint
-	if len(blockWriters) != 0 && blockWriters[0] {
-		hint = mapRebuildBlockWritersHint
+// Recommendation: keep yield lightweight to reduce lock hold time.
+func (m *FunnelMap[K, V]) ComputeRange(yield func(e *MapEntry[K, V]) bool) {
+	m.computeRange(yield, false)
+}
+
+func (m *FunnelMap[K, V]) computeRange(yield func(e *MapEntry[K, V]) bool, ignoreRebuildState bool) {
+restart:
+	table := (*funnelTable[K, V])(loadPtr(&m.table))
+	if table == nil {
+		return
+	}
+	it := MapEntry[K, V]{
+		loaded: true,
 	}
 
-	m.rebuild(hint, func() {
-		table := (*funnelTable[K, V])(loadPtr(&m.table))
-		if table == nil {
-			return
-		}
-		it := MapEntry[K, V]{
-			loaded: true,
-		}
-		for i := uintptr(0); i <= table.mask; i++ {
-			b := table.buckets.At(i)
-			b.Lock()
-			meta := loadUint64Fast(&b.meta)
-			for marked := meta & fMetaMask; marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				e := (*entry_[K, V])(*b.At(j))
-				it.entry = *e
-				it.op = cancelOp
-				shouldContinue := fn(noEscape(&it))
+	for i := uintptr(0); i <= table.mask; i++ {
+		b := table.buckets.At(i)
+		b.Lock()
 
-				switch it.op {
-				case updateOp:
-					newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
-					if opt.EmbeddedHash_ {
-						newEntry.SetHash(e.GetHash())
+		if !ignoreRebuildState {
+			if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
+				switch rs.hint {
+				case mapGrowHint, mapShrinkHint:
+					if loadPtr(&rs.newTable) != nil {
+						b.Unlock()
+						m.helpCopyAndWait(rs)
+						goto restart
 					}
-					storePtr(b.At(j), unsafe.Pointer(newEntry))
-				case deleteOp:
-					storePtr(b.At(j), nil)
-					meta = setByte(meta, h2Empty, j)
-					storeUint64(&b.meta, meta)
-					table.AddSize(^uintptr(0))
-				default:
-					// cancelOp: no-op
-				}
-
-				if !shouldContinue {
+				case mapRebuildBlockWritersHint:
 					b.Unlock()
-					return
+					rs.latch.Wait()
+					goto restart
+				default:
+					// mapRebuildAllowWritersHint: allow concurrent writers
 				}
 			}
-			b.Unlock()
+
+			if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
+				b.Unlock()
+				goto restart
+			}
 		}
 
-		// Process overflow
-		overflow := table.overflow
-		for k, v := range overflow.All() {
-			it.entry.key = k
-			it.entry.value = v
+		meta := loadUint64Fast(&b.meta)
+		for marked := meta & fMetaMask; marked != 0; marked &= marked - 1 {
+			j := firstMarkedByteIndex(marked)
+			e := (*entry_[K, V])(*b.At(j))
+			it.entry = *e
 			it.op = cancelOp
-			shouldContinue := fn(noEscape(&it))
+			shouldContinue := yield(noEscape(&it))
+
 			switch it.op {
 			case updateOp:
-				overflow.Store(k, it.entry.value)
+				newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
+				if opt.EmbeddedHash_ {
+					newEntry.SetHash(e.GetHash())
+				}
+				storePtr(b.At(j), unsafe.Pointer(newEntry))
 			case deleteOp:
-				overflow.Delete(k)
+				storePtr(b.At(j), nil)
+				meta = setByte(meta, h2Empty, j)
+				storeUint64(&b.meta, meta)
+				table.AddSize(^uintptr(0))
 			default:
 				// cancelOp: no-op
 			}
+
 			if !shouldContinue {
+				b.Unlock()
 				return
 			}
 		}
-	})
+		b.Unlock()
+	}
+
+	// Process overflow
+	overflow := table.overflow
+	for k, v := range overflow.All() {
+		if !ignoreRebuildState {
+			if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
+				switch rs.hint {
+				case mapGrowHint, mapShrinkHint:
+					if loadPtr(&rs.newTable) != nil {
+						m.helpCopyAndWait(rs)
+						goto restart
+					}
+				case mapRebuildBlockWritersHint:
+					rs.latch.Wait()
+					goto restart
+				default:
+					// mapRebuildAllowWritersHint: allow concurrent writers
+				}
+			}
+
+			if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
+				goto restart
+			}
+		}
+
+		it.entry.key = k
+		it.entry.value = v
+		it.op = cancelOp
+		shouldContinue := yield(noEscape(&it))
+		switch it.op {
+		case updateOp:
+			overflow.Store(k, it.entry.value)
+		case deleteOp:
+			overflow.Delete(k)
+		default:
+			// cancelOp: no-op
+		}
+		if !shouldContinue {
+			return
+		}
+	}
 }
 
 // Clear clears all key-value pairs from the map.
@@ -1018,8 +1057,8 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 }
 
 // rebuild reorganizes the map. Only these hints are supported:
-//   - mapRebuildWithWritersHint: allows concurrent reads/writes
-//   - mapExclusiveRebuildHint: allows concurrent reads
+//   - mapRebuildAllowWritersHint: allows concurrent reads/writes
+//   - mapRebuildBlockWritersHint: allows concurrent reads
 func (m *FunnelMap[K, V]) rebuild(
 	hint mapRebuildHint,
 	fn func(),
@@ -1143,7 +1182,7 @@ func (m *FunnelMap[K, V]) helpCopyAndWait(rs *funnelRebuildState) {
 	newLen := newTable.mask + 1
 	oldTable := (*funnelTable[K, V])(rs.oldTable)
 	oldLen := oldTable.mask + 1
-	chunks := uint32(rs.chunks)
+	chunks := rs.chunks
 	chunkSz := rs.chunkSz
 	baseLen := min(newLen, oldLen)
 	for {

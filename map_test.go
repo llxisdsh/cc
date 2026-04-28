@@ -6470,22 +6470,24 @@ func TestMap_RangeProcess_BlockWriters_Strict(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *MapEntry[int, testValue]) bool {
-					k, v := e.Key(), e.Value()
-					// Verify invariant during processing
-					if v.Y != ^v.X {
-						tornReads.Add(1)
-						t.Errorf("Torn read detected in ComputeRange: key=%d, X=%x, Y=%x", k, v.X, v.Y)
-					}
-					// Update counter while maintaining invariant
-					newV := testValue{
-						X:       v.X,
-						Y:       v.Y,
-						Counter: v.Counter + 1,
-					}
-					e.Update(newV)
-					return true
-				}, true) // policyOpt = BlockWriters
+				m.Rebuild(func(m *MapRebuild[int, testValue]) {
+					m.ComputeRange(func(e *MapEntry[int, testValue]) bool {
+						k, v := e.Key(), e.Value()
+						// Verify invariant during processing
+						if v.Y != ^v.X {
+							tornReads.Add(1)
+							t.Errorf("Torn read detected in ComputeRange: key=%d, X=%x, Y=%x", k, v.X, v.Y)
+						}
+						// Update counter while maintaining invariant
+						newV := testValue{
+							X:       v.X,
+							Y:       v.Y,
+							Counter: v.Counter + 1,
+						}
+						e.Update(newV)
+						return true
+					})
+				})
 				rangeProcessRuns.Add(1)
 				runtime.Gosched()
 			}
@@ -6764,21 +6766,24 @@ func TestMap_RangeProcess_TornReadDetection_Stress(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.ComputeRange(func(e *MapEntry[int, complexValue]) bool {
-					k, v := e.Key(), e.Value()
-					validateValue(k, v, "ComputeRange")
+				m.Rebuild(func(m *MapRebuild[int, complexValue]) {
+					m.ComputeRange(func(e *MapEntry[int, complexValue]) bool {
+						k, v := e.Key(), e.Value()
+						validateValue(k, v, "ComputeRange")
 
-					// Modify while maintaining invariants
-					newID := v.ID + 0x1000
-					newV := complexValue{
-						ID:       newID,
-						Checksum: ^newID,
-						Data:     [4]uint64{newID, newID + 1, newID + 2, newID + 3},
-						Tail:     newID,
-					}
-					e.Update(newV)
-					return true
-				}, true) // policyOpt = BlockWriters
+						// Modify while maintaining invariants
+						newID := v.ID + 0x1000
+						newV := complexValue{
+							ID:       newID,
+							Checksum: ^newID,
+							Data:     [4]uint64{newID, newID + 1, newID + 2, newID + 3},
+							Tail:     newID,
+						}
+						e.Update(newV)
+						return true
+					})
+				})
+
 				runtime.Gosched()
 			}
 		}
@@ -6906,7 +6911,7 @@ func TestMap_RangeProcess_WriterBlocking_Verification(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 			e.Update(e.Value() + 1)
 			return true
-		}, true) // policyOpt = BlockWriters
+		})
 
 		close(rangeProcessDone)
 	}()
@@ -7003,7 +7008,7 @@ func TestMap_Rebuild_Wrapper(t *testing.T) {
 
 		// Delete
 		m.Delete(2)
-	}, true) // Block writers
+	})
 
 	// Verify results after rebuild
 	if v, ok := m.Load(1); !ok || v != 101 {
@@ -7029,7 +7034,7 @@ func TestMap_Rebuild_Concurrent(t *testing.T) {
 		m.Rebuild(func(_ *MapRebuild[int, int]) {
 			// Simulate work
 			time.Sleep(100 * time.Millisecond)
-		}, false) // Allow writers
+		})
 		close(done)
 	}()
 
@@ -7041,7 +7046,7 @@ func TestMap_Rebuild_Concurrent(t *testing.T) {
 	m.Store(1, 100)
 	duration := time.Since(start)
 
-	if duration > 50*time.Millisecond {
+	if duration < 50*time.Millisecond {
 		t.Errorf("Store blocked for %v, expected non-blocking", duration)
 	}
 

@@ -21,7 +21,7 @@ import (
 // ============================================================================
 
 const (
-	benchKeyCount = 100_000 // pre-generated key count
+	benchKeyCount = 1024 * 16 // pre-generated key count
 )
 
 // pre-generated random int keys
@@ -723,6 +723,81 @@ func BenchmarkConcurrent_IntRange_RWShardedMap(b *testing.B) {
 }
 
 // ============================================================================
+// Int Key - MatchDelete
+// ============================================================================
+
+func BenchmarkConcurrent_IntMatchDelete_XsyncMap(b *testing.B) {
+	m := xsync.NewMap[int, int]()
+	for _, key := range preGenIntKeys[:] {
+		m.Store(key, key)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m.DeleteMatching(func(key int, value int) (delete, stop bool) {
+				return true, false
+			})
+		}
+	})
+}
+
+func BenchmarkConcurrent_IntMatchDelete_CCMap(b *testing.B) {
+	m := cc.NewMap[int, int]()
+	for _, key := range preGenIntKeys[:] {
+		m.Store(key, key)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			for e := range m.Entries() {
+				e.Delete()
+			}
+			m.Shrink()
+		}
+	})
+}
+
+func BenchmarkConcurrent_IntMatchDelete_CCFlatMap(b *testing.B) {
+	m := cc.NewFlatMap[int, int]()
+	for _, key := range preGenIntKeys[:] {
+		m.Store(key, key)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			for e := range m.Entries() {
+				e.Delete()
+			}
+			m.Shrink()
+		}
+	})
+}
+
+func BenchmarkConcurrent_IntMatchDelete_CCFunnelMap(b *testing.B) {
+	m := cc.NewFunnelMap[int, int]()
+	for _, key := range preGenIntKeys[:] {
+		m.Store(key, key)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			for e := range m.Entries() {
+				e.Delete()
+			}
+			m.Shrink()
+		}
+	})
+}
+
+// ============================================================================
 // String Key - Store
 // ============================================================================
 
@@ -1393,6 +1468,81 @@ func BenchmarkConcurrent_StrRange_RWShardedMap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			m.Range(func(k string, v int) bool { return true })
+		}
+	})
+}
+
+// ============================================================================
+// String Key - MatchDelete
+// ============================================================================
+
+func BenchmarkConcurrent_StrMatchDelete_XsyncMap(b *testing.B) {
+	m := xsync.NewMap[string, int]()
+	for i, key := range preGenStringKeys[:] {
+		m.Store(key, i)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m.DeleteMatching(func(key string, value int) (delete, stop bool) {
+				return true, false
+			})
+		}
+	})
+}
+
+func BenchmarkConcurrent_StrMatchDelete_CCMap(b *testing.B) {
+	m := cc.NewMap[string, int]()
+	for i, key := range preGenStringKeys[:] {
+		m.Store(key, i)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			for e := range m.Entries() {
+				e.Delete()
+			}
+			m.Shrink()
+		}
+	})
+}
+
+func BenchmarkConcurrent_StrMatchDelete_CCFlatMap(b *testing.B) {
+	m := cc.NewFlatMap[string, int]()
+	for i, key := range preGenStringKeys[:] {
+		m.Store(key, i)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			for e := range m.Entries() {
+				e.Delete()
+			}
+			m.Shrink()
+		}
+	})
+}
+
+func BenchmarkConcurrent_StrMatchDelete_CCFunnelMap(b *testing.B) {
+	m := cc.NewFunnelMap[string, int]()
+	for i, key := range preGenStringKeys[:] {
+		m.Store(key, i)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			for e := range m.Entries() {
+				e.Delete()
+			}
+			m.Shrink()
 		}
 	})
 }
