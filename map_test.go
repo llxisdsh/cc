@@ -6905,12 +6905,13 @@ func TestMap_RangeProcess_WriterBlocking_Verification(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		close(rangeProcessStarted)
-
-		m.ComputeRange(func(e *MapEntry[int, int]) bool {
-			// Simulate some processing time
-			time.Sleep(10 * time.Millisecond)
-			e.Update(e.Value() + 1)
-			return true
+		m.Rebuild(func(m *MapRebuild[int, int]) {
+			m.ComputeRange(func(e *MapEntry[int, int]) bool {
+				// Simulate some processing time
+				time.Sleep(10 * time.Millisecond)
+				e.Update(e.Value() + 1)
+				return true
+			})
 		})
 
 		close(rangeProcessDone)
