@@ -197,15 +197,10 @@ func (p *PLocal[T]) grow(needed int) {
 		return // Already grown by someone else
 	}
 
-	// Double the size or at least satisfy needed
-	newSize := max(uintptr(needed), currentLen*2)
-	// If current is nil (first grow), ensure we start with at least GOMAXPROCS
-	if current == nil {
-		initN := uintptr(runtime.GOMAXPROCS(0))
-		if initN > newSize {
-			newSize = initN
-		}
-	}
+	// The Go scheduler guarantees that pid < GOMAXPROCS in steady state.
+	// Similar to sync.Pool, we size the array exactly to GOMAXPROCS to be "just right",
+	// avoiding wasteful doubling while keeping the number of grows minimal.
+	newSize := max(uintptr(needed), uintptr(runtime.GOMAXPROCS(0)))
 
 	newShards := makeUnsafeSlice[*pLocalSlot[T]](newSize)
 	if current != nil {
