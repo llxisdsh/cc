@@ -44,10 +44,12 @@ type funnelRebuildState struct {
 
 // funnelTable represents the internal hash table structure.
 type funnelTable[K cmp.Ordered, V any] struct {
-	buckets  unsafeSlice[funnelBucket]
-	mask     uintptr
-	overflow *SkipMap[K, V]
-	size     PLocalCounter // size counts only entries in the buckets array
+	buckets   unsafeSlice[funnelBucket]
+	mask      uintptr
+	overflow  *SkipMap[K, V]
+	size      PLocalCounter // size counts only entries in the buckets array
+	stripeCap int
+	growCap   uintptr
 }
 
 // funnelBucket represents a hash table bucket with cache-line alignment.
@@ -113,10 +115,16 @@ func (m *FunnelMap[K, V]) init(
 }
 
 func newFunnelTable[K cmp.Ordered, V any](tableLen uintptr) *funnelTable[K, V] {
+	const capFactor = float64(fEntriesPerBucket) * loadFactor
+	growCap := uintptr(float64(tableLen) * capFactor)
+	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
+	roundedSizeLen := nextPowOf2(maxProcs())
 	table := &funnelTable[K, V]{
-		buckets:  makeUnsafeSlice[funnelBucket](tableLen),
-		mask:     tableLen - 1,
-		overflow: NewSkipMap[K, V](),
+		buckets:   makeUnsafeSlice[funnelBucket](tableLen),
+		mask:      tableLen - 1,
+		overflow:  NewSkipMap[K, V](),
+		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
+		growCap:   growCap,
 	}
 	return table
 }
@@ -311,12 +319,10 @@ slowPath:
 		b.UnlockWithMeta(meta | opNextMask)
 
 		// Check if the table needs to grow
-		if loadPtr(&m.rs) == nil {
-			tableLen := table.mask + 1
+		if int(table.size.Get().Load()) >= table.stripeCap {
 			size := table.SumSize() + uintptr(table.overflow.Size())
-			const capFactor = float64(fEntriesPerBucket) * loadFactor
-			if size >= uintptr(float64(tableLen)*capFactor) {
-				m.tryResize(mapGrowHint, tableLen<<1)
+			if size >= table.growCap {
+				m.tryResize(mapGrowHint, (table.mask+1)<<1)
 			}
 		}
 		return
@@ -676,12 +682,10 @@ slowPath:
 			table.overflow.Store(*key, it.entry.value)
 
 			// Check if the table needs to grow
-			if loadPtr(&m.rs) == nil {
-				tableLen := table.mask + 1
+			if int(table.size.Get().Load()) >= table.stripeCap {
 				size := table.SumSize() + uintptr(table.overflow.Size())
-				const capFactor = float64(fEntriesPerBucket) * loadFactor
-				if size >= uintptr(float64(tableLen)*capFactor) {
-					m.tryResize(mapGrowHint, tableLen<<1)
+				if size >= table.growCap {
+					m.tryResize(mapGrowHint, (table.mask+1)<<1)
 				}
 			}
 			return retV, it.loaded

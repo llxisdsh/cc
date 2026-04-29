@@ -417,14 +417,15 @@ slowPath:
 			storeUint64(&b.meta, newMeta)
 			root.Unlock()
 		}
-		table.AddSize(idx, 1)
 
-		// Auto-grow check (parallel resize)
-		if loadPtr(&m.rs) == nil {
-			tableLen := table.mask + 1
-			size := table.SumSize()
-			const capFactor = float64(entriesPerBucket) * loadFactor
-			if size >= uintptr(float64(tableLen)*capFactor) {
+		localSize := int(table.AddSize(idx, 1))
+		// Check if the table needs to grow
+		const capFactor = float64(entriesPerBucket) * loadFactor
+		tableLen := table.mask + 1
+		growCap := uintptr(float64(tableLen) * capFactor)
+		stripeCap := int(growCap >> bits.TrailingZeros32(uint32(table.sizeMask+1)))
+		if localSize > stripeCap {
+			if table.SumSize() >= growCap {
 				m.tryResize(mapGrowHint, tableLen<<1)
 			}
 		}
@@ -794,13 +795,15 @@ slowPath:
 				storeUint64(&b.meta, newMeta)
 				root.Unlock()
 			}
-			table.AddSize(idx, 1)
-			// Auto-grow check (parallel resize)
-			if loadPtr(&m.rs) == nil {
-				tableLen := table.mask + 1
-				size := table.SumSize()
-				const capFactor = float64(entriesPerBucket) * loadFactor
-				if size >= uintptr(float64(tableLen)*capFactor) {
+
+			localSize := int(table.AddSize(idx, 1))
+			// Check if the table needs to grow
+			const capFactor = float64(entriesPerBucket) * loadFactor
+			tableLen := table.mask + 1
+			growCap := uintptr(float64(tableLen) * capFactor)
+			stripeCap := int(growCap >> bits.TrailingZeros32(uint32(table.sizeMask+1)))
+			if localSize > stripeCap {
+				if table.SumSize() >= growCap {
 					m.tryResize(mapGrowHint, tableLen<<1)
 				}
 			}
@@ -1410,8 +1413,8 @@ func newFlatTable[K comparable, V any](
 }
 
 //go:nosplit
-func (t *flatTable[K, V]) AddSize(idx, delta uintptr) {
-	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
+func (t *flatTable[K, V]) AddSize(idx, delta uintptr) uintptr {
+	return atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
 }
 
 //go:nosplit

@@ -54,10 +54,12 @@ type rebuildState struct {
 
 // mapTable represents the internal hash table structure.
 type mapTable struct {
-	buckets  unsafeSlice[bucket]
-	mask     uintptr
-	size     unsafeSlice[counterStripe]
-	sizeMask uintptr
+	buckets   unsafeSlice[bucket]
+	mask      uintptr
+	size      unsafeSlice[counterStripe]
+	sizeMask  uintptr
+	stripeCap int
+	growCap   uintptr
 }
 
 // bucket represents a hash table bucket with cache-line alignment.
@@ -147,11 +149,15 @@ func (m *Map[K, V]) init(
 
 func newMapTable(tableLen, cpus uintptr) *mapTable {
 	sizeLen := calcSizeLen(tableLen, cpus)
+	const capFactor = float64(entriesPerBucket) * loadFactor
+	growCap := uintptr(float64(tableLen) * capFactor)
 	return &mapTable{
-		buckets:  makeUnsafeSlice[bucket](tableLen),
-		mask:     tableLen - 1,
-		size:     makeUnsafeSlice[counterStripe](sizeLen),
-		sizeMask: sizeLen - 1,
+		buckets:   makeUnsafeSlice[bucket](tableLen),
+		mask:      tableLen - 1,
+		size:      makeUnsafeSlice[counterStripe](sizeLen),
+		sizeMask:  sizeLen - 1,
+		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(sizeLen))),
+		growCap:   growCap,
 	}
 }
 
@@ -362,15 +368,11 @@ slowPath:
 				root.Unlock()
 			}
 
-			table.AddSize(idx, 1)
-
+			localSize := int(table.AddSize(idx, 1))
 			// Check if the table needs to grow
-			if loadPtr(&m.rs) == nil {
-				tableLen := table.mask + 1
-				size := table.SumSize()
-				const capFactor = float64(entriesPerBucket) * loadFactor
-				if size >= uintptr(float64(tableLen)*capFactor) {
-					m.tryResize(mapGrowHint, tableLen<<1)
+			if localSize > table.stripeCap {
+				if table.SumSize() >= table.growCap {
+					m.tryResize(mapGrowHint, (table.mask+1)<<1)
 				}
 			}
 			return
@@ -739,15 +741,12 @@ slowPath:
 				storeUint64(&b.meta, meta|opNextMask)
 				root.Unlock()
 			}
-			table.AddSize(idx, 1)
 
+			localSize := int(table.AddSize(idx, 1))
 			// Check if the table needs to grow
-			if loadPtr(&m.rs) == nil {
-				tableLen := table.mask + 1
-				size := table.SumSize()
-				const capFactor = float64(entriesPerBucket) * loadFactor
-				if size >= uintptr(float64(tableLen)*capFactor) {
-					m.tryResize(mapGrowHint, tableLen<<1)
+			if localSize > table.stripeCap {
+				if table.SumSize() >= table.growCap {
+					m.tryResize(mapGrowHint, (table.mask+1)<<1)
 				}
 			}
 			return it.entry.value, it.loaded
@@ -1342,8 +1341,8 @@ func (m *Map[K, V]) copyBucket(
 // AddSize atomically adds delta to the size counter for the given bucket index.
 //
 //go:nosplit
-func (t *mapTable) AddSize(idx, delta uintptr) {
-	atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
+func (t *mapTable) AddSize(idx, delta uintptr) uintptr {
+	return atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
 }
 
 // SumSize calculates the total number of entries in the table
