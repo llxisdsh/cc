@@ -320,9 +320,11 @@ slowPath:
 
 		// Check if the table needs to grow
 		if int(table.size.Get().Load()) >= table.stripeCap {
-			size := table.SumSize() + uintptr(table.overflow.Size())
-			if size >= table.growCap {
-				m.tryResize(mapGrowHint, (table.mask+1)<<1)
+			if loadPtr(&m.rs) == nil {
+				size := table.SumSize() + uintptr(table.overflow.Size())
+				if size >= table.growCap {
+					m.tryResize(mapGrowHint, (table.mask+1)<<1)
+				}
 			}
 		}
 		return
@@ -683,9 +685,11 @@ slowPath:
 
 			// Check if the table needs to grow
 			if int(table.size.Get().Load()) >= table.stripeCap {
-				size := table.SumSize() + uintptr(table.overflow.Size())
-				if size >= table.growCap {
-					m.tryResize(mapGrowHint, (table.mask+1)<<1)
+				if loadPtr(&m.rs) == nil {
+					size := table.SumSize() + uintptr(table.overflow.Size())
+					if size >= table.growCap {
+						m.tryResize(mapGrowHint, (table.mask+1)<<1)
+					}
 				}
 			}
 			return retV, it.loaded

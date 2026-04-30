@@ -425,8 +425,10 @@ slowPath:
 		growCap := uintptr(float64(tableLen) * capFactor)
 		stripeCap := int(growCap >> bits.TrailingZeros32(uint32(table.sizeMask+1)))
 		if localSize > stripeCap {
-			if table.SumSize() >= growCap {
-				m.tryResize(mapGrowHint, tableLen<<1)
+			if loadPtr(&m.rs) == nil {
+				if table.SumSize() >= growCap {
+					m.tryResize(mapGrowHint, tableLen<<1)
+				}
 			}
 		}
 		return
@@ -803,8 +805,10 @@ slowPath:
 			growCap := uintptr(float64(tableLen) * capFactor)
 			stripeCap := int(growCap >> bits.TrailingZeros32(uint32(table.sizeMask+1)))
 			if localSize > stripeCap {
-				if table.SumSize() >= growCap {
-					m.tryResize(mapGrowHint, tableLen<<1)
+				if loadPtr(&m.rs) == nil {
+					if table.SumSize() >= growCap {
+						m.tryResize(mapGrowHint, tableLen<<1)
+					}
 				}
 			}
 			return it.entry.value, it.loaded
