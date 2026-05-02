@@ -110,9 +110,12 @@ func Test_MemoryPeakReduction(t *testing.T) {
 
 		runtime.ReadMemStats(&m2)
 		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
-
-		v, _ := m.Load(numItems - 1)
-		t.Logf("sync_Map memory usage: %d bytes, items: %d", peak, v.(int)+1)
+		var size int
+		m.Range(func(key, value any) bool {
+			size++
+			return true
+		})
+		t.Logf("sync_Map memory usage: %d bytes, items: %d", peak, size)
 	}
 
 	{
