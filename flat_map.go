@@ -41,14 +41,14 @@ type FlatMap[K comparable, V any] struct {
 
 type flatRebuildState[K comparable, V any] struct {
 	hint        mapRebuildHint
-	chunks      uint32  // number of chunks for resizing
-	chunkSz     uintptr // size of each chunk for resizing
+	newTableSeq SeqLock32 // seqlock of new table
+	newTable    SeqLockSlot[flatTable[K, V]]
 	latch       Latch
 	oldTable    flatTable[K, V]
-	newTable    SeqLockSlot[flatTable[K, V]]
-	newTableSeq SeqLock32 // seqlock of new table
-	process     uint32    // atomic
-	completed   uint32    // atomic
+	chunks      uint32  // number of chunks for resizing
+	chunkSz     uintptr // size of each chunk for resizing
+	process     uint32  // atomic
+	completed   uint32  // atomic
 }
 
 type flatTable[K comparable, V any] struct {
