@@ -21,7 +21,7 @@ import (
 // ============================================================================
 
 const (
-	benchKeyCount = 1024 * 16 // pre-generated key count
+	benchKeyCount = 10_000 // pre-generated key count
 )
 
 // pre-generated random int keys
@@ -46,7 +46,7 @@ func init() {
 
 // keyIndex is used to get the current key index in concurrent tests
 func keyIndex(i int) int {
-	return i & (benchKeyCount - 1)
+	return i % benchKeyCount
 }
 
 // ============================================================================
@@ -58,7 +58,7 @@ func BenchmarkConcurrent_IntStore_cc_FunnelMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -73,7 +73,7 @@ func BenchmarkConcurrent_IntStore_ccMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -88,7 +88,7 @@ func BenchmarkConcurrent_IntStore_ccFlatMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -103,7 +103,7 @@ func BenchmarkConcurrent_IntStore_syncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -118,7 +118,7 @@ func BenchmarkConcurrent_IntStore_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -133,7 +133,7 @@ func BenchmarkConcurrent_IntStore_cc_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -148,7 +148,7 @@ func BenchmarkConcurrent_IntStore_haxmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Set(key, key)
@@ -163,7 +163,7 @@ func BenchmarkConcurrent_IntStore_xsyncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -178,7 +178,7 @@ func BenchmarkConcurrent_IntStore_CsMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -193,7 +193,7 @@ func BenchmarkConcurrent_IntStore_RWShardedMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Store(key, key)
@@ -214,7 +214,7 @@ func BenchmarkConcurrent_IntLoad_cc_FunnelMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -232,7 +232,7 @@ func BenchmarkConcurrent_IntLoad_ccMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -250,7 +250,7 @@ func BenchmarkConcurrent_IntLoad_ccFlatMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -268,7 +268,7 @@ func BenchmarkConcurrent_IntLoad_syncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -286,7 +286,7 @@ func BenchmarkConcurrent_IntLoad_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -304,7 +304,7 @@ func BenchmarkConcurrent_IntLoad_cc_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -322,7 +322,7 @@ func BenchmarkConcurrent_IntLoad_haxmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Get(key)
@@ -340,7 +340,7 @@ func BenchmarkConcurrent_IntLoad_xsyncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -358,7 +358,7 @@ func BenchmarkConcurrent_IntLoad_CsMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -376,7 +376,7 @@ func BenchmarkConcurrent_IntLoad_RWShardedMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			_, _ = m.Load(key)
@@ -397,7 +397,7 @@ func BenchmarkConcurrent_IntDelete_cc_FunnelMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -415,7 +415,7 @@ func BenchmarkConcurrent_IntDelete_ccMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -433,7 +433,7 @@ func BenchmarkConcurrent_IntDelete_ccFlatMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -451,7 +451,7 @@ func BenchmarkConcurrent_IntDelete_syncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -469,7 +469,7 @@ func BenchmarkConcurrent_IntDelete_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -487,7 +487,7 @@ func BenchmarkConcurrent_IntDelete_cc_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -505,7 +505,7 @@ func BenchmarkConcurrent_IntDelete_haxmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Del(key)
@@ -523,7 +523,7 @@ func BenchmarkConcurrent_IntDelete_xsyncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -541,7 +541,7 @@ func BenchmarkConcurrent_IntDelete_CsMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -559,7 +559,7 @@ func BenchmarkConcurrent_IntDelete_RWShardedMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenIntKeys[i]
 			m.Delete(key)
@@ -807,7 +807,7 @@ func BenchmarkConcurrent_StrStore_ccFunnelMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -822,7 +822,7 @@ func BenchmarkConcurrent_StrStore_ccMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -837,7 +837,7 @@ func BenchmarkConcurrent_StrStore_ccFlatMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -852,7 +852,7 @@ func BenchmarkConcurrent_StrStore_syncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -867,7 +867,7 @@ func BenchmarkConcurrent_StrStore_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -882,7 +882,7 @@ func BenchmarkConcurrent_StrStore_cc_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -897,7 +897,7 @@ func BenchmarkConcurrent_StrStore_haxmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Set(key, i)
@@ -912,7 +912,7 @@ func BenchmarkConcurrent_StrStore_xsyncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -927,7 +927,7 @@ func BenchmarkConcurrent_StrStore_CsMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -942,7 +942,7 @@ func BenchmarkConcurrent_StrStore_RWShardedMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Store(key, i)
@@ -963,7 +963,7 @@ func BenchmarkConcurrent_StrLoad_ccFunnelMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -981,7 +981,7 @@ func BenchmarkConcurrent_StrLoad_ccMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -999,7 +999,7 @@ func BenchmarkConcurrent_StrLoad_ccFlatMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -1017,7 +1017,7 @@ func BenchmarkConcurrent_StrLoad_syncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -1035,7 +1035,7 @@ func BenchmarkConcurrent_StrLoad_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -1053,7 +1053,7 @@ func BenchmarkConcurrent_StrLoad_cc_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -1071,7 +1071,7 @@ func BenchmarkConcurrent_StrLoad_haxmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Get(key)
@@ -1089,7 +1089,7 @@ func BenchmarkConcurrent_StrLoad_xsyncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -1107,7 +1107,7 @@ func BenchmarkConcurrent_StrLoad_CsMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -1125,7 +1125,7 @@ func BenchmarkConcurrent_StrLoad_RWShardedMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			_, _ = m.Load(key)
@@ -1147,7 +1147,7 @@ func BenchmarkConcurrent_StrDelete_ccFunnelMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1165,7 +1165,7 @@ func BenchmarkConcurrent_StrDelete_ccMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1183,7 +1183,7 @@ func BenchmarkConcurrent_StrDelete_ccFlatMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1201,7 +1201,7 @@ func BenchmarkConcurrent_StrDelete_syncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1219,7 +1219,7 @@ func BenchmarkConcurrent_StrDelete_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1237,7 +1237,7 @@ func BenchmarkConcurrent_StrDelete_cc_skipmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1255,7 +1255,7 @@ func BenchmarkConcurrent_StrDelete_haxmap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Del(key)
@@ -1273,7 +1273,7 @@ func BenchmarkConcurrent_StrDelete_xsyncMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1291,7 +1291,7 @@ func BenchmarkConcurrent_StrDelete_CsMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)
@@ -1309,7 +1309,7 @@ func BenchmarkConcurrent_StrDelete_RWShardedMap(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		i := int(runtime_cheaprand()) & (benchKeyCount - 1)
+		i := int(runtime_cheaprand()) % benchKeyCount
 		for pb.Next() {
 			key := preGenStringKeys[i]
 			m.Delete(key)

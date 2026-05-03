@@ -144,6 +144,7 @@ func (m *FunnelMap[K, V]) Load(key K) (value V, ok bool) {
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / fEntriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
@@ -183,6 +184,7 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / fEntriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
@@ -195,7 +197,6 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 	{
 		idx := table.mask & h1v
 		b := table.buckets.At(idx)
-
 		meta := loadUint64(&b.meta)
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
@@ -231,11 +232,9 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 	}
 
 slowPath:
-
 	for {
 		idx := table.mask & h1v
 		b := table.buckets.At(idx)
-
 		b.Lock()
 
 		// This is the first check, checking if there is a rebuild operation in
@@ -496,12 +495,14 @@ func (m *FunnelMap[K, V]) compute(
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = hash / fEntriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
+
 	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
@@ -536,11 +537,9 @@ func (m *FunnelMap[K, V]) compute(
 	}
 
 slowPath:
-
 	for {
 		idx := table.mask & h1v
 		b := table.buckets.At(idx)
-
 		b.Lock()
 
 		// This is the first check: verifies if a rebuild operation is in
@@ -1055,13 +1054,12 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	if table == nil {
 		return
 	}
-
+	clone.intKey = m.intKey
+	clone.shrinkOn = m.shrinkOn
 	clone.seed = m.seed
 	clone.keyHash = m.keyHash
 	clone.valEqual = m.valEqual
 	clone.minLen = m.minLen
-	clone.shrinkOn = m.shrinkOn
-	clone.intKey = m.intKey
 	newLen := fCalcTableLen(m.size.Value() + uintptr(table.overflow.Size()))
 	newTable := newFunnelTable[K, V](newLen)
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
@@ -1243,6 +1241,7 @@ func (m *FunnelMap[K, V]) copyBucket(
 					hash = e.GetHash()
 					if m.intKey {
 						h1v = hash / fEntriesPerBucket
+						hash ^= hash >> 16
 					} else {
 						h1v = h1(hash)
 					}
@@ -1250,6 +1249,7 @@ func (m *FunnelMap[K, V]) copyBucket(
 					if m.intKey {
 						hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
 						h1v = hash / fEntriesPerBucket
+						hash ^= hash >> 16
 					} else {
 						hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
 						h1v = h1(hash)
@@ -1281,6 +1281,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 		if m.intKey {
 			hash = intHash[K](noescape(unsafe.Pointer(&k)))
 			h1v = hash / fEntriesPerBucket
+			hash ^= hash >> 16
 		} else {
 			hash = m.keyHash(noescape(unsafe.Pointer(&k)), m.seed)
 			h1v = h1(hash)

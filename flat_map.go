@@ -146,6 +146,7 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / entriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
@@ -223,6 +224,7 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / entriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
@@ -302,7 +304,6 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 	}
 
 slowPath:
-
 	for {
 		idx := table.mask & h1v
 		root := table.buckets.At(idx)
@@ -602,6 +603,7 @@ func (m *FlatMap[K, V]) compute(
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = hash / entriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
@@ -673,7 +675,6 @@ func (m *FlatMap[K, V]) compute(
 	}
 
 slowPath:
-
 	for {
 		idx := table.mask & h1v
 		root := table.buckets.At(idx)
@@ -747,6 +748,7 @@ slowPath:
 			b = (*flatBucket[K, V])(b.next)
 		}
 
+		// --- Compute Logic ---
 		fn(noEscape(&it))
 		switch it.op {
 		case updateOp:
@@ -1159,11 +1161,11 @@ func (m *FlatMap[K, V]) CloneTo(clone *FlatMap[K, V]) {
 	if table.buckets.ptr == nil {
 		return
 	}
+	clone.intKey = m.intKey
+	clone.shrinkOn = m.shrinkOn
 	clone.seed = m.seed
 	clone.keyHash = m.keyHash
 	clone.valEqual = m.valEqual
-	clone.shrinkOn = m.shrinkOn
-	clone.intKey = m.intKey
 	clone.minLen = m.minLen
 	newLen := calcTableLen(table.SumSize())
 	newTable := newFlatTable[K, V](newLen, maxProcs())
@@ -1353,6 +1355,7 @@ func (m *FlatMap[K, V]) copyBucket(
 						hash = e.GetHash()
 						if m.intKey {
 							h1v = hash / entriesPerBucket
+							hash ^= hash >> 16
 						} else {
 							h1v = h1(hash)
 						}
@@ -1360,6 +1363,7 @@ func (m *FlatMap[K, V]) copyBucket(
 						if m.intKey {
 							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
 							h1v = hash / entriesPerBucket
+							hash ^= hash >> 16
 						} else {
 							hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
 							h1v = h1(hash)

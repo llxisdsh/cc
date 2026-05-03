@@ -176,6 +176,7 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / entriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
@@ -217,12 +218,14 @@ func (m *Map[K, V]) Store(key K, value V) {
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / entriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
+
 	// Fast path: lock-free read
 	{
 		idx := table.mask & h1v
@@ -256,11 +259,9 @@ func (m *Map[K, V]) Store(key K, value V) {
 	}
 
 slowPath:
-
 	for {
 		idx := table.mask & h1v
 		root := table.buckets.At(idx)
-
 		root.Lock()
 
 		// This is the first check, checking if there is a rebuild operation in
@@ -571,12 +572,14 @@ func (m *Map[K, V]) compute(
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = hash / entriesPerBucket
+		hash ^= hash >> 16
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
 	}
 	h2v := h2(hash)
 	h2w := broadcast(h2v)
+
 	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		idx := table.mask & h1v
@@ -609,11 +612,9 @@ func (m *Map[K, V]) compute(
 	}
 
 slowPath:
-
 	for {
 		idx := table.mask & h1v
 		root := table.buckets.At(idx)
-
 		root.Lock()
 
 		// This is the first check, checking if there is a rebuild operation in
@@ -1085,13 +1086,12 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 	if table == nil {
 		return
 	}
-
+	clone.intKey = m.intKey
+	clone.shrinkOn = m.shrinkOn
 	clone.seed = m.seed
 	clone.keyHash = m.keyHash
 	clone.valEqual = m.valEqual
 	clone.minLen = m.minLen
-	clone.shrinkOn = m.shrinkOn
-	clone.intKey = m.intKey
 	newLen := calcTableLen(table.SumSize())
 	newTable := newMapTable(newLen, maxProcs())
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
@@ -1293,6 +1293,7 @@ func (m *Map[K, V]) copyBucket(
 						hash = e.GetHash()
 						if m.intKey {
 							h1v = hash / entriesPerBucket
+							hash ^= hash >> 16
 						} else {
 							h1v = h1(hash)
 						}
@@ -1300,6 +1301,7 @@ func (m *Map[K, V]) copyBucket(
 						if m.intKey {
 							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
 							h1v = hash / entriesPerBucket
+							hash ^= hash >> 16
 						} else {
 							hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
 							h1v = h1(hash)
