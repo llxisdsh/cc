@@ -371,7 +371,7 @@ slowPath:
 
 			localSize := int(table.AddSize(idx, 1))
 			// Check if the table needs to grow
-			if localSize > table.stripeCap {
+			if localSize >= table.stripeCap {
 				if loadPtr(&m.rs) == nil {
 					if table.SumSize() >= table.growCap {
 						m.tryResize(mapGrowHint, (table.mask+1)<<1)
@@ -747,7 +747,7 @@ slowPath:
 
 			localSize := int(table.AddSize(idx, 1))
 			// Check if the table needs to grow
-			if localSize > table.stripeCap {
+			if localSize >= table.stripeCap {
 				if loadPtr(&m.rs) == nil {
 					if table.SumSize() >= table.growCap {
 						m.tryResize(mapGrowHint, (table.mask+1)<<1)
