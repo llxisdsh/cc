@@ -208,7 +208,8 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 						if m.valEqual != nil {
 							if m.valEqual(
 								noescape(unsafe.Pointer(&e.value)),
-								noescape(unsafe.Pointer(&value))) {
+								noescape(unsafe.Pointer(&value)),
+							) {
 								return
 							}
 						}
@@ -222,7 +223,8 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 				if m.valEqual != nil {
 					if m.valEqual(
 						noescape(unsafe.Pointer(&v)),
-						noescape(unsafe.Pointer(&value))) {
+						noescape(unsafe.Pointer(&value)),
+					) {
 						return
 					}
 				}
@@ -414,7 +416,8 @@ func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 		if e.Loaded() {
 			if m.valEqual(
 				noescape(unsafe.Pointer(&e.entry.value)),
-				noescape(unsafe.Pointer(&old))) {
+				noescape(unsafe.Pointer(&old)),
+			) {
 				e.Update(new)
 				swapped = true
 			}
@@ -438,7 +441,8 @@ func (m *FunnelMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 		if e.Loaded() {
 			if m.valEqual(
 				noescape(unsafe.Pointer(&e.entry.value)),
-				noescape(unsafe.Pointer(&old))) {
+				noescape(unsafe.Pointer(&old)),
+			) {
 				e.Delete()
 				deleted = true
 			}
@@ -638,7 +642,7 @@ slowPath:
 				// valEqual: skip write if value unchanged
 				if m.valEqual != nil {
 					if m.valEqual(
-						noescape(unsafe.Pointer(&((*entry_[K, V])(*b.At(j))).value)),
+						noescape(unsafe.Pointer(&(*entry_[K, V])(*b.At(j)).value)),
 						noescape(unsafe.Pointer(&it.entry.value)),
 					) {
 						b.Unlock()
@@ -1309,9 +1313,11 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 
 //go:nosplit
 func (b *funnelBucket) At(i uintptr) *unsafe.Pointer {
-	return (*unsafe.Pointer)(unsafe.Add(
-		unsafe.Pointer(&b.entries),
-		i*unsafe.Sizeof(unsafe.Pointer(nil))),
+	return (*unsafe.Pointer)(
+		unsafe.Add(
+			unsafe.Pointer(&b.entries),
+			i*unsafe.Sizeof(unsafe.Pointer(nil)),
+		),
 	)
 }
 

@@ -9,21 +9,22 @@ import (
 const (
 	skipMaxLevel     = 16
 	skipDefaultLevel = 3
+	skipBaseLinks    = 4
+	skipExtraLinks   = skipMaxLevel - skipBaseLinks
+)
 
-	skipFlagLinked uint32 = 1 << iota
-	skipFlagMarked
-	skipFlagLock
-
-	skipBaseLinks  = 4
-	skipExtraLinks = skipMaxLevel - skipBaseLinks
+const (
+	skipFlagLinked uint32 = 1 << iota // [bit0: linked]
+	skipFlagMarked                    // [bit1: marked]
+	skipFlagLock                      // [bit2: lock]
 )
 
 // SkipMap represents a lock-free, concurrent-safe skip list mapping keys to values.
 // It is designed to scale under heavy contention while minimizing cache-line bounces.
 type SkipMap[K cmp.Ordered, V any] struct {
-	count    uintptr
-	topLevel uintptr
 	head     *skipNode[K, V]
+	topLevel uintptr
+	count    uintptr
 }
 
 type skipNode[K cmp.Ordered, V any] struct {
@@ -32,20 +33,15 @@ type skipNode[K cmp.Ordered, V any] struct {
 	key   K
 	flags uint32 // [bit0: linked] [bit1: marked] [bit2: lock]
 	level uint32
-	value unsafe.Pointer // *V
-	links skipOptionalArray
-}
-
-type skipOptionalArray struct {
-	base  [skipBaseLinks]unsafe.Pointer
-	extra *[skipExtraLinks]unsafe.Pointer
+	value unsafe.Pointer                  // *V
+	base  [skipBaseLinks]unsafe.Pointer   // *skipNode[K, V]
+	extra *[skipExtraLinks]unsafe.Pointer // *skipNode[K, V]
 }
 
 // NewSkipMap initializes an empty concurrent skip map.
 func NewSkipMap[K cmp.Ordered, V any]() *SkipMap[K, V] {
 	head := newSkipNode(*new(K), *new(V), skipMaxLevel)
 	head.setFlag(skipFlagLinked)
-
 	return &SkipMap[K, V]{
 		head:     head,
 		topLevel: skipDefaultLevel,
@@ -60,9 +56,21 @@ func newSkipNode[K cmp.Ordered, V any](k K, v V, level int) *skipNode[K, V] {
 	}
 	n.storeVal(v)
 	if level > skipBaseLinks {
-		n.links.extra = new([skipExtraLinks]unsafe.Pointer)
+		n.extra = new([skipExtraLinks]unsafe.Pointer)
 	}
 	return n
+}
+
+//go:nosplit
+func (n *skipNode[K, V]) baseAt(i int) *unsafe.Pointer {
+	return (*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&n.base),
+		uintptr(i)*unsafe.Sizeof(unsafe.Pointer(nil))))
+}
+
+//go:nosplit
+func (n *skipNode[K, V]) extraAt(i int) *unsafe.Pointer {
+	return (*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(n.extra),
+		uintptr(i)*unsafe.Sizeof(unsafe.Pointer(nil))))
 }
 
 //go:nosplit
@@ -78,18 +86,18 @@ func (n *skipNode[K, V]) loadVal() V {
 //go:nosplit
 func (n *skipNode[K, V]) next(layer int) *skipNode[K, V] {
 	if layer < skipBaseLinks {
-		return (*skipNode[K, V])(loadPtr(ptrAt(&n.links.base[0], layer)))
+		return (*skipNode[K, V])(loadPtr(n.baseAt(layer)))
 	}
-	return (*skipNode[K, V])(loadPtr(ptrAt(&n.links.extra[0], layer-skipBaseLinks)))
+	return (*skipNode[K, V])(loadPtr(n.extraAt(layer - skipBaseLinks)))
 }
 
 //go:nosplit
 func (n *skipNode[K, V]) setNext(layer int, dest *skipNode[K, V]) {
 	if layer < skipBaseLinks {
-		storePtr(ptrAt(&n.links.base[0], layer), unsafe.Pointer(dest))
+		storePtr(n.baseAt(layer), unsafe.Pointer(dest))
 		return
 	}
-	storePtr(ptrAt(&n.links.extra[0], layer-skipBaseLinks), unsafe.Pointer(dest))
+	storePtr(n.extraAt(layer-skipBaseLinks), unsafe.Pointer(dest))
 }
 
 //go:nosplit
@@ -122,6 +130,14 @@ func (n *skipNode[K, V]) hasFlags(mask, expect uint32) bool {
 	return (loadUint32(&n.flags) & mask) == expect
 }
 
+type skipNodeArray[K cmp.Ordered, V any] [skipMaxLevel]*skipNode[K, V]
+
+//go:nosplit
+func (a *skipNodeArray[K, V]) at(i int) **skipNode[K, V] {
+	return (**skipNode[K, V])(unsafe.Add(unsafe.Pointer(a),
+		uintptr(i)*unsafe.Sizeof((*skipNode[K, V])(nil))))
+}
+
 // randomLevel generates a level between 1 and maxLevel using simulated geometric distribution.
 // Yields stable performance bypassing heavy standard rand routines.
 func (s *SkipMap[K, V]) randomLevel() int {
@@ -150,7 +166,7 @@ func (s *SkipMap[K, V]) randomLevel() int {
 }
 
 // search locates a key and populate the path with previous and next nodes.
-func (s *SkipMap[K, V]) search(k K, prevs, nexts *[skipMaxLevel]*skipNode[K, V]) *skipNode[K, V] {
+func (s *SkipMap[K, V]) search(k K, prevs, nexts *skipNodeArray[K, V]) *skipNode[K, V] {
 	curr := s.head
 	top := int(loadUintptr(&s.topLevel)) - 1
 	for i := top; i >= 0; i-- {
@@ -159,9 +175,8 @@ func (s *SkipMap[K, V]) search(k K, prevs, nexts *[skipMaxLevel]*skipNode[K, V])
 			curr = nex
 			nex = curr.next(i)
 		}
-		*ptrAt(&prevs[0], i) = curr
-		*ptrAt(&nexts[0], i) = nex
-
+		*prevs.at(i) = curr
+		*nexts.at(i) = nex
 		// Early exit if found
 		if nex != nil && nex.key == k {
 			return nex
@@ -171,7 +186,7 @@ func (s *SkipMap[K, V]) search(k K, prevs, nexts *[skipMaxLevel]*skipNode[K, V])
 }
 
 // searchForDelete is an optimized search tailored for deletion that yields the layer the key was found.
-func (s *SkipMap[K, V]) searchForDelete(k K, prevs, nexts *[skipMaxLevel]*skipNode[K, V]) int {
+func (s *SkipMap[K, V]) searchForDelete(k K, prevs, nexts *skipNodeArray[K, V]) int {
 	foundAt := -1
 	curr := s.head
 	top := int(loadUintptr(&s.topLevel)) - 1
@@ -181,8 +196,8 @@ func (s *SkipMap[K, V]) searchForDelete(k K, prevs, nexts *[skipMaxLevel]*skipNo
 			curr = nex
 			nex = curr.next(i)
 		}
-		*ptrAt(&prevs[0], i) = curr
-		*ptrAt(&nexts[0], i) = nex
+		*prevs.at(i) = curr
+		*nexts.at(i) = nex
 
 		if foundAt == -1 && nex != nil && nex.key == k {
 			foundAt = i
@@ -191,10 +206,10 @@ func (s *SkipMap[K, V]) searchForDelete(k K, prevs, nexts *[skipMaxLevel]*skipNo
 	return foundAt
 }
 
-func purgeLocks[K cmp.Ordered, V any](prevs [skipMaxLevel]*skipNode[K, V], top int) {
+func purgeLocks[K cmp.Ordered, V any](prevs *skipNodeArray[K, V], top int) {
 	var locked *skipNode[K, V]
 	for i := top; i >= 0; i-- {
-		p := getAt(&prevs[0], i)
+		p := *prevs.at(i)
 		if p != locked {
 			p.unlock()
 			locked = p
@@ -205,7 +220,7 @@ func purgeLocks[K cmp.Ordered, V any](prevs [skipMaxLevel]*skipNode[K, V], top i
 // Store places a key-value mapping into the structure.
 func (s *SkipMap[K, V]) Store(key K, value V) {
 	lvl := s.randomLevel()
-	var prevs, nexts [skipMaxLevel]*skipNode[K, V]
+	var prevs, nexts skipNodeArray[K, V]
 
 	for {
 		if hit := s.search(key, &prevs, &nexts); hit != nil {
@@ -221,28 +236,29 @@ func (s *SkipMap[K, V]) Store(key K, value V) {
 		var p, nex, prevP *skipNode[K, V]
 
 		for i := 0; isValid && i < lvl; i++ {
-			p = getAt(&prevs[0], i)
-			nex = getAt(&nexts[0], i)
+			p = *prevs.at(i)
+			nex = *nexts.at(i)
 			if p != prevP {
 				p.lock()
 				lockedTop = i
 				prevP = p
 			}
-			isValid = !p.hasFlag(skipFlagMarked) && (nex == nil || !nex.hasFlag(skipFlagMarked)) && p.next(i) == nex
+			isValid = !p.hasFlag(skipFlagMarked) &&
+				(nex == nil || !nex.hasFlag(skipFlagMarked)) && p.next(i) == nex
 		}
 
 		if !isValid {
-			purgeLocks(prevs, lockedTop)
+			purgeLocks(&prevs, lockedTop)
 			continue
 		}
 
 		created := newSkipNode(key, value, lvl)
 		for i := range lvl {
-			created.setNext(i, getAt(&nexts[0], i))
-			getAt(&prevs[0], i).setNext(i, created)
+			created.setNext(i, *nexts.at(i))
+			(*prevs.at(i)).setNext(i, created)
 		}
 		created.setFlag(skipFlagLinked)
-		purgeLocks(prevs, lockedTop)
+		purgeLocks(&prevs, lockedTop)
 
 		atomic.AddUintptr(&s.count, 1)
 		return
@@ -276,18 +292,18 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 		victim       *skipNode[K, V]
 		marked       bool
 		victimLvl    = -1
-		prevs, nexts [skipMaxLevel]*skipNode[K, V]
+		prevs, nexts skipNodeArray[K, V]
 	)
 	for {
 		hitLvl := s.searchForDelete(key, &prevs, &nexts)
 
 		isRemovable := hitLvl != -1 &&
-			getAt(&nexts[0], hitLvl).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
-			(int(getAt(&nexts[0], hitLvl).level)-1) == hitLvl
+			(*nexts.at(hitLvl)).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
+			(int((*nexts.at(hitLvl)).level)-1) == hitLvl
 
 		if marked || isRemovable {
 			if !marked {
-				victim = getAt(&nexts[0], hitLvl)
+				victim = *nexts.at(hitLvl)
 				victimLvl = hitLvl
 				victim.lock()
 				if victim.hasFlag(skipFlagMarked) {
@@ -303,8 +319,8 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			var p, nex, prevP *skipNode[K, V]
 
 			for i := 0; isValid && i <= victimLvl; i++ {
-				p = getAt(&prevs[0], i)
-				nex = getAt(&nexts[0], i)
+				p = *prevs.at(i)
+				nex = *nexts.at(i)
 				if p != prevP {
 					p.lock()
 					lockedTop = i
@@ -314,15 +330,15 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 			}
 
 			if !isValid {
-				purgeLocks(prevs, lockedTop)
+				purgeLocks(&prevs, lockedTop)
 				continue
 			}
 
 			for i := victimLvl; i >= 0; i-- {
-				getAt(&prevs[0], i).setNext(i, victim.next(i))
+				(*prevs.at(i)).setNext(i, victim.next(i))
 			}
 			victim.unlock()
-			purgeLocks(prevs, lockedTop)
+			purgeLocks(&prevs, lockedTop)
 
 			atomic.AddUintptr(&s.count, ^uintptr(0))
 			return victim.loadVal(), true
@@ -331,7 +347,7 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 		// The node is missing or we encountered a concurrent state change.
 		// If hitLvl is -1, the node genuinely doesn't exist.
 		// If the node exists but is marked, it's logically deleted by someone else.
-		if hitLvl == -1 || getAt(&nexts[0], hitLvl).hasFlag(skipFlagMarked) {
+		if hitLvl == -1 || (*nexts.at(hitLvl)).hasFlag(skipFlagMarked) {
 			return *new(V), false
 		}
 
@@ -346,18 +362,18 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 		victim       *skipNode[K, V]
 		marked       bool
 		victimLvl    = -1
-		prevs, nexts [skipMaxLevel]*skipNode[K, V]
+		prevs, nexts skipNodeArray[K, V]
 	)
 	for {
 		hitLvl := s.searchForDelete(key, &prevs, &nexts)
 
 		isRemovable := hitLvl != -1 &&
-			getAt(&nexts[0], hitLvl).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
-			(int(getAt(&nexts[0], hitLvl).level)-1) == hitLvl
+			(*nexts.at(hitLvl)).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
+			(int((*nexts.at(hitLvl)).level)-1) == hitLvl
 
 		if marked || isRemovable {
 			if !marked {
-				victim = getAt(&nexts[0], hitLvl)
+				victim = *nexts.at(hitLvl)
 				victimLvl = hitLvl
 				victim.lock()
 				if victim.hasFlag(skipFlagMarked) {
@@ -373,8 +389,8 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			var p, nex, prevP *skipNode[K, V]
 
 			for i := 0; isValid && i <= victimLvl; i++ {
-				p = getAt(&prevs[0], i)
-				nex = getAt(&nexts[0], i)
+				p = *prevs.at(i)
+				nex = *nexts.at(i)
 				if p != prevP {
 					p.lock()
 					lockedTop = i
@@ -384,15 +400,15 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			}
 
 			if !isValid {
-				purgeLocks(prevs, lockedTop)
+				purgeLocks(&prevs, lockedTop)
 				continue
 			}
 
 			for i := victimLvl; i >= 0; i-- {
-				getAt(&prevs[0], i).setNext(i, victim.next(i))
+				(*prevs.at(i)).setNext(i, victim.next(i))
 			}
 			victim.unlock()
-			purgeLocks(prevs, lockedTop)
+			purgeLocks(&prevs, lockedTop)
 
 			atomic.AddUintptr(&s.count, ^uintptr(0))
 			return true
@@ -403,7 +419,7 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 			return false
 		}
 		// The key exists but is already marked for deletion by another goroutine.
-		if getAt(&nexts[0], hitLvl).hasFlag(skipFlagMarked) {
+		if (*nexts.at(hitLvl)).hasFlag(skipFlagMarked) {
 			return false
 		}
 		// The node is in a transient state (e.g., being inserted). We must retry.
@@ -414,7 +430,7 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	var (
 		lvl          int
-		prevs, nexts [skipMaxLevel]*skipNode[K, V]
+		prevs, nexts skipNodeArray[K, V]
 	)
 	for {
 		top := int(loadUintptr(&s.topLevel))
@@ -438,28 +454,29 @@ func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		}
 
 		for i := 0; isValid && i < lvl; i++ {
-			p = getAt(&prevs[0], i)
-			nex = getAt(&nexts[0], i)
+			p = *prevs.at(i)
+			nex = *nexts.at(i)
 			if p != prevP {
 				p.lock()
 				lockedTop = i
 				prevP = p
 			}
-			isValid = !p.hasFlag(skipFlagMarked) && (nex == nil || !nex.hasFlag(skipFlagMarked)) && p.next(i) == nex
+			isValid = !p.hasFlag(skipFlagMarked) &&
+				(nex == nil || !nex.hasFlag(skipFlagMarked)) && p.next(i) == nex
 		}
 
 		if !isValid {
-			purgeLocks(prevs, lockedTop)
+			purgeLocks(&prevs, lockedTop)
 			continue
 		}
 
 		created := newSkipNode(key, value, lvl)
 		for i := range lvl {
-			created.setNext(i, getAt(&nexts[0], i))
-			getAt(&prevs[0], i).setNext(i, created)
+			created.setNext(i, *nexts.at(i))
+			(*prevs.at(i)).setNext(i, created)
 		}
 		created.setFlag(skipFlagLinked)
-		purgeLocks(prevs, lockedTop)
+		purgeLocks(&prevs, lockedTop)
 
 		atomic.AddUintptr(&s.count, 1)
 		return value, false
@@ -470,7 +487,7 @@ func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loaded bool) {
 	var (
 		lvl          int
-		prevs, nexts [skipMaxLevel]*skipNode[K, V]
+		prevs, nexts skipNodeArray[K, V]
 	)
 	for {
 		top := int(loadUintptr(&s.topLevel))
@@ -494,29 +511,30 @@ func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loade
 		}
 
 		for i := 0; isValid && i < lvl; i++ {
-			p = getAt(&prevs[0], i)
-			nex = getAt(&nexts[0], i)
+			p = *prevs.at(i)
+			nex = *nexts.at(i)
 			if p != prevP {
 				p.lock()
 				lockedTop = i
 				prevP = p
 			}
-			isValid = !p.hasFlag(skipFlagMarked) && (nex == nil || !nex.hasFlag(skipFlagMarked)) && p.next(i) == nex
+			isValid = !p.hasFlag(skipFlagMarked) &&
+				(nex == nil || !nex.hasFlag(skipFlagMarked)) && p.next(i) == nex
 		}
 
 		if !isValid {
-			purgeLocks(prevs, lockedTop)
+			purgeLocks(&prevs, lockedTop)
 			continue
 		}
 
 		v := newValFn()
 		created := newSkipNode(key, v, lvl)
 		for i := range lvl {
-			created.setNext(i, getAt(&nexts[0], i))
-			getAt(&prevs[0], i).setNext(i, created)
+			created.setNext(i, *nexts.at(i))
+			(*prevs.at(i)).setNext(i, created)
 		}
 		created.setFlag(skipFlagLinked)
-		purgeLocks(prevs, lockedTop)
+		purgeLocks(&prevs, lockedTop)
 
 		atomic.AddUintptr(&s.count, 1)
 		return v, false
@@ -539,6 +557,8 @@ func (s *SkipMap[K, V]) Range(yield func(key K, value V) bool) {
 }
 
 // All supports newer loop conventions in the idiomatic framework layout.
+//
+//go:nosplit
 func (s *SkipMap[K, V]) All() func(yield func(K, V) bool) {
 	return s.Range
 }
