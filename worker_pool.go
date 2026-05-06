@@ -2,7 +2,6 @@ package cc
 
 import (
 	"errors"
-	"runtime"
 	"sync/atomic"
 )
 
@@ -11,7 +10,8 @@ var ErrPoolClosed = errors.New("cc: pool closed")
 // WorkerPool uses the Reusable WaitGroup and robust worker logic.
 type WorkerPool struct {
 	jobs      chan func()
-	wg        WaitGroup // cc.WaitGroup
+	wg        WaitGroup // cc.WaitGroup for worker goroutine lifecycle
+	taskWg    WaitGroup // cc.WaitGroup for task completion tracking
 	maxWorker int32
 	workers   atomic.Int32
 	active    atomic.Int32 // number of tasks currently being processed
@@ -49,6 +49,7 @@ func (p *WorkerPool) Submit(task func()) error {
 		return ErrPoolClosed
 	}
 
+	p.taskWg.Add(1)
 	p.jobs <- task
 	p.mu.RUnlock()
 
@@ -82,6 +83,7 @@ func (p *WorkerPool) startWorker() {
 			func() {
 				defer func() {
 					p.active.Add(-1)
+					p.taskWg.Done()
 					if r := recover(); r != nil {
 						// Recover from task panic so worker can continue.
 						if p.OnPanic != nil {
@@ -112,15 +114,9 @@ func (p *WorkerPool) Close() {
 }
 
 // Wait blocks until all submitted tasks complete, without closing the pool.
-// It checks if both the queue is empty and active workers are idle.
 // This is useful for batch synchronization while keeping the pool alive.
 func (p *WorkerPool) Wait() {
-	for {
-		if len(p.jobs) == 0 && p.active.Load() == 0 {
-			return
-		}
-		runtime.Gosched()
-	}
+	p.taskWg.Wait()
 }
 
 // Pending returns the number of tasks waiting in the queue.

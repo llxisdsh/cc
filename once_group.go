@@ -18,12 +18,11 @@ type OnceGroupResult[V any] struct {
 
 // call represents an in-flight or completed OnceGroup.Do call
 type call[V any] struct {
-	latch     Latch
-	val       V
-	err       error
-	dups      int32
-	chans     []chan<- OnceGroupResult[V]
-	completed int32
+	latch Latch
+	val   V
+	err   error
+	dups  int32
+	chans []chan<- OnceGroupResult[V]
 }
 
 // OnceGroup represents a class of work and forms a namespace in
@@ -78,19 +77,10 @@ func (g *OnceGroup[K, V]) DoChan(
 ) <-chan OnceGroupResult[V] {
 	ch := make(chan OnceGroupResult[V], 1)
 	c0 := &call[V]{
-		chans: append(
-			make([]chan<- OnceGroupResult[V], 0, runtime.GOMAXPROCS(0)),
-			ch,
-		),
+		chans: []chan<- OnceGroupResult[V]{ch},
 	}
 	c, loaded := g.m.LoadOrStore(key, c0)
 	if loaded {
-		// Duplicates: if already completed, send immediately; otherwise wait on wg and send
-		if atomic.LoadInt32(&c.completed) == 1 {
-			shared := atomic.LoadInt32(&c.dups) > 0 || len(c.chans) > 1
-			ch <- OnceGroupResult[V]{Val: c.val, Err: c.err, Shared: shared}
-			return ch
-		}
 		// Mark duplication for shared flag visibility
 		atomic.AddInt32(&c.dups, 1)
 		go func(c *call[V], ch chan<- OnceGroupResult[V]) {
@@ -151,16 +141,16 @@ func (g *OnceGroup[K, V]) doCall(
 			c.err = errGoexit
 		}
 
-		// Complete the call and remove the key atomically.
-		c.latch.Open()
-		atomic.StoreInt32(&c.completed, 1)
-
+		// 1. Remove key from map FIRST, before signaling completion.
+		//    This eliminates the race window where a new caller could see
+		//    a completed-but-not-yet-deleted call via LoadOrStore.
 		var chs []chan<- OnceGroupResult[V]
 		_, _ = g.m.Compute(
 			key,
 			func(it *MapEntry[K, *call[V]]) {
 				if it.Loaded() && it.Value() == c {
 					chs = append(chs, it.Value().chans...)
+					it.Delete()
 				}
 			},
 		)
@@ -168,7 +158,12 @@ func (g *OnceGroup[K, V]) doCall(
 			chs = c.chans
 		}
 
-		// After wg.Done, duplicates in Do() will wake and re-panic/goexit.
+		// 2. Signal completion AFTER key removal.
+		//    Do() duplicates blocked on latch.Wait() will wake up and
+		//    read c.val/c.err which are already set above.
+		c.latch.Open()
+
+		// 3. Handle panic/goexit/normal for DoChan channels.
 		var e *panicError
 		switch {
 		case errors.As(c.err, &e):

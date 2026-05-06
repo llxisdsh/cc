@@ -218,6 +218,12 @@ func purgeLocks[K cmp.Ordered, V any](prevs *skipNodeArray[K, V], top int) {
 }
 
 // Store places a key-value mapping into the structure.
+//
+// Concurrency note: concurrent Store calls for the same key use
+// last-writer-wins semantics without mutual exclusion. Both writers
+// may read the old value and overwrite it. This is safe at the
+// pointer level (storePtr uses atomic.StorePointer) but the caller
+// should not rely on read-modify-write atomicity.
 func (s *SkipMap[K, V]) Store(key K, value V) {
 	lvl := s.randomLevel()
 	var prevs, nexts skipNodeArray[K, V]
@@ -284,6 +290,12 @@ func (s *SkipMap[K, V]) Load(key K) (value V, ok bool) {
 		}
 	}
 	return *new(V), false
+}
+
+// Delete eliminates a mapping without returning it.
+func (s *SkipMap[K, V]) Delete(key K) bool {
+	_, loaded := s.LoadAndDelete(key)
+	return loaded
 }
 
 // LoadAndDelete ensures the removal of a mapping and returns it.
@@ -356,131 +368,9 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 	}
 }
 
-// Delete eliminates a mapping without returning it.
-func (s *SkipMap[K, V]) Delete(key K) bool {
-	var (
-		victim       *skipNode[K, V]
-		marked       bool
-		victimLvl    = -1
-		prevs, nexts skipNodeArray[K, V]
-	)
-	for {
-		hitLvl := s.searchForDelete(key, &prevs, &nexts)
-
-		isRemovable := hitLvl != -1 &&
-			(*nexts.at(hitLvl)).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
-			(int((*nexts.at(hitLvl)).level)-1) == hitLvl
-
-		if marked || isRemovable {
-			if !marked {
-				victim = *nexts.at(hitLvl)
-				victimLvl = hitLvl
-				victim.lock()
-				if victim.hasFlag(skipFlagMarked) {
-					victim.unlock()
-					return false
-				}
-				victim.setFlag(skipFlagMarked)
-				marked = true
-			}
-
-			lockedTop := -1
-			isValid := true
-			var p, nex, prevP *skipNode[K, V]
-
-			for i := 0; isValid && i <= victimLvl; i++ {
-				p = *prevs.at(i)
-				nex = *nexts.at(i)
-				if p != prevP {
-					p.lock()
-					lockedTop = i
-					prevP = p
-				}
-				isValid = !p.hasFlag(skipFlagMarked) && p.next(i) == nex
-			}
-
-			if !isValid {
-				purgeLocks(&prevs, lockedTop)
-				continue
-			}
-
-			for i := victimLvl; i >= 0; i-- {
-				(*prevs.at(i)).setNext(i, victim.next(i))
-			}
-			victim.unlock()
-			purgeLocks(&prevs, lockedTop)
-
-			atomic.AddUintptr(&s.count, ^uintptr(0))
-			return true
-		}
-
-		// The key genuinely doesn't exist.
-		if hitLvl == -1 {
-			return false
-		}
-		// The key exists but is already marked for deletion by another goroutine.
-		if (*nexts.at(hitLvl)).hasFlag(skipFlagMarked) {
-			return false
-		}
-		// The node is in a transient state (e.g., being inserted). We must retry.
-	}
-}
-
 // LoadOrStore updates value if identical key misses in mapping.
 func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	var (
-		lvl          int
-		prevs, nexts skipNodeArray[K, V]
-	)
-	for {
-		top := int(loadUintptr(&s.topLevel))
-		hit := s.search(key, &prevs, &nexts)
-		if hit != nil {
-			if !hit.hasFlag(skipFlagMarked) {
-				return hit.loadVal(), true
-			}
-			continue
-		}
-
-		lockedTop := -1
-		isValid := true
-		var p, nex, prevP *skipNode[K, V]
-
-		if lvl == 0 {
-			lvl = s.randomLevel()
-			if lvl > top {
-				continue
-			}
-		}
-
-		for i := 0; isValid && i < lvl; i++ {
-			p = *prevs.at(i)
-			nex = *nexts.at(i)
-			if p != prevP {
-				p.lock()
-				lockedTop = i
-				prevP = p
-			}
-			isValid = !p.hasFlag(skipFlagMarked) &&
-				(nex == nil || !nex.hasFlag(skipFlagMarked)) && p.next(i) == nex
-		}
-
-		if !isValid {
-			purgeLocks(&prevs, lockedTop)
-			continue
-		}
-
-		created := newSkipNode(key, value, lvl)
-		for i := range lvl {
-			created.setNext(i, *nexts.at(i))
-			(*prevs.at(i)).setNext(i, created)
-		}
-		created.setFlag(skipFlagLinked)
-		purgeLocks(&prevs, lockedTop)
-
-		atomic.AddUintptr(&s.count, 1)
-		return value, false
-	}
+	return s.LoadOrStoreFn(key, func() V { return value })
 }
 
 // LoadOrStoreFn operates analogously to LoadOrStore but fetches assignment lazily.

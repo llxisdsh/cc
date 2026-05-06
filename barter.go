@@ -67,7 +67,7 @@ func (b *Barter[T]) Exchange(myValue T) T {
 			if b.slot.CompareAndSwap(peer, nil) {
 				// Success. I matched with 'peer'.
 				// Give them my value.
-				atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&peer.match)), unsafe.Pointer(&myValue))
+				atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&peer.match)), unsafe.Pointer(&me.value))
 				// Wake them up.
 				peer.latch.Open()
 				// Return their value.
