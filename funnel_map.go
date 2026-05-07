@@ -683,8 +683,8 @@ slowPath:
 				m.size.Add(1)
 				return retV, it.loaded
 			}
-			b.UnlockWithMeta(meta | opNextMask)
 			table.overflow.Store(*key, it.entry.value)
+			b.UnlockWithMeta(meta | opNextMask)
 
 			// Check if the table needs to grow
 			if int(m.size.Get().Load()) >= table.stripeCap {
