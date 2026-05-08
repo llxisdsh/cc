@@ -26,13 +26,14 @@ func TestOnceGroup_DoDuplicates(t *testing.T) {
 	wg.Add(n)
 	sharedCount := int32(0)
 	start := make(chan struct{})
+	fnBlock := make(chan struct{})
 	for range n {
 		go func() {
 			defer wg.Done()
 			<-start
 			v, err, shared := g.Do(key, func() (int, error) {
 				atomic.AddInt32(&calls, 1)
-				time.Sleep(2 * time.Millisecond)
+				<-fnBlock
 				return 42, nil
 			})
 			if err != nil || v != 42 {
@@ -44,11 +45,19 @@ func TestOnceGroup_DoDuplicates(t *testing.T) {
 		}()
 	}
 	close(start)
+
+	// Give all goroutines ample time to hit LoadOrStore before we release fn.
+	// This prevents a premature deletion of the key which would cause a new
+	// fn execution and a duplicate call on slow/heavily loaded machines.
+	time.Sleep(100 * time.Millisecond)
+	close(fnBlock)
 	wg.Wait()
 
 	if calls != 1 {
 		t.Fatalf("fn executed %d times, want 1", calls)
 	}
+	// sharedCount should be 64, meaning 1 primary (which has shared=true because others joined)
+	// and 63 duplicates.
 	if sharedCount != int32(n) {
 		t.Fatalf("shared=%d, want %d", sharedCount, n)
 	}
@@ -178,6 +187,7 @@ func TestOnceGroup_Do_Panic(t *testing.T) {
 	wg.Add(n)
 	panics := int32(0)
 	start := make(chan struct{})
+	fnBlock := make(chan struct{})
 	for range n {
 		go func() {
 			defer wg.Done()
@@ -188,11 +198,15 @@ func TestOnceGroup_Do_Panic(t *testing.T) {
 			}()
 			<-start
 			_, _, _ = g.Do(key, func() (any, error) {
+				<-fnBlock
 				panic("boom")
 			})
 		}()
 	}
 	close(start)
+	// Give all goroutines ample time to hit LoadOrStore before we panic.
+	time.Sleep(50 * time.Millisecond)
+	close(fnBlock)
 	wg.Wait()
 	if panics != int32(n) {
 		t.Fatalf("expected %d panics, got %d", n, panics)
@@ -209,6 +223,7 @@ func TestOnceGroup_Do_Goexit(t *testing.T) {
 	wg.Add(n)
 	exited := int32(0)
 	start := make(chan struct{})
+	fnBlock := make(chan struct{})
 	for range n {
 		go func() {
 			defer wg.Done()
@@ -216,12 +231,16 @@ func TestOnceGroup_Do_Goexit(t *testing.T) {
 			defer atomic.AddInt32(&exited, 1)
 			<-start
 			_, _, _ = g.Do(key, func() (any, error) {
+				<-fnBlock
 				runtime.Goexit()
 				return nil, nil
 			})
 		}()
 	}
 	close(start)
+	// Give all goroutines ample time to hit LoadOrStore before we exit.
+	time.Sleep(50 * time.Millisecond)
+	close(fnBlock)
 	wg.Wait()
 	if exited != int32(n) {
 		t.Fatalf("expected %d goexits, got %d", n, exited)
