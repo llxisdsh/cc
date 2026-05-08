@@ -3319,12 +3319,14 @@ func murmur3Finalizer(i int, _ uintptr) uintptr {
 
 func TestMapWithHasher_HashCodeCollisions(t *testing.T) {
 	const numEntries = 1000
-	m := NewMap[int, int](WithKeyHasher(
-		func(i int, _ uintptr) uintptr {
-			// We intentionally use an awful hash function here to make sure
-			// that the map copes with key collisions.
-			return 42
-		}),
+	m := NewMap[int, int](
+		WithKeyHasher(
+			func(i int, _ uintptr) uintptr {
+				// We intentionally use an awful hash function here to make sure
+				// that the map copes with key collisions.
+				return 42
+			},
+		),
 		WithCapacity(numEntries),
 	)
 	for i := range numEntries {

@@ -124,7 +124,7 @@ jobs:
         run: |
           go version
           go mod download
-          go test -v -tags "cc_embedded_hash cc_cachelinesize_64 cc_enable_padding" -exec "qemu-arm" ./...
+          go test -v -tags "cc_embedded_hash cc_cachelinesize_32 cc_enable_padding" -exec "qemu-arm" ./...
 
       # - name: Upload results to Codecov (ARM32)
       #   uses: codecov/codecov-action@v5
