@@ -172,17 +172,16 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 
 	var hash uintptr
 	var h1v uintptr
-
+	var h2v uint8
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / entriesPerBucket
-		hash ^= hash >> 16
+		h2v = h2(hash ^ (hash >> 16))
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
+		h2v = h2(hash)
 	}
-
-	h2v := h2(hash)
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
 	b := table.buckets.At(idx)
@@ -215,15 +214,16 @@ func (m *Map[K, V]) Store(key K, value V) {
 
 	var hash uintptr
 	var h1v uintptr
+	var h2v uint8
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / entriesPerBucket
-		hash ^= hash >> 16
+		h2v = h2(hash ^ (hash >> 16))
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
+		h2v = h2(hash)
 	}
-	h2v := h2(hash)
 	h2w := broadcast(h2v)
 
 	// Fast path: lock-free read
@@ -266,7 +266,7 @@ slowPath:
 		root.Lock()
 
 		// This is the first check, checking if there is a rebuild operation in
-		// progress before acquiring the bucket lock
+		// progress after acquiring the bucket lock
 		if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
@@ -572,15 +572,16 @@ func (m *Map[K, V]) compute(
 
 	var hash uintptr
 	var h1v uintptr
+	var h2v uint8
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = hash / entriesPerBucket
-		hash ^= hash >> 16
+		h2v = h2(hash ^ (hash >> 16))
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
+		h2v = h2(hash)
 	}
-	h2v := h2(hash)
 	h2w := broadcast(h2v)
 
 	// Fast path: lock-free read
@@ -621,7 +622,7 @@ slowPath:
 		root.Lock()
 
 		// This is the first check, checking if there is a rebuild operation in
-		// progress before acquiring the bucket lock
+		// progress after acquiring the bucket lock
 		if flags&computeIgnoreHint == 0 {
 			if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
@@ -1292,27 +1293,29 @@ func (m *Map[K, V]) copyBucket(
 					e := (*entry_[K, V])(*b.At(j))
 					var hash uintptr
 					var h1v uintptr
+					var h2v uint8
 					if opt.EmbeddedHash_ {
 						hash = e.GetHash()
 						if m.intKey {
 							h1v = hash / entriesPerBucket
-							hash ^= hash >> 16
+							h2v = h2(hash ^ (hash >> 16))
 						} else {
 							h1v = h1(hash)
+							h2v = h2(hash)
 						}
 					} else {
 						if m.intKey {
 							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
 							h1v = hash / entriesPerBucket
-							hash ^= hash >> 16
+							h2v = h2(hash ^ (hash >> 16))
 						} else {
 							hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
 							h1v = h1(hash)
+							h2v = h2(hash)
 						}
 					}
 					idx := mask & h1v
 					destB := newTable.buckets.At(idx)
-					h2v := h2(hash)
 					// Append entry to the destination bucket
 					for {
 						meta := destB.meta

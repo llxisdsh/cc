@@ -140,17 +140,16 @@ func (m *FunnelMap[K, V]) Load(key K) (value V, ok bool) {
 
 	var hash uintptr
 	var h1v uintptr
-
+	var h2v uint8
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / fEntriesPerBucket
-		hash ^= hash >> 16
+		h2v = h2(hash ^ (hash >> 16))
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
+		h2v = h2(hash)
 	}
-
-	h2v := h2(hash)
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
 	b := table.buckets.At(idx)
@@ -181,15 +180,16 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 
 	var hash uintptr
 	var h1v uintptr
+	var h2v uint8
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(&key)))
 		h1v = hash / fEntriesPerBucket
-		hash ^= hash >> 16
+		h2v = h2(hash ^ (hash >> 16))
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h1v = h1(hash)
+		h2v = h2(hash)
 	}
-	h2v := h2(hash)
 	h2w := broadcast(h2v)
 	var fastOverflow bool
 
@@ -240,7 +240,7 @@ slowPath:
 		b.Lock()
 
 		// This is the first check, checking if there is a rebuild operation in
-		// progress before acquiring the Bucket lock
+		// progress after acquiring the Bucket lock
 		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
@@ -496,15 +496,16 @@ func (m *FunnelMap[K, V]) compute(
 
 	var hash uintptr
 	var h1v uintptr
+	var h2v uint8
 	if m.intKey {
 		hash = intHash[K](noescape(unsafe.Pointer(key)))
 		h1v = hash / fEntriesPerBucket
-		hash ^= hash >> 16
+		h2v = h2(hash ^ (hash >> 16))
 	} else {
 		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 		h1v = h1(hash)
+		h2v = h2(hash)
 	}
-	h2v := h2(hash)
 	h2w := broadcast(h2v)
 
 	// Fast path: lock-free read
@@ -546,10 +547,8 @@ slowPath:
 		b := table.buckets.At(idx)
 		b.Lock()
 
-		// This is the first check: verifies if a rebuild operation is in
-		// progress AFTER acquiring the bucket lock. This strict ordering
-		// ensures that copyBucket cannot silently migrate entries we are
-		// about to mutate.
+		// This is the first check, checking if there is a rebuild operation in
+		// progress after acquiring the Bucket lock
 		if flags&computeIgnoreHint == 0 {
 			if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
@@ -639,6 +638,12 @@ slowPath:
 		switch it.op {
 		case updateOp:
 			if it.loaded {
+				if overflow {
+					table.overflow.Store(*key, it.entry.value)
+					b.Unlock()
+					return retV, it.loaded
+				}
+
 				// valEqual: skip write if value unchanged
 				if m.valEqual != nil {
 					if m.valEqual(
@@ -648,12 +653,6 @@ slowPath:
 						b.Unlock()
 						return retV, it.loaded
 					}
-				}
-
-				if overflow {
-					table.overflow.Store(*key, it.entry.value)
-					b.Unlock()
-					return retV, it.loaded
 				}
 
 				// Update
@@ -1241,27 +1240,29 @@ func (m *FunnelMap[K, V]) copyBucket(
 				e := (*entry_[K, V])(*b.At(j))
 				var hash uintptr
 				var h1v uintptr
+				var h2v uint8
 				if opt.EmbeddedHash_ {
 					hash = e.GetHash()
 					if m.intKey {
 						h1v = hash / fEntriesPerBucket
-						hash ^= hash >> 16
+						h2v = h2(hash ^ (hash >> 16))
 					} else {
 						h1v = h1(hash)
+						h2v = h2(hash)
 					}
 				} else {
 					if m.intKey {
 						hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
 						h1v = hash / fEntriesPerBucket
-						hash ^= hash >> 16
+						h2v = h2(hash ^ (hash >> 16))
 					} else {
 						hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
 						h1v = h1(hash)
+						h2v = h2(hash)
 					}
 				}
 				idx := mask & h1v
 				destB := newTable.buckets.At(idx)
-				h2v := h2(hash)
 				// Append entry to the destination bucket
 				destMeta := destB.meta
 				if empty := (^destMeta) & fMetaMask; empty != 0 {
@@ -1282,17 +1283,18 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 	for k, v := range table.overflow.All() {
 		var hash uintptr
 		var h1v uintptr
+		var h2v uint8
 		if m.intKey {
 			hash = intHash[K](noescape(unsafe.Pointer(&k)))
 			h1v = hash / fEntriesPerBucket
-			hash ^= hash >> 16
+			h2v = h2(hash ^ (hash >> 16))
 		} else {
 			hash = m.keyHash(noescape(unsafe.Pointer(&k)), m.seed)
 			h1v = h1(hash)
+			h2v = h2(hash)
 		}
 		idx := newTable.mask & h1v
 		destB := newTable.buckets.At(idx)
-		h2v := h2(hash)
 
 		destMeta := destB.meta
 		if empty := (^destMeta) & fMetaMask; empty != 0 {

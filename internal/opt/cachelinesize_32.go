@@ -2,4 +2,4 @@
 
 package opt
 
-const CacheLineSize_ = 32
+const CacheLineSize_ = uintptr(32)
