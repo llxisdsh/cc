@@ -231,191 +231,155 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 		h2v = h2(hash)
 	}
 	h2w := broadcast(h2v)
-
+	idx := table.mask & h1v
+	root := table.buckets.At(idx)
 	// Fast path: lock-free read
-	{
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
-		for {
-			s1, ok := b.seq.BeginRead()
-			if !ok {
-				goto slowPath
-			}
-			meta := loadUint64Fast(&b.meta)
 
-			//goland:noinspection GoBoolExpressions
-			if !opt.Race_ {
-				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
-					e := b.At(j).ReadUnfenced()
-					if !b.seq.EndRead(s1) {
-						goto slowPath
-					}
-					if !opt.EmbeddedHash_ || e.GetHash() == hash {
-						if e.key == key {
-							// valEqual: skip write if value unchanged
-							if m.valEqual != nil {
-								if m.valEqual(
-									noescape(unsafe.Pointer(&e.value)),
-									noescape(unsafe.Pointer(&value)),
-								) {
-									return
-								}
-							}
-							goto slowPath
-						}
-					}
-				}
-			} else {
-				var cache [entriesPerBucket]entry_[K, V]
-				var cacheCount uintptr
-				unsafeCache := toUnsafeSlice(&cache[0])
-				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
-					*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
-					cacheCount++
-				}
+	for b := root; ; b = (*flatBucket[K, V])(loadPtr(&b.next)) {
+		s1, ok := b.seq.BeginRead()
+		if !ok {
+			goto slowPath
+		}
+		meta := loadUint64Fast(&b.meta)
+
+		//goland:noinspection GoBoolExpressions
+		if !opt.Race_ {
+			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				e := b.At(j).ReadUnfenced()
 				if !b.seq.EndRead(s1) {
 					goto slowPath
 				}
-				for j := range cacheCount {
-					e := unsafeCache.At(j)
-					if !opt.EmbeddedHash_ || e.GetHash() == hash {
-						if e.key == key {
-							// valEqual: skip write if value unchanged
-							if m.valEqual != nil {
-								if m.valEqual(
-									noescape(unsafe.Pointer(&e.value)),
-									noescape(unsafe.Pointer(&value)),
-								) {
-									return
-								}
-							}
-							goto slowPath
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						// valEqual: skip write if value unchanged
+						if m.valEqual != nil && m.valEqual(
+							noescape(unsafe.Pointer(&e.value)),
+							noescape(unsafe.Pointer(&value)),
+						) {
+							return
 						}
+						goto slowPath
 					}
 				}
 			}
-			if meta&opNextMask == 0 {
-				break
+		} else {
+			var cache [entriesPerBucket]entry_[K, V]
+			var cacheCount uintptr
+			unsafeCache := toUnsafeSlice(&cache[0])
+			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
+				cacheCount++
 			}
-			b = (*flatBucket[K, V])(loadPtr(&b.next))
+			if !b.seq.EndRead(s1) {
+				goto slowPath
+			}
+			for j := range cacheCount {
+				e := unsafeCache.At(j)
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						// valEqual: skip write if value unchanged
+						if m.valEqual != nil && m.valEqual(
+							noescape(unsafe.Pointer(&e.value)),
+							noescape(unsafe.Pointer(&value)),
+						) {
+							return
+						}
+						goto slowPath
+					}
+				}
+			}
+		}
+		if meta&opNextMask == 0 {
+			break
 		}
 	}
 
 slowPath:
-	for {
-		idx := table.mask & h1v
-		root := table.buckets.At(idx)
-		root.Lock()
-
-		// Help finishing rebuild if needed
-		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
-			switch rs.hint {
-			case mapGrowHint, mapShrinkHint:
-				if rs.newTableSeq.Ready() {
-					root.Unlock()
-					m.helpCopyAndWait(rs)
-					table = SeqLockRead32(&m.tableSeq, &m.table)
-					continue
-				}
-			case mapRebuildBlockWritersHint:
+	root.Lock()
+	// Help finishing rebuild if needed
+	if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
+		switch rs.hint {
+		case mapGrowHint, mapShrinkHint:
+			if rs.newTableSeq.Ready() {
 				root.Unlock()
-				rs.latch.Wait()
+				m.helpCopyAndWait(rs)
 				table = SeqLockRead32(&m.tableSeq, &m.table)
-				continue
-			default:
-				// mapRebuildAllowWritersHint: allow concurrent writers
+				idx = table.mask & h1v
+				root = table.buckets.At(idx)
+				goto slowPath
 			}
-		}
-
-		if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+		case mapRebuildBlockWritersHint:
 			root.Unlock()
-			table = newTable
-			continue
+			rs.latch.Wait()
+			table = SeqLockRead32(&m.tableSeq, &m.table)
+			idx = table.mask & h1v
+			root = table.buckets.At(idx)
+			goto slowPath
+		default:
+			// mapRebuildAllowWritersHint: allow concurrent writers
 		}
+	}
 
-		var (
-			oldB      *flatBucket[K, V]
-			oldIdx    uintptr
-			emptyB    *flatBucket[K, V]
-			emptyIdx  uintptr
-			emptyMeta uint64
-		)
+	if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+		root.Unlock()
+		table = newTable
+		idx = table.mask & h1v
+		root = table.buckets.At(idx)
+		goto slowPath
+	}
 
-		b := root
-	findLoop:
-		for {
-			meta := loadUint64Fast(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				e := b.At(j).Ptr()
-				//goland:noinspection GoBoolExpressions
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == key {
-						oldB, oldIdx = b, j
-						break findLoop
-					}
+	var (
+		emptyM uint64
+		emptyB *flatBucket[K, V]
+		emptyI uintptr
+	)
+	newEnt := entry_[K, V]{key: key, value: value}
+	if opt.EmbeddedHash_ {
+		newEnt.SetHash(hash)
+	}
+	lastB := root
+	for {
+		meta := loadUint64Fast(&lastB.meta)
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j := firstMarkedByteIndex(marked)
+			//goland:noinspection GoBoolExpressions
+			if !opt.EmbeddedHash_ || lastB.At(j).Ptr().GetHash() == hash {
+				if lastB.At(j).Ptr().key == key {
+					// Update
+					lastB.seq.BeginWriteLocked()
+					lastB.At(j).WriteUnfenced(newEnt)
+					lastB.seq.EndWriteLocked()
+					root.Unlock()
+					return
 				}
 			}
-			if emptyB == nil {
-				if empty := (^meta) & metaMask; empty != 0 {
-					emptyB = b
-					emptyIdx = firstMarkedByteIndex(empty)
-					emptyMeta = meta
-				}
+		}
+		if emptyB == nil {
+			if empty := (^meta) & metaMask; empty != 0 {
+				emptyM, emptyB, emptyI = meta, lastB, firstMarkedByteIndex(empty)
 			}
-
-			if meta&opNextMask == 0 {
-				break
-			}
-			b = (*flatBucket[K, V])(b.next)
 		}
-
-		if oldB != nil {
-			// Update
-			newEnt := entry_[K, V]{key: key, value: value}
-			if opt.EmbeddedHash_ {
-				newEnt.SetHash(hash)
-			}
-			e := oldB.At(oldIdx)
-			oldB.seq.BeginWriteLocked()
-			e.WriteUnfenced(newEnt)
-			oldB.seq.EndWriteLocked()
-			root.Unlock()
-			return
+		if meta&opNextMask == 0 {
+			break
 		}
+		lastB = (*flatBucket[K, V])(lastB.next)
+	}
 
-		newEnt := entry_[K, V]{key: key, value: value}
-		if opt.EmbeddedHash_ {
-			newEnt.SetHash(hash)
-		}
-
-		// Insert into empty slot
-		if emptyB != nil {
-			// insert new: no seqlock window needed since slot was empty.
-			// Reader won't access slot until meta is published with valid h2.
-			emptyB.At(emptyIdx).WriteUnfenced(newEnt)
-			newMeta := setByte(emptyMeta, h2v, emptyIdx)
-			storeUint64(&emptyB.meta, newMeta)
-
-			root.Unlock()
-			table.AddSize(idx, 1)
-			return
-		}
-
+	if emptyB == nil {
 		// append new bucket
-		storePtr(&b.next, unsafe.Pointer(&flatBucket[K, V]{
-			meta: setByte(emptyMeta, h2v, 0),
+		storePtr(&lastB.next, unsafe.Pointer(&flatBucket[K, V]{
+			meta: setByte(emptyM, h2v, 0),
 			entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
 				{buf: newEnt},
 			},
 		}))
-		newMeta := loadUint64Fast(&b.meta) | opNextMask
-		if b == root {
+		newMeta := loadUint64Fast(&lastB.meta) | opNextMask
+		if lastB == root {
 			root.UnlockWithMeta(newMeta)
 		} else {
-			storeUint64(&b.meta, newMeta)
+			storeUint64(&lastB.meta, newMeta)
 			root.Unlock()
 		}
 
@@ -434,6 +398,18 @@ slowPath:
 		}
 		return
 	}
+	// Insert into empty slot
+	// insert new: no seqlock window needed since slot was empty.
+	// Reader won't access slot until meta is published with valid h2.
+	emptyB.At(emptyI).WriteUnfenced(newEnt)
+	newMeta := setByte(emptyM, h2v, emptyI)
+	if emptyB == root {
+		root.UnlockWithMeta(newMeta)
+	} else {
+		storeUint64(&emptyB.meta, newMeta)
+		root.Unlock()
+	}
+	table.AddSize(idx, 1)
 }
 
 // LoadOrStore returns the existing value for the key if present.
@@ -611,11 +587,11 @@ func (m *FlatMap[K, V]) compute(
 		h2v = h2(hash)
 	}
 	h2w := broadcast(h2v)
-
+	idx := table.mask & h1v
+	root := table.buckets.At(idx)
 	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
+		b := root
 		for {
 			s1, ok := b.seq.BeginRead()
 			if !ok {
@@ -676,128 +652,113 @@ func (m *FlatMap[K, V]) compute(
 	}
 
 slowPath:
-	for {
-		idx := table.mask & h1v
-		root := table.buckets.At(idx)
-		root.Lock()
+	root.Lock()
 
-		// Help finishing rebuild if needed
-		if flags&computeIgnoreHint == 0 {
-			if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
-				switch rs.hint {
-				case mapGrowHint, mapShrinkHint:
-					if rs.newTableSeq.Ready() {
-						root.Unlock()
-						m.helpCopyAndWait(rs)
-						table = SeqLockRead32(&m.tableSeq, &m.table)
-						continue
-					}
-				case mapRebuildBlockWritersHint:
+	// Help finishing rebuild if needed
+	if flags&computeIgnoreHint == 0 {
+		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
+			switch rs.hint {
+			case mapGrowHint, mapShrinkHint:
+				if rs.newTableSeq.Ready() {
 					root.Unlock()
-					rs.latch.Wait()
+					m.helpCopyAndWait(rs)
 					table = SeqLockRead32(&m.tableSeq, &m.table)
-					continue
-				default:
-					// mapRebuildAllowWritersHint: allow concurrent writers
+					idx = table.mask & h1v
+					root = table.buckets.At(idx)
+					goto slowPath
+				}
+			case mapRebuildBlockWritersHint:
+				root.Unlock()
+				rs.latch.Wait()
+				table = SeqLockRead32(&m.tableSeq, &m.table)
+				idx = table.mask & h1v
+				root = table.buckets.At(idx)
+				goto slowPath
+			default:
+				// mapRebuildAllowWritersHint: allow concurrent writers
+			}
+		}
+	}
+	if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+		root.Unlock()
+		table = newTable
+		idx = table.mask & h1v
+		root = table.buckets.At(idx)
+		goto slowPath
+	}
+
+	var (
+		meta   uint64
+		j      uintptr
+		emptyM uint64
+		emptyB *flatBucket[K, V]
+		emptyI uintptr
+	)
+	it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
+	if opt.EmbeddedHash_ {
+		it.entry.SetHash(hash)
+	}
+
+	lastB := root
+findLoop:
+	for {
+		meta = loadUint64Fast(&lastB.meta)
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j = firstMarkedByteIndex(marked)
+			e := lastB.At(j).Ptr()
+			//goland:noinspection GoBoolExpressions
+			if !opt.EmbeddedHash_ || e.GetHash() == hash {
+				if e.key == *key {
+					it.entry.value, it.loaded = e.value, true
+					break findLoop
 				}
 			}
 		}
-		if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+		if emptyB == nil {
+			if empty := (^meta) & metaMask; empty != 0 {
+				emptyM, emptyB, emptyI = meta, lastB, firstMarkedByteIndex(empty)
+			}
+		}
+		if meta&opNextMask == 0 {
+			break
+		}
+		lastB = (*flatBucket[K, V])(lastB.next)
+	}
+
+	// --- Compute Logic ---
+	fn(noEscape(&it))
+	switch it.op {
+	case updateOp:
+		if it.loaded {
+			// valEqual: skip write if value unchanged
+			if m.valEqual != nil && m.valEqual(
+				noescape(unsafe.Pointer(&lastB.At(j).Ptr().value)),
+				noescape(unsafe.Pointer(&it.entry.value)),
+			) {
+				root.Unlock()
+				return it.entry.value, it.loaded
+			}
+
+			// Update
+			lastB.seq.BeginWriteLocked()
+			lastB.At(j).WriteUnfenced(it.entry)
+			lastB.seq.EndWriteLocked()
 			root.Unlock()
-			table = newTable
-			continue
+			return it.entry.value, it.loaded
 		}
-
-		var (
-			oldB      *flatBucket[K, V]
-			oldIdx    uintptr
-			oldMeta   uint64
-			emptyB    *flatBucket[K, V]
-			emptyIdx  uintptr
-			emptyMeta uint64
-		)
-		it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
-		if opt.EmbeddedHash_ {
-			it.entry.SetHash(hash)
-		}
-
-		b := root
-	findLoop:
-		for {
-			meta := loadUint64Fast(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				e := b.At(j).Ptr()
-				//goland:noinspection GoBoolExpressions
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == *key {
-						oldB, oldIdx, oldMeta, it.entry.value, it.loaded = b, j, meta, e.value, true
-						break findLoop
-					}
-				}
-			}
-			if emptyB == nil {
-				if empty := (^meta) & metaMask; empty != 0 {
-					emptyB = b
-					emptyIdx = firstMarkedByteIndex(empty)
-					emptyMeta = meta
-				}
-			}
-			if meta&opNextMask == 0 {
-				break
-			}
-			b = (*flatBucket[K, V])(b.next)
-		}
-
-		// --- Compute Logic ---
-		fn(noEscape(&it))
-		switch it.op {
-		case updateOp:
-			if it.loaded {
-				// valEqual: skip write if value unchanged
-				if m.valEqual != nil {
-					if m.valEqual(
-						noescape(unsafe.Pointer(&oldB.At(oldIdx).Ptr().value)),
-						noescape(unsafe.Pointer(&it.entry.value)),
-					) {
-						root.Unlock()
-						return it.entry.value, it.loaded
-					}
-				}
-				// Update
-				e := oldB.At(oldIdx)
-				oldB.seq.BeginWriteLocked()
-				e.WriteUnfenced(it.entry)
-				oldB.seq.EndWriteLocked()
-				root.Unlock()
-				return it.entry.value, it.loaded
-			}
-			// Insert into empty slot
-			if emptyB != nil {
-				// insert new: no seqlock window needed since slot was empty.
-				// Reader won't access slot until meta is published with valid h2.
-				// StoreBarrier ensures Entry is visible before meta update on ARM.
-				emptyB.At(emptyIdx).WriteUnfenced(it.entry)
-				// emptyB.seq.WriteBarrier()
-				newMeta := setByte(emptyMeta, h2v, emptyIdx)
-				storeUint64(&emptyB.meta, newMeta)
-
-				root.Unlock()
-				table.AddSize(idx, 1)
-				return it.entry.value, it.loaded
-			}
+		if emptyB == nil {
 			// append new bucket
-			storePtr(&b.next, unsafe.Pointer(&flatBucket[K, V]{
-				meta: setByte(emptyMeta, h2v, 0),
+			storePtr(&lastB.next, unsafe.Pointer(&flatBucket[K, V]{
+				meta: setByte(emptyM, h2v, 0),
 				entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
 					{buf: it.entry},
 				},
 			}))
-			newMeta := loadUint64Fast(&b.meta) | opNextMask
-			if b == root {
+			newMeta := loadUint64Fast(&lastB.meta) | opNextMask
+			if lastB == root {
 				root.UnlockWithMeta(newMeta)
 			} else {
-				storeUint64(&b.meta, newMeta)
+				storeUint64(&lastB.meta, newMeta)
 				root.Unlock()
 			}
 
@@ -815,41 +776,56 @@ slowPath:
 				}
 			}
 			return it.entry.value, it.loaded
-		case deleteOp:
-			if !it.loaded {
-				root.Unlock()
-				return it.entry.value, it.loaded
-			}
-			// Delete: update meta first so new Readers skip this slot immediately.
-			// Active Readers will see seq change and retry, then see h2=0.
-			newMeta := setByte(oldMeta, h2Empty, oldIdx)
-			storeUint64(&oldB.meta, newMeta)
-			oldB.seq.BeginWriteLocked()
-			oldB.At(oldIdx).WriteUnfenced(entry_[K, V]{})
-			oldB.seq.EndWriteLocked()
-
+		}
+		// Insert into empty slot
+		// insert new: no seqlock window needed since slot was empty.
+		// Reader won't access slot until meta is published with valid h2.
+		// StoreBarrier ensures Entry is visible before meta update on ARM.
+		emptyB.At(emptyI).WriteUnfenced(it.entry)
+		// emptyB.seq.WriteBarrier()
+		newMeta := setByte(emptyM, h2v, emptyI)
+		if emptyB == root {
+			root.UnlockWithMeta(newMeta)
+		} else {
+			storeUint64(&emptyB.meta, newMeta)
 			root.Unlock()
-			table.AddSize(idx, ^uintptr(0))
-			// Check if table shrinking is needed
-			if m.shrinkOn {
-				if newMeta&metaDataMask == metaEmpty {
-					if loadPtr(&m.rs) == nil {
-						tableLen := table.mask + 1
-						if m.minLen < tableLen {
-							size := table.SumSize()
-							if size < tableLen*entriesPerBucket/shrinkFraction {
-								m.tryResize(mapShrinkHint, tableLen>>1)
-							}
+		}
+		table.AddSize(idx, 1)
+		return it.entry.value, it.loaded
+	case deleteOp:
+		if !it.loaded {
+			root.Unlock()
+			return it.entry.value, it.loaded
+		}
+		// Delete: update meta first so new Readers skip this slot immediately.
+		// Active Readers will see seq change and retry, then see h2=0.
+		newMeta := setByte(meta, h2Empty, j)
+		storeUint64(&lastB.meta, newMeta)
+		lastB.seq.BeginWriteLocked()
+		lastB.At(j).WriteUnfenced(entry_[K, V]{})
+		lastB.seq.EndWriteLocked()
+
+		root.Unlock()
+		table.AddSize(idx, ^uintptr(0))
+		// Check if table shrinking is needed
+		if m.shrinkOn {
+			if newMeta&metaDataMask == metaEmpty {
+				if loadPtr(&m.rs) == nil {
+					tableLen := table.mask + 1
+					if m.minLen < tableLen {
+						size := table.SumSize()
+						if size < tableLen*entriesPerBucket/shrinkFraction {
+							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
 					}
 				}
 			}
-			return it.entry.value, it.loaded
-		default:
-			// cancelOp: No-op
-			root.Unlock()
-			return it.entry.value, it.loaded
 		}
+		return it.entry.value, it.loaded
+	default:
+		// cancelOp: No-op
+		root.Unlock()
+		return it.entry.value, it.loaded
 	}
 }
 

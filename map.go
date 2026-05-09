@@ -184,8 +184,7 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 	}
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
-	b := table.buckets.At(idx)
-	for {
+	for b := table.buckets.At(idx); ; b = (*bucket)(loadPtr(&b.next)) {
 		meta := loadUint64(&b.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
@@ -201,7 +200,6 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 		if meta&opNextMask == 0 {
 			return *new(V), false
 		}
-		b = (*bucket)(loadPtr(&b.next))
 	}
 }
 
@@ -225,174 +223,150 @@ func (m *Map[K, V]) Store(key K, value V) {
 		h2v = h2(hash)
 	}
 	h2w := broadcast(h2v)
+	idx := table.mask & h1v
+	root := table.buckets.At(idx)
 
 	// Fast path: lock-free read
-	{
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
-		for {
-			meta := loadUint64(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-					//goland:noinspection GoBoolExpressions
-					if !opt.EmbeddedHash_ || e.GetHash() == hash {
-						if e.key == key {
-							// valEqual: skip write if value unchanged
-							if m.valEqual != nil {
-								if m.valEqual(
-									noescape(unsafe.Pointer(&e.value)),
-									noescape(unsafe.Pointer(&value)),
-								) {
-									return
-								}
-							}
-							goto slowPath
+	for b := root; ; b = (*bucket)(loadPtr(&b.next)) {
+		meta := loadUint64(&b.meta)
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j := firstMarkedByteIndex(marked)
+			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+				//goland:noinspection GoBoolExpressions
+				if !opt.EmbeddedHash_ || e.GetHash() == hash {
+					if e.key == key {
+						if m.valEqual != nil && m.valEqual(
+							noescape(unsafe.Pointer(&e.value)),
+							noescape(unsafe.Pointer(&value)),
+						) {
+							return
 						}
+						goto slowPath
 					}
 				}
 			}
-			if meta&opNextMask == 0 {
-				break
-			}
-			b = (*bucket)(loadPtr(&b.next))
+		}
+		if meta&opNextMask == 0 {
+			break
 		}
 	}
 
 slowPath:
-	for {
-		idx := table.mask & h1v
-		root := table.buckets.At(idx)
-		root.Lock()
+	root.Lock()
 
-		// This is the first check, checking if there is a rebuild operation in
-		// progress after acquiring the bucket lock
-		if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
-			switch rs.hint {
-			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.newTable) != nil {
-					root.Unlock()
-					m.helpCopyAndWait(rs)
-					table = (*mapTable)(loadPtr(&m.table))
-					continue
-				}
-			case mapRebuildBlockWritersHint:
+	// This is the first check, checking if there is a rebuild operation in
+	// progress after acquiring the bucket lock
+	if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
+		switch rs.hint {
+		case mapGrowHint, mapShrinkHint:
+			if loadPtr(&rs.newTable) != nil {
 				root.Unlock()
-				rs.latch.Wait()
+				m.helpCopyAndWait(rs)
 				table = (*mapTable)(loadPtr(&m.table))
-				continue
-			default:
-				// mapRebuildAllowWritersHint: allow concurrent writers
+				idx = table.mask & h1v
+				root = table.buckets.At(idx)
+				goto slowPath
 			}
-		}
-
-		// Verifies if table was replaced after lock acquisition.
-		// Needed since another goroutine may have resized the table
-		// between initial check and lock acquisition.
-		if newTable := (*mapTable)(loadPtr(&m.table)); table != newTable {
+		case mapRebuildBlockWritersHint:
 			root.Unlock()
-			table = newTable
-			continue
-		}
-
-		var (
-			meta uint64
-			j    uintptr
-		)
-
-		b := root
-		for {
-			meta = loadUint64Fast(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j = firstMarkedByteIndex(marked)
-				e := (*entry_[K, V])(*b.At(j))
-				//goland:noinspection GoBoolExpressions
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == key {
-						goto found
-					}
-				}
-			}
-			if meta&opNextMask == 0 {
-				break
-			}
-			b = (*bucket)(b.next)
-		}
-		{
-			// Insert
-
-			// Insert into empty slot
-			b = root
-			for {
-				meta = loadUint64Fast(&b.meta)
-				if empty := (^meta) & metaMask; empty != 0 {
-					// publish pointer first, then meta; readers check meta before
-					// pointer so they won't observe a partially-initialized entry,
-					// and this reduces the window where meta is visible but pointer is
-					// still nil
-					emptyIdx := firstMarkedByteIndex(empty)
-					newEntry := &entry_[K, V]{key: key, value: value}
-					if opt.EmbeddedHash_ {
-						newEntry.SetHash(hash)
-					}
-					storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
-					newMeta := setByte(meta, h2v, emptyIdx)
-					if b == root {
-						root.UnlockWithMeta(newMeta)
-					} else {
-						storeUint64(&b.meta, newMeta)
-						root.Unlock()
-					}
-					table.AddSize(idx, 1)
-					return
-				}
-				if meta&opNextMask == 0 {
-					break
-				}
-				b = (*bucket)(b.next)
-			}
-
-			// No empty slot, create new bucket and insert
-			newEntry := &entry_[K, V]{key: key, value: value}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
-			}
-			storePtr(&b.next, unsafe.Pointer(&bucket{
-				meta: setByte(metaEmpty, h2v, 0),
-				entries: [entriesPerBucket]unsafe.Pointer{
-					unsafe.Pointer(newEntry),
-				},
-			}))
-			if b == root {
-				root.UnlockWithMeta(meta | opNextMask)
-			} else {
-				storeUint64(&b.meta, meta|opNextMask)
-				root.Unlock()
-			}
-
-			localSize := int(table.AddSize(idx, 1))
-			// Check if the table needs to grow
-			if localSize >= table.stripeCap {
-				if loadPtr(&m.rs) == nil {
-					if table.SumSize() >= table.growCap {
-						m.tryResize(mapGrowHint, (table.mask+1)<<1)
-					}
-				}
-			}
-			return
-		}
-	found:
-		{
-			// Update
-			newEntry := &entry_[K, V]{key: key, value: value}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
-			}
-			storePtr(b.At(j), unsafe.Pointer(newEntry))
-			root.Unlock()
-			return
+			rs.latch.Wait()
+			table = (*mapTable)(loadPtr(&m.table))
+			idx = table.mask & h1v
+			root = table.buckets.At(idx)
+			goto slowPath
+		default:
+			// mapRebuildAllowWritersHint: allow concurrent writers
 		}
 	}
+
+	// Verifies if table was replaced after lock acquisition.
+	// Needed since another goroutine may have resized the table
+	// between initial check and lock acquisition.
+	if newTable := (*mapTable)(loadPtr(&m.table)); table != newTable {
+		root.Unlock()
+		table = newTable
+		idx = table.mask & h1v
+		root = table.buckets.At(idx)
+		goto slowPath
+	}
+
+	var (
+		emptyM uint64
+		emptyB *bucket
+		emptyI uintptr
+	)
+	newEntry := &entry_[K, V]{key: key, value: value}
+	if opt.EmbeddedHash_ {
+		newEntry.SetHash(hash)
+	}
+	lastB := root
+	for {
+		meta := loadUint64Fast(&lastB.meta)
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j := firstMarkedByteIndex(marked)
+			e := (*entry_[K, V])(*lastB.At(j))
+			//goland:noinspection GoBoolExpressions
+			if !opt.EmbeddedHash_ || e.GetHash() == hash {
+				if e.key == key {
+					// Update
+					storePtr(lastB.At(j), unsafe.Pointer(newEntry))
+					root.Unlock()
+					return
+				}
+			}
+		}
+		if emptyB == nil {
+			if empty := (^meta) & metaMask; empty != 0 {
+				emptyM, emptyB, emptyI = meta, lastB, firstMarkedByteIndex(empty)
+			}
+		}
+		if meta&opNextMask == 0 {
+			break
+		}
+		lastB = (*bucket)(lastB.next)
+	}
+
+	if emptyB == nil {
+		// No empty slot found, create new bucket and insert
+		storePtr(&lastB.next, unsafe.Pointer(&bucket{
+			meta: setByte(metaEmpty, h2v, 0),
+			entries: [entriesPerBucket]unsafe.Pointer{
+				unsafe.Pointer(newEntry),
+			},
+		}))
+		if lastB == root {
+			root.UnlockWithMeta(loadUint64Fast(&lastB.meta) | opNextMask)
+		} else {
+			storeUint64(&lastB.meta, loadUint64Fast(&lastB.meta)|opNextMask)
+			root.Unlock()
+		}
+
+		// localSize := int(table.AddSize(idx, 1))
+		// Check if the table needs to grow
+		if int(table.AddSize(idx, 1)) >= table.stripeCap {
+			if loadPtr(&m.rs) == nil {
+				if table.SumSize() >= table.growCap {
+					m.tryResize(mapGrowHint, (table.mask+1)<<1)
+				}
+			}
+		}
+		return
+	}
+
+	// Insert into empty slot
+	// publish pointer first, then meta; readers check meta before
+	// pointer so they won't observe a partially-initialized entry,
+	// and this reduces the window where meta is visible but pointer is
+	// still nil
+	storePtr(emptyB.At(emptyI), unsafe.Pointer(newEntry))
+	newMeta := setByte(emptyM, h2v, emptyI)
+	if emptyB == root {
+		root.UnlockWithMeta(newMeta)
+	} else {
+		storeUint64(&emptyB.meta, newMeta)
+		root.Unlock()
+	}
+	table.AddSize(idx, 1)
 }
 
 // LoadOrStore retrieves an existing value or stores a new one if the key
@@ -583,11 +557,12 @@ func (m *Map[K, V]) compute(
 		h2v = h2(hash)
 	}
 	h2w := broadcast(h2v)
+	idx := table.mask & h1v
+	root := table.buckets.At(idx)
 
 	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
+		b := root
 		for {
 			meta := loadUint64(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
@@ -616,136 +591,118 @@ func (m *Map[K, V]) compute(
 	}
 
 slowPath:
-	for {
-		idx := table.mask & h1v
-		root := table.buckets.At(idx)
-		root.Lock()
+	root.Lock()
 
-		// This is the first check, checking if there is a rebuild operation in
-		// progress after acquiring the bucket lock
-		if flags&computeIgnoreHint == 0 {
-			if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
-				switch rs.hint {
-				case mapGrowHint, mapShrinkHint:
-					if loadPtr(&rs.newTable) != nil {
-						root.Unlock()
-						m.helpCopyAndWait(rs)
-						table = (*mapTable)(loadPtr(&m.table))
-						continue
-					}
-				case mapRebuildBlockWritersHint:
+	// This is the first check, checking if there is a rebuild operation in
+	// progress after acquiring the bucket lock
+	if flags&computeIgnoreHint == 0 {
+		if rs := (*rebuildState)(loadPtr(&m.rs)); rs != nil {
+			switch rs.hint {
+			case mapGrowHint, mapShrinkHint:
+				if loadPtr(&rs.newTable) != nil {
 					root.Unlock()
-					rs.latch.Wait()
+					m.helpCopyAndWait(rs)
 					table = (*mapTable)(loadPtr(&m.table))
-					continue
-				default:
-					// mapRebuildAllowWritersHint: allow concurrent writers
+					idx = table.mask & h1v
+					root = table.buckets.At(idx)
+					goto slowPath
+				}
+			case mapRebuildBlockWritersHint:
+				root.Unlock()
+				rs.latch.Wait()
+				table = (*mapTable)(loadPtr(&m.table))
+				idx = table.mask & h1v
+				root = table.buckets.At(idx)
+				goto slowPath
+			default:
+				// mapRebuildAllowWritersHint: allow concurrent writers
+			}
+		}
+	}
+
+	// Verifies if table was replaced after lock acquisition.
+	// Needed since another goroutine may have resized the table
+	// between initial check and lock acquisition.
+	if newTable := (*mapTable)(loadPtr(&m.table)); table != newTable {
+		root.Unlock()
+		table = newTable
+		idx = table.mask & h1v
+		root = table.buckets.At(idx)
+		goto slowPath
+	}
+
+	var (
+		meta   uint64
+		j      uintptr
+		emptyM uint64
+		emptyB *bucket
+		emptyI uintptr
+	)
+	it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
+	lastB := root
+findLoop:
+	for {
+		meta = loadUint64Fast(&lastB.meta)
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j = firstMarkedByteIndex(marked)
+			e := (*entry_[K, V])(*lastB.At(j))
+			//goland:noinspection GoBoolExpressions
+			if !opt.EmbeddedHash_ || e.GetHash() == hash {
+				if e.key == *key {
+					it.entry.value, it.loaded = e.value, true
+					break findLoop
 				}
 			}
 		}
-
-		// Verifies if table was replaced after lock acquisition.
-		// Needed since another goroutine may have resized the table
-		// between initial check and lock acquisition.
-		if newTable := (*mapTable)(loadPtr(&m.table)); table != newTable {
-			root.Unlock()
-			table = newTable
-			continue
-		}
-
-		var (
-			meta uint64
-			j    uintptr
-		)
-		it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
-		b := root
-	findLoop:
-		for {
-			meta = loadUint64Fast(&b.meta)
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j = firstMarkedByteIndex(marked)
-				e := (*entry_[K, V])(*b.At(j))
-				//goland:noinspection GoBoolExpressions
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == *key {
-						it.entry.value, it.loaded = e.value, true
-						break findLoop
-					}
-				}
+		if emptyB == nil {
+			if empty := (^meta) & metaMask; empty != 0 {
+				emptyM, emptyB, emptyI = meta, lastB, firstMarkedByteIndex(empty)
 			}
-			if meta&opNextMask == 0 {
-				break
-			}
-			b = (*bucket)(b.next)
 		}
+		if meta&opNextMask == 0 {
+			break
+		}
+		lastB = (*bucket)(lastB.next)
+	}
 
-		// --- Compute Logic ---
-		fn(noEscape(&it))
+	// --- Compute Logic ---
+	fn(noEscape(&it))
 
-		switch it.op {
-		case updateOp:
-			if it.loaded {
-				// valEqual: skip write if value unchanged
-				if m.valEqual != nil {
-					if m.valEqual(
-						noescape(unsafe.Pointer(&(*entry_[K, V])(*b.At(j)).value)),
-						noescape(unsafe.Pointer(&it.entry.value)),
-					) {
-						root.Unlock()
-						return it.entry.value, it.loaded
-					}
-				}
-				// Update
-				newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
-				if opt.EmbeddedHash_ {
-					newEntry.SetHash(hash)
-				}
-				storePtr(b.At(j), unsafe.Pointer(newEntry))
+	switch it.op {
+	case updateOp:
+		if it.loaded {
+			// valEqual: skip write if value unchanged
+			if m.valEqual != nil && m.valEqual(
+				noescape(unsafe.Pointer(&(*entry_[K, V])(*lastB.At(j)).value)),
+				noescape(unsafe.Pointer(&it.entry.value)),
+			) {
 				root.Unlock()
 				return it.entry.value, it.loaded
 			}
-			newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
-			}
-			// Insert into empty slot
-			b = root
-			for {
-				meta = loadUint64Fast(&b.meta)
-				if empty := (^meta) & metaMask; empty != 0 {
-					emptyIdx := firstMarkedByteIndex(empty)
-					// publish pointer first, then meta; readers check meta before
-					// pointer so they won't observe a partially-initialized entry,
-					// and this reduces the window where meta is visible but pointer is
-					// still nil
-					storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
-					newMeta := setByte(meta, h2v, emptyIdx)
-					if b == root {
-						root.UnlockWithMeta(newMeta)
-					} else {
-						storeUint64(&b.meta, newMeta)
-						root.Unlock()
-					}
-					table.AddSize(idx, 1)
-					return it.entry.value, it.loaded
-				}
-				if meta&opNextMask == 0 {
-					break
-				}
-				b = (*bucket)(b.next)
-			}
+		}
 
+		// Update
+		newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
+		if opt.EmbeddedHash_ {
+			newEntry.SetHash(hash)
+		}
+		if it.loaded {
+			storePtr(lastB.At(j), unsafe.Pointer(newEntry))
+			root.Unlock()
+			return it.entry.value, it.loaded
+		}
+		if emptyB == nil {
 			// No empty slot, create new bucket and insert
-			storePtr(&b.next, unsafe.Pointer(&bucket{
+			storePtr(&lastB.next, unsafe.Pointer(&bucket{
 				meta: setByte(metaEmpty, h2v, 0),
 				entries: [entriesPerBucket]unsafe.Pointer{
 					unsafe.Pointer(newEntry),
 				},
 			}))
-			if b == root {
+			if lastB == root {
 				root.UnlockWithMeta(meta | opNextMask)
 			} else {
-				storeUint64(&b.meta, meta|opNextMask)
+				storeUint64(&lastB.meta, meta|opNextMask)
 				root.Unlock()
 			}
 
@@ -759,42 +716,54 @@ slowPath:
 				}
 			}
 			return it.entry.value, it.loaded
-		case deleteOp:
-			if !it.loaded {
-				root.Unlock()
-				return it.entry.value, it.loaded
-			}
-			// Delete
-			storePtr(b.At(j), nil)
-			newMeta := setByte(meta, h2Empty, j)
-			if b == root {
-				root.UnlockWithMeta(newMeta)
-			} else {
-				storeUint64(&b.meta, newMeta)
-				root.Unlock()
-			}
-			table.AddSize(idx, ^uintptr(0))
+		}
+		// Insert into empty slot
+		storePtr(emptyB.At(emptyI), unsafe.Pointer(newEntry))
+		newMeta := setByte(emptyM, h2v, emptyI)
+		if emptyB == root {
+			root.UnlockWithMeta(newMeta)
+		} else {
+			storeUint64(&emptyB.meta, newMeta)
+			root.Unlock()
+		}
+		table.AddSize(idx, 1)
+		return it.entry.value, it.loaded
+	case deleteOp:
+		if !it.loaded {
+			root.Unlock()
+			return it.entry.value, it.loaded
+		}
 
-			// Check if table shrinking is needed
-			if m.shrinkOn {
-				if newMeta&metaDataMask == metaEmpty {
-					if loadPtr(&m.rs) == nil {
-						tableLen := table.mask + 1
-						if m.minLen < tableLen {
-							size := table.SumSize()
-							if size < tableLen*entriesPerBucket/shrinkFraction {
-								m.tryResize(mapShrinkHint, tableLen>>1)
-							}
+		// Delete
+		storePtr(lastB.At(j), nil)
+		newMeta := setByte(meta, h2Empty, j)
+		if lastB == root {
+			root.UnlockWithMeta(newMeta)
+		} else {
+			storeUint64(&lastB.meta, newMeta)
+			root.Unlock()
+		}
+		table.AddSize(idx, ^uintptr(0))
+
+		// Check if table shrinking is needed
+		if m.shrinkOn {
+			if newMeta&metaDataMask == metaEmpty {
+				if loadPtr(&m.rs) == nil {
+					tableLen := table.mask + 1
+					if m.minLen < tableLen {
+						size := table.SumSize()
+						if size < tableLen*entriesPerBucket/shrinkFraction {
+							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
 					}
 				}
 			}
-			return it.entry.value, it.loaded
-		default:
-			// cancelOp: no-op
-			root.Unlock()
-			return it.entry.value, it.loaded
 		}
+		return it.entry.value, it.loaded
+	default:
+		// cancelOp: no-op
+		root.Unlock()
+		return it.entry.value, it.loaded
 	}
 }
 

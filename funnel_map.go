@@ -191,27 +191,24 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 		h2v = h2(hash)
 	}
 	h2w := broadcast(h2v)
-	var fastOverflow bool
-
+	idx := table.mask & h1v
+	root := table.buckets.At(idx)
+	var overflow bool
 	// Fast path: lock-free read
 	{
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
-		meta := loadUint64(&b.meta)
+		meta := loadUint64(&root.meta)
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+			if e := (*entry_[K, V])(loadPtr(root.At(j))); e != nil {
 				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == key {
 						// valEqual: skip write if value unchanged
-						if m.valEqual != nil {
-							if m.valEqual(
-								noescape(unsafe.Pointer(&e.value)),
-								noescape(unsafe.Pointer(&value)),
-							) {
-								return
-							}
+						if m.valEqual != nil && m.valEqual(
+							noescape(unsafe.Pointer(&e.value)),
+							noescape(unsafe.Pointer(&value)),
+						) {
+							return
 						}
 						goto slowPath
 					}
@@ -220,125 +217,112 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 		}
 		if meta&opNextMask != 0 {
 			if v, ok := table.overflow.Load(key); ok {
-				if m.valEqual != nil {
-					if m.valEqual(
-						noescape(unsafe.Pointer(&v)),
-						noescape(unsafe.Pointer(&value)),
-					) {
-						return
-					}
+				if m.valEqual != nil && m.valEqual(
+					noescape(unsafe.Pointer(&v)),
+					noescape(unsafe.Pointer(&value)),
+				) {
+					return
 				}
-				fastOverflow = true
+				overflow = true
 			}
 		}
 	}
 
 slowPath:
-	for {
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
-		b.Lock()
+	root.Lock()
 
-		// This is the first check, checking if there is a rebuild operation in
-		// progress after acquiring the Bucket lock
-		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
-			switch rs.hint {
-			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.newTable) != nil {
-					b.Unlock()
-					m.helpCopyAndWait(rs)
-					table = (*funnelTable[K, V])(loadPtr(&m.table))
-					continue
-				}
-			case mapRebuildBlockWritersHint:
-				b.Unlock()
-				rs.latch.Wait()
+	// This is the first check, checking if there is a rebuild operation in
+	// progress after acquiring the Bucket lock
+	if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
+		switch rs.hint {
+		case mapGrowHint, mapShrinkHint:
+			if loadPtr(&rs.newTable) != nil {
+				root.Unlock()
+				m.helpCopyAndWait(rs)
 				table = (*funnelTable[K, V])(loadPtr(&m.table))
-				continue
-			default:
-				// mapRebuildAllowWritersHint: allow concurrent writers
+				idx = table.mask & h1v
+				root = table.buckets.At(idx)
+				goto slowPath
 			}
+		case mapRebuildBlockWritersHint:
+			root.Unlock()
+			rs.latch.Wait()
+			table = (*funnelTable[K, V])(loadPtr(&m.table))
+			idx = table.mask & h1v
+			root = table.buckets.At(idx)
+			goto slowPath
+		default:
+			// mapRebuildAllowWritersHint: allow concurrent writers
 		}
+	}
 
-		// Verifies if table was replaced after lock acquisition.
-		// Needed since another goroutine may have resized the table
-		// between initial check and lock acquisition.
-		if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
-			b.Unlock()
-			table = newTable
-			continue
-		}
+	// Verifies if table was replaced after lock acquisition.
+	// Needed since another goroutine may have resized the table
+	// between initial check and lock acquisition.
+	if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
+		root.Unlock()
+		table = newTable
+		idx = table.mask & h1v
+		root = table.buckets.At(idx)
+		goto slowPath
+	}
 
-		var (
-			meta     uint64
-			j        uintptr
-			overflow bool
-		)
-
-		meta = loadUint64Fast(&b.meta)
-		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-			j = firstMarkedByteIndex(marked)
-			e := (*entry_[K, V])(*b.At(j))
-			//goland:noinspection GoBoolExpressions
-			if !opt.EmbeddedHash_ || e.GetHash() == hash {
-				if e.key == key {
-					goto found
-				}
-			}
-		}
-
-		if meta&opNextMask != 0 {
-			if fastOverflow {
-				overflow = true
-			} else {
-				_, overflow = table.overflow.Load(key)
-			}
-		}
-
-		if !overflow {
-			// Insert into empty slot
-			if empty := (^meta) & fMetaMask; empty != 0 {
-				// publish pointer first, then meta; readers check meta before
-				// pointer so they won't observe a partially-initialized entry,
-				// and this reduces the window where meta is visible but pointer is
-				// still nil
-				emptyIdx := firstMarkedByteIndex(empty)
+	meta := loadUint64Fast(&root.meta)
+	for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+		j := firstMarkedByteIndex(marked)
+		e := (*entry_[K, V])(*root.At(j))
+		//goland:noinspection GoBoolExpressions
+		if !opt.EmbeddedHash_ || e.GetHash() == hash {
+			if e.key == key {
+				// Update
 				newEntry := &entry_[K, V]{key: key, value: value}
 				if opt.EmbeddedHash_ {
 					newEntry.SetHash(hash)
 				}
-				storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
-				newMeta := setByte(meta, h2v, emptyIdx)
-				b.UnlockWithMeta(newMeta)
-				m.size.Add(1)
+				storePtr(root.At(j), unsafe.Pointer(newEntry))
+				root.Unlock()
 				return
 			}
 		}
+	}
+	if meta&opNextMask != 0 {
+		if !overflow {
+			_, overflow = table.overflow.Load(key)
+		}
+	}
 
-		// overflow
-		table.overflow.Store(key, value)
-		b.UnlockWithMeta(meta | opNextMask)
+	if !overflow {
+		// Insert into empty slot
+		if empty := (^meta) & fMetaMask; empty != 0 {
+			// publish pointer first, then meta; readers check meta before
+			// pointer so they won't observe a partially-initialized entry,
+			// and this reduces the window where meta is visible but pointer is
+			// still nil
+			emptyIdx := firstMarkedByteIndex(empty)
+			newEntry := &entry_[K, V]{key: key, value: value}
+			if opt.EmbeddedHash_ {
+				newEntry.SetHash(hash)
+			}
+			storePtr(root.At(emptyIdx), unsafe.Pointer(newEntry))
+			newMeta := setByte(meta, h2v, emptyIdx)
+			root.UnlockWithMeta(newMeta)
+			m.size.Add(1)
+			return
+		}
+	}
 
-		// Check if the table needs to grow
-		if int(m.size.Get().Load()) >= table.stripeCap {
-			if loadPtr(&m.rs) == nil {
-				size := m.size.Value() + uintptr(table.overflow.Size())
-				if size >= table.growCap {
-					m.tryResize(mapGrowHint, (table.mask+1)<<1)
-				}
+	// overflow
+	table.overflow.Store(key, value)
+	root.UnlockWithMeta(meta | opNextMask)
+
+	// Check if the table needs to grow
+	if int(m.size.Get().Load()) >= table.stripeCap {
+		if loadPtr(&m.rs) == nil {
+			size := m.size.Value() + uintptr(table.overflow.Size())
+			if size >= table.growCap {
+				m.tryResize(mapGrowHint, (table.mask+1)<<1)
 			}
 		}
-		return
-
-	found:
-		// Update
-		newEntry := &entry_[K, V]{key: key, value: value}
-		if opt.EmbeddedHash_ {
-			newEntry.SetHash(hash)
-		}
-		storePtr(b.At(j), unsafe.Pointer(newEntry))
-		b.Unlock()
-		return
 	}
 }
 
@@ -507,15 +491,14 @@ func (m *FunnelMap[K, V]) compute(
 		h2v = h2(hash)
 	}
 	h2w := broadcast(h2v)
-
+	idx := table.mask & h1v
+	root := table.buckets.At(idx)
 	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
-		meta := loadUint64(&b.meta)
+		meta := loadUint64(&root.meta)
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+			if e := (*entry_[K, V])(loadPtr(root.At(j))); e != nil {
 				//goland:noinspection GoBoolExpressions
 				if !opt.EmbeddedHash_ || e.GetHash() == hash {
 					if e.key == *key {
@@ -542,195 +525,192 @@ func (m *FunnelMap[K, V]) compute(
 	}
 
 slowPath:
-	for {
-		idx := table.mask & h1v
-		b := table.buckets.At(idx)
-		b.Lock()
+	root.Lock()
 
-		// This is the first check, checking if there is a rebuild operation in
-		// progress after acquiring the Bucket lock
-		if flags&computeIgnoreHint == 0 {
-			if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
-				switch rs.hint {
-				case mapGrowHint, mapShrinkHint:
-					if loadPtr(&rs.newTable) != nil {
-						b.Unlock()
-						m.helpCopyAndWait(rs)
-						table = (*funnelTable[K, V])(loadPtr(&m.table))
-						continue
-					}
-				case mapRebuildBlockWritersHint:
-					b.Unlock()
-					rs.latch.Wait()
+	// This is the first check, checking if there is a rebuild operation in
+	// progress after acquiring the Bucket lock
+	if flags&computeIgnoreHint == 0 {
+		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
+			switch rs.hint {
+			case mapGrowHint, mapShrinkHint:
+				if loadPtr(&rs.newTable) != nil {
+					root.Unlock()
+					m.helpCopyAndWait(rs)
 					table = (*funnelTable[K, V])(loadPtr(&m.table))
-					continue
-				default:
-					// mapRebuildAllowWritersHint: allow concurrent writers
+					idx = table.mask & h1v
+					root = table.buckets.At(idx)
+					goto slowPath
 				}
+			case mapRebuildBlockWritersHint:
+				root.Unlock()
+				rs.latch.Wait()
+				table = (*funnelTable[K, V])(loadPtr(&m.table))
+				idx = table.mask & h1v
+				root = table.buckets.At(idx)
+				goto slowPath
+			default:
+				// mapRebuildAllowWritersHint: allow concurrent writers
 			}
 		}
+	}
 
-		// Verifies if table was replaced after lock acquisition.
-		// Needed since another goroutine may have resized the table
-		// between initial check and lock acquisition.
-		if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
-			b.Unlock()
-			table = newTable
-			continue
-		}
+	// Verifies if table was replaced after lock acquisition.
+	// Needed since another goroutine may have resized the table
+	// between initial check and lock acquisition.
+	if newTable := (*funnelTable[K, V])(loadPtr(&m.table)); table != newTable {
+		root.Unlock()
+		table = newTable
+		idx = table.mask & h1v
+		root = table.buckets.At(idx)
+		goto slowPath
+	}
 
-		var (
-			meta     uint64
-			j        uintptr
-			overflow bool
-		)
-		it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
-		meta = loadUint64Fast(&b.meta)
-		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-			j = firstMarkedByteIndex(marked)
-			e := (*entry_[K, V])(*b.At(j))
-			//goland:noinspection GoBoolExpressions
-			if !opt.EmbeddedHash_ || e.GetHash() == hash {
-				if e.key == *key {
-					it.entry.value, it.loaded = e.value, true
-					break
-				}
+	var j uintptr
+	it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
+	meta := loadUint64Fast(&root.meta)
+	for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+		j = firstMarkedByteIndex(marked)
+		e := (*entry_[K, V])(*root.At(j))
+		//goland:noinspection GoBoolExpressions
+		if !opt.EmbeddedHash_ || e.GetHash() == hash {
+			if e.key == *key {
+				it.entry.value, it.loaded = e.value, true
+				break
 			}
 		}
-		if !it.loaded {
-			if meta&opNextMask != 0 {
-				if v, ok := table.overflow.Load(*key); ok {
-					it.entry.value, it.loaded = v, true
-					overflow = true
-				}
+	}
+	var overflow bool
+	if !it.loaded {
+		if meta&opNextMask != 0 {
+			if v, ok := table.overflow.Load(*key); ok {
+				it.entry.value, it.loaded = v, true
+				overflow = true
 			}
 		}
+	}
 
-		// --- Compute Logic ---
-		retV := it.entry.value
-		if flags&(computeUsesFunc|computeSkipIfFound|computeSkipIfNotFound) == 0 {
-			// Store, Swap
-			it.entry.value = *(*V)(val)
-			it.op = updateOp
-		} else if flags&(computeUsesFunc|computeSkipIfFound) == 0 {
-			// Delete, LoadAnd.., CompareAnd..
-			if it.loaded {
-				if val != nil {
-					it.entry.value = *(*V)(val)
-					it.op = updateOp
-				} else {
-					it.op = deleteOp
-				}
-			}
-		} else if flags&computeUsesFunc == 0 {
-			// LoadOr..
-			if !it.loaded {
+	// --- Compute Logic ---
+	retV := it.entry.value
+	if flags&(computeUsesFunc|computeSkipIfFound|computeSkipIfNotFound) == 0 {
+		// Store, Swap
+		it.entry.value = *(*V)(val)
+		it.op = updateOp
+	} else if flags&(computeUsesFunc|computeSkipIfFound) == 0 {
+		// Delete, LoadAnd.., CompareAnd..
+		if it.loaded {
+			if val != nil {
 				it.entry.value = *(*V)(val)
 				it.op = updateOp
-				retV = it.entry.value
+			} else {
+				it.op = deleteOp
 			}
-		} else {
-			// Compute, LoadOrStoreFn
-			(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
+		}
+	} else if flags&computeUsesFunc == 0 {
+		// LoadOr..
+		if !it.loaded {
+			it.entry.value = *(*V)(val)
+			it.op = updateOp
 			retV = it.entry.value
 		}
+	} else {
+		// Compute, LoadOrStoreFn
+		(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
+		retV = it.entry.value
+	}
 
-		switch it.op {
-		case updateOp:
-			if it.loaded {
-				if overflow {
-					table.overflow.Store(*key, it.entry.value)
-					b.Unlock()
-					return retV, it.loaded
-				}
-
-				// valEqual: skip write if value unchanged
-				if m.valEqual != nil {
-					if m.valEqual(
-						noescape(unsafe.Pointer(&(*entry_[K, V])(*b.At(j)).value)),
-						noescape(unsafe.Pointer(&it.entry.value)),
-					) {
-						b.Unlock()
-						return retV, it.loaded
-					}
-				}
-
-				// Update
-				newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
-				if opt.EmbeddedHash_ {
-					newEntry.SetHash(hash)
-				}
-				storePtr(b.At(j), unsafe.Pointer(newEntry))
-				b.Unlock()
-				return retV, it.loaded
-			}
-
-			// Insert into empty slot
-			if empty := (^meta) & fMetaMask; empty != 0 {
-				emptyIdx := firstMarkedByteIndex(empty)
-				// publish pointer first, then meta; readers check meta before
-				// pointer so they won't observe a partially-initialized entry,
-				// and this reduces the window where meta is visible but pointer is
-				// still nil
-				newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
-				if opt.EmbeddedHash_ {
-					newEntry.SetHash(hash)
-				}
-				storePtr(b.At(emptyIdx), unsafe.Pointer(newEntry))
-				newMeta := setByte(meta, h2v, emptyIdx)
-				b.UnlockWithMeta(newMeta)
-				m.size.Add(1)
-				return retV, it.loaded
-			}
-			table.overflow.Store(*key, it.entry.value)
-			b.UnlockWithMeta(meta | opNextMask)
-
-			// Check if the table needs to grow
-			if int(m.size.Get().Load()) >= table.stripeCap {
-				if loadPtr(&m.rs) == nil {
-					size := m.size.Value() + uintptr(table.overflow.Size())
-					if size >= table.growCap {
-						m.tryResize(mapGrowHint, (table.mask+1)<<1)
-					}
-				}
-			}
-			return retV, it.loaded
-		case deleteOp:
-			if !it.loaded {
-				b.Unlock()
-				return retV, it.loaded
-			}
+	switch it.op {
+	case updateOp:
+		if it.loaded {
 			if overflow {
-				table.overflow.Delete(*key)
-				b.Unlock()
+				table.overflow.Store(*key, it.entry.value)
+				root.Unlock()
 				return retV, it.loaded
 			}
-			// Delete
-			storePtr(b.At(j), nil)
-			newMeta := setByte(meta, h2Empty, j)
-			b.UnlockWithMeta(newMeta)
-			m.size.Add(^uintptr(0))
 
-			// Check if table shrinking is needed
-			if m.shrinkOn {
-				if newMeta&metaDataMask == metaEmpty {
-					if loadPtr(&m.rs) == nil {
-						tableLen := table.mask + 1
-						if m.minLen < tableLen {
-							size := m.size.Value() + uintptr(table.overflow.Size())
-							if size < tableLen*fEntriesPerBucket/shrinkFraction {
-								m.tryResize(mapShrinkHint, tableLen>>1)
-							}
+			// valEqual: skip write if value unchanged
+			if m.valEqual != nil && m.valEqual(
+				noescape(unsafe.Pointer(&(*entry_[K, V])(*root.At(j)).value)),
+				noescape(unsafe.Pointer(&it.entry.value)),
+			) {
+				root.Unlock()
+				return retV, it.loaded
+			}
+
+			// Update
+			newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
+			if opt.EmbeddedHash_ {
+				newEntry.SetHash(hash)
+			}
+			storePtr(root.At(j), unsafe.Pointer(newEntry))
+			root.Unlock()
+			return retV, it.loaded
+		}
+
+		// Insert into empty slot
+		if empty := (^meta) & fMetaMask; empty != 0 {
+			emptyIdx := firstMarkedByteIndex(empty)
+			// publish pointer first, then meta; readers check meta before
+			// pointer so they won't observe a partially-initialized entry,
+			// and this reduces the window where meta is visible but pointer is
+			// still nil
+			newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
+			if opt.EmbeddedHash_ {
+				newEntry.SetHash(hash)
+			}
+			storePtr(root.At(emptyIdx), unsafe.Pointer(newEntry))
+			newMeta := setByte(meta, h2v, emptyIdx)
+			root.UnlockWithMeta(newMeta)
+			m.size.Add(1)
+			return retV, it.loaded
+		}
+		table.overflow.Store(*key, it.entry.value)
+		root.UnlockWithMeta(meta | opNextMask)
+
+		// Check if the table needs to grow
+		if int(m.size.Get().Load()) >= table.stripeCap {
+			if loadPtr(&m.rs) == nil {
+				size := m.size.Value() + uintptr(table.overflow.Size())
+				if size >= table.growCap {
+					m.tryResize(mapGrowHint, (table.mask+1)<<1)
+				}
+			}
+		}
+		return retV, it.loaded
+	case deleteOp:
+		if !it.loaded {
+			root.Unlock()
+			return retV, it.loaded
+		}
+		if overflow {
+			table.overflow.Delete(*key)
+			root.Unlock()
+			return retV, it.loaded
+		}
+		// Delete
+		storePtr(root.At(j), nil)
+		newMeta := setByte(meta, h2Empty, j)
+		root.UnlockWithMeta(newMeta)
+		m.size.Add(^uintptr(0))
+
+		// Check if table shrinking is needed
+		if m.shrinkOn {
+			if newMeta&metaDataMask == metaEmpty {
+				if loadPtr(&m.rs) == nil {
+					tableLen := table.mask + 1
+					if m.minLen < tableLen {
+						size := m.size.Value() + uintptr(table.overflow.Size())
+						if size < tableLen*fEntriesPerBucket/shrinkFraction {
+							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
 					}
 				}
 			}
-			return retV, it.loaded
-		default:
-			// cancelOp: no-op
-			b.Unlock()
-			return retV, it.loaded
 		}
+		return retV, it.loaded
+	default:
+		// cancelOp: no-op
+		root.Unlock()
+		return retV, it.loaded
 	}
 }
 
