@@ -43,7 +43,7 @@ func Benchmark_SkipMapStore(b *testing.B) {
 func Benchmark_SkipMapLoad100Hits(b *testing.B) {
 	b.Run("cc.SkipMap", func(b *testing.B) {
 		l := cc.NewSkipMap[int64, any]()
-		for i := 0; i < initSize; i++ {
+		for i := range initSize {
 			l.Store(int64(i), nil)
 		}
 		b.ResetTimer()
@@ -56,7 +56,7 @@ func Benchmark_SkipMapLoad100Hits(b *testing.B) {
 
 	b.Run("zhangyunhao116.SkipMap", func(b *testing.B) {
 		l := skipmap.New[int64, any]()
-		for i := 0; i < initSize; i++ {
+		for i := range initSize {
 			l.Store(int64(i), nil)
 		}
 		b.ResetTimer()

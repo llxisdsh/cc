@@ -239,4 +239,25 @@ func Test_MemoryPeakReduction(t *testing.T) {
 			m.Size(),
 		)
 	}
+
+	{
+		var m1, m2 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+
+		m := cc.NewDHLTMap[int, int]()
+
+		for i := range numItems {
+			m.Store(i, i)
+		}
+
+		runtime.ReadMemStats(&m2)
+		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
+
+		t.Logf(
+			"cc_DHLTMap memory usage: %d bytes, items: %d",
+			peak,
+			m.Size(),
+		)
+	}
 }

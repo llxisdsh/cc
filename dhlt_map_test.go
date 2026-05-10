@@ -1,0 +1,210 @@
+package cc
+
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+)
+
+func TestDHLTMapBasic(t *testing.T) {
+	m := NewDHLTMap[string, int](WithCapacity(2))
+
+	if _, ok := m.Load("missing"); ok {
+		t.Fatal("unexpected value for missing key")
+	}
+
+	m.Store("a", 1)
+	m.Store("b", 2)
+	m.Store("a", 3)
+
+	if got, ok := m.Load("a"); !ok || got != 3 {
+		t.Fatalf("Load(a)=(%d,%v), want (3,true)", got, ok)
+	}
+
+	if got, loaded := m.LoadOrStore("a", 4); !loaded || got != 3 {
+		t.Fatalf("LoadOrStore existing=(%d,%v), want (3,true)", got, loaded)
+	}
+	if got, loaded := m.LoadOrStore("c", 5); loaded || got != 5 {
+		t.Fatalf("LoadOrStore new=(%d,%v), want (5,false)", got, loaded)
+	}
+
+	if !m.CompareAndSwap("a", 3, 6) {
+		t.Fatal("CompareAndSwap should succeed")
+	}
+	if m.CompareAndSwap("a", 3, 7) {
+		t.Fatal("CompareAndSwap should fail with stale value")
+	}
+	if got, ok := m.Load("a"); !ok || got != 6 {
+		t.Fatalf("Load(a) after CAS=(%d,%v), want (6,true)", got, ok)
+	}
+
+	if m.CompareAndDelete("a", 3) {
+		t.Fatal("CompareAndDelete should fail with stale value")
+	}
+	if !m.CompareAndDelete("a", 6) {
+		t.Fatal("CompareAndDelete should succeed")
+	}
+	if _, ok := m.Load("a"); ok {
+		t.Fatal("deleted key is still present")
+	}
+
+	m.Store("d", 10)
+	if prev, loaded := m.LoadAndDelete("d"); !loaded || prev != 10 {
+		t.Fatalf("LoadAndDelete(d)=(%d,%v), want (10,true)", prev, loaded)
+	}
+	if _, loaded := m.LoadAndDelete("d"); loaded {
+		t.Fatal("LoadAndDelete should return false for already deleted key")
+	}
+
+	m.Delete("b")
+}
+
+func TestDHLTMapGrow(t *testing.T) {
+	m := NewDHLTMap[int, int](WithCapacity(1))
+	for i := range 4096 {
+		m.Store(i, i*10)
+	}
+	for i := range 4096 {
+		got, ok := m.Load(i)
+		if !ok || got != i*10 {
+			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", i, got, ok, i*10)
+		}
+	}
+	if got := m.Size(); got != 4096 {
+		t.Fatalf("Size()=%d, want 4096", got)
+	}
+
+	count := 0
+	m.Range(func(k, v int) bool {
+		if v != k*10 {
+			t.Errorf("Range got k=%d, v=%d, want v=%d", k, v, k*10)
+		}
+		count++
+		return true
+	})
+	if count != 4096 {
+		t.Fatalf("Range count=%d, want 4096", count)
+	}
+
+	// Test Range early exit
+	count = 0
+	for range m.All() {
+		count++
+		if count == 10 {
+			break
+		}
+	}
+	if count != 10 {
+		t.Fatalf("Range early exit count=%d, want 10", count)
+	}
+}
+
+func TestDHLTMapConcurrentLoadOrStoreSingleWinner(t *testing.T) {
+	m := NewDHLTMap[string, int]()
+	const goroutines = 64
+
+	var stored atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func(v int) {
+			defer wg.Done()
+			_, loaded := m.LoadOrStore("shared", v)
+			if !loaded {
+				stored.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if got := stored.Load(); got != 1 {
+		t.Fatalf("stored winners=%d, want 1", got)
+	}
+	if _, ok := m.Load("shared"); !ok {
+		t.Fatal("shared key missing")
+	}
+}
+
+func TestDHLTMap_ConcurrentMixedOperations(t *testing.T) {
+	m := NewDHLTMap[int, int]()
+	const goroutines = 64
+	const opsPerGoroutine = 1000
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := range goroutines {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < opsPerGoroutine; j++ {
+				key := (id * opsPerGoroutine) + j
+
+				// 1. Store
+				m.Store(key, key*10)
+
+				// 2. Load
+				if v, ok := m.Load(key); !ok || v != key*10 {
+					t.Errorf("Load(%d) failed: got (%d, %v), want (%d, true)", key, v, ok, key*10)
+				}
+
+				// 3. LoadOrStore (should return existing)
+				if v, loaded := m.LoadOrStore(key, 9999); !loaded || v != key*10 {
+					t.Errorf("LoadOrStore(%d) failed: got (%d, %v), want (%d, true)", key, v, loaded, key*10)
+				}
+
+				// 4. CompareAndSwap (Success)
+				if !m.CompareAndSwap(key, key*10, key*20) {
+					t.Errorf("CompareAndSwap(%d) failed unexpectedly", key)
+				}
+
+				// 5. CompareAndSwap (Fail - stale value)
+				// We need to wait for other goroutines to potentially not interfere,
+				// or ensure we use a strictly invalid value.
+				// Since this is highly concurrent, the value might actually be key*10 again
+				// if another goroutine just ran through step 1 (Store).
+				// We use a completely invalid expected value to ensure failure.
+				if m.CompareAndSwap(key, -1, key*30) {
+					t.Errorf("CompareAndSwap(%d) succeeded unexpectedly with stale value", key)
+				}
+
+				// 6. Delete variants
+				switch j % 3 {
+				case 0:
+					m.Delete(key)
+					if _, ok := m.Load(key); ok {
+						t.Errorf("Load(%d) succeeded after Delete", key)
+					}
+				case 1:
+					if prev, loaded := m.LoadAndDelete(key); !loaded || prev != key*20 {
+						t.Errorf("LoadAndDelete(%d) failed: got (%d, %v), want (%d, true)", key, prev, loaded, key*20)
+					}
+				default:
+					if m.CompareAndDelete(key, -1) {
+						t.Errorf("CompareAndDelete(%d) succeeded unexpectedly with stale value", key)
+					}
+					if !m.CompareAndDelete(key, key*20) {
+						t.Errorf("CompareAndDelete(%d) failed unexpectedly", key)
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify final state
+	// All keys were deleted
+	expectedSize := 0
+	if size := m.Size(); size != expectedSize {
+		t.Errorf("Final Size() = %d, want %d", size, expectedSize)
+	}
+
+	count := 0
+	m.Range(func(k, v int) bool {
+		count++
+		return true
+	})
+	if count != expectedSize {
+		t.Errorf("Range yielded %d items, want %d", count, expectedSize)
+	}
+}
