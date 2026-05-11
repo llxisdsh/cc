@@ -136,7 +136,7 @@ func TestOFHTMap_ConcurrentMixedOperations(t *testing.T) {
 	for i := range goroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < opsPerGoroutine; j++ {
+			for j := range opsPerGoroutine {
 				key := (id * opsPerGoroutine) + j
 
 				// 1. Store

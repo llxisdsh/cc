@@ -4,7 +4,6 @@ import (
 	"math/bits"
 	"math/rand/v2"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 )
@@ -33,11 +32,8 @@ import (
 // most of the standard Map API surface but lacks Compute-style operations and
 // lock-free cooperative resizing.
 type OFHTMap[K comparable, V any] struct {
-	_ noCopy
-
+	_        noCopy
 	table    atomic.Pointer[ofhtTable[K, V]]
-	resizeMu sync.Mutex
-
 	intKey   bool
 	seed     uintptr
 	keyHash  HashFunc
@@ -47,13 +43,15 @@ type OFHTMap[K comparable, V any] struct {
 }
 
 type ofhtTable[K comparable, V any] struct {
-	nextTable  atomic.Pointer[ofhtTable[K, V]]
-	allocating atomic.Uint32
-	copyIdx    atomic.Uint64
 	slots      unsafeSlice[ofhtSlot[K, V]]
 	mask       uintptr
 	stripeCap  int
 	growCap    uintptr
+	nextTable  atomic.Pointer[ofhtTable[K, V]]
+	allocating atomic.Uint32  // 0: no one is allocating, 1: allocating
+	freezeIdx  atomic.Uintptr // Chunk index for cooperative resizing (Phase 1: freeze)
+	frozenDone atomic.Uintptr // Number of slots successfully frozen
+	copyIdx    atomic.Uintptr // Chunk index for cooperative resizing (Phase 2: copy)
 }
 
 type ofhtSlot[K comparable, V any] struct {
@@ -79,7 +77,6 @@ const (
 	ofhtSeqInc   = uint64(1) << ofhtSeqShift
 
 	ofhtFrozen = uint64(1) << 63
-	ofhtCopied = uint64(1) << 62
 
 	ofhtGrowNumerator   = uintptr(3)
 	ofhtGrowDenominator = uintptr(4)
@@ -88,6 +85,14 @@ const (
 	// If a store operation probes more than this many slots without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
 	ofhtMaxProbeThreshold = uintptr(128)
+
+	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
+	// This reduces the overhead of checking the global size on every insertion.
+	// It MUST be strictly smaller than the initial grow threshold.
+	// Since ofhtMinSlots is 64 and the grow factor is 3/4, the first grow
+	// happens at 48. If this mask is too large (e.g., 63), the table could fill up
+	// completely without triggering a resize in highly concurrent cold starts.
+	ofhtGrowCheckMask = 7 // Checks every 8th local insert
 )
 
 type ofhtStoreStatus uint8
@@ -310,14 +315,12 @@ func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {
 	if table != nil {
 		return table
 	}
-	var cfg MapConfig
-	m.resizeMu.Lock()
-	if table = m.table.Load(); table == nil {
-		m.init(noEscape(&cfg))
-		table = m.table.Load()
+	// Lock-free init
+	newTab := newOFHTTable[K, V](m.minLen)
+	if m.table.CompareAndSwap(nil, newTab) {
+		return newTab
 	}
-	m.resizeMu.Unlock()
-	return table
+	return m.table.Load()
 }
 
 //go:nosplit
@@ -660,9 +663,14 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 }
 
 func (m *OFHTMap[K, V]) growIfNeeded(table *ofhtTable[K, V]) {
-	if int(m.size.Get().Load()) >= table.stripeCap {
-		if m.size.Value() >= table.growCap {
-			m.tryGrow(table, (table.mask+1)<<1)
+	// Fast path: Only do the full size check periodically based on local counter.
+	// Since PLocalCounter is heavily sharded, getting the local value is cheap,
+	// but it still involves a function call and runtime logic.
+	if int(m.size.Get().Load())&ofhtGrowCheckMask == 0 {
+		if int(m.size.Get().Load()) >= table.stripeCap {
+			if m.size.Value() >= table.growCap {
+				m.tryGrow(table, (table.mask+1)<<1)
+			}
 		}
 	}
 }
@@ -675,7 +683,6 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			m.freezeTable(old)
 			slotLen := old.mask + 1
 			if newLen <= slotLen {
 				newLen = slotLen << 1
@@ -696,93 +703,83 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 		}
 	}
 
-	tableLen := old.mask + 1
+	slotLen := old.mask + 1
 	cpus := maxProcs()
-	chunks := uint32(calcParallelism(tableLen, cpus*resizeOverPartition))
-	chunkSz := max(1, tableLen>>bits.TrailingZeros32(chunks))
+	chunks := uint32(calcParallelism(slotLen, cpus*resizeOverPartition))
+	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
 
+	// Phase 1: Cooperative freezing.
+	// All threads must help freeze the old table before anyone can safely copy.
+	// This prevents open-addressing probe crossing boundaries.
 	for {
-		idx := old.copyIdx.Add(uint64(chunkSz)) - uint64(chunkSz)
-		if idx > uint64(old.mask) {
+		start := old.freezeIdx.Add(chunkSz) - chunkSz
+		if start >= slotLen {
 			break
 		}
-		end := min(idx+uint64(chunkSz), uint64(old.mask+1))
-		for i := uintptr(idx); i < uintptr(end); i++ {
+		end := min(start+chunkSz, slotLen)
+		for i := start; i < end; i++ {
 			slot := old.slots.At(i)
 			for {
 				ctrl := slot.ctrl.Load()
-				if ctrl&ofhtCopied != 0 {
+				if ctrl&ofhtFrozen != 0 {
 					break
 				}
-				if slot.ctrl.CompareAndSwap(ctrl, ctrl|ofhtCopied) {
-					if ofhtCtrlState(ctrl) == ofhtStateFull {
-						k := slot.key.ReadUnfenced()
-						v := slot.val.ReadUnfenced()
-						h1v, h2v := m.hashKey(noEscape(&k))
-						m.copyEntry(next, &k, &v, h1v, h2v)
-					}
+				if ofhtCtrlState(ctrl) == ofhtStateBusy {
+					continue
+				}
+				if slot.ctrl.CompareAndSwap(ctrl, ctrl|ofhtFrozen) {
 					break
+				}
+			}
+		}
+		old.frozenDone.Add(end - start)
+	}
+
+	// Wait for all threads to finish freezing.
+	// We use copyIdx2 for the actual copying phase.
+	for old.frozenDone.Load() < slotLen {
+		runtime.Gosched()
+	}
+
+	// Phase 2: Cooperative copying.
+	for {
+		start := old.copyIdx.Add(chunkSz) - chunkSz
+		if start >= slotLen {
+			break
+		}
+		end := min(start+chunkSz, slotLen)
+		for i := start; i < end; i++ {
+			slot := old.slots.At(i)
+			ctrl := slot.ctrl.Load()
+			if ofhtCtrlState(ctrl) == ofhtStateFull {
+				k := slot.key.ReadUnfenced()
+				v := slot.val.ReadUnfenced()
+				h1v, h2v := m.hashKey(noEscape(&k))
+
+				// Inline copyEntry to avoid function call overhead and
+				// keep the copying logic close to the source.
+				start := ofhtStart(h1v, next.mask)
+				for probe := uintptr(0); probe <= next.mask; probe++ {
+					destSlot := next.slots.At((start + probe) & next.mask)
+					destCtrl := destSlot.ctrl.Load()
+					if ofhtCtrlState(destCtrl) != ofhtStateEmpty {
+						continue
+					}
+
+					fullCtrl := ofhtCtrlInsert(destCtrl, h2v)
+					if !destSlot.ctrl.CompareAndSwap(destCtrl, fullCtrl) {
+						probe--
+						continue
+					}
+
+					destSlot.key.WriteUnfenced(k)
+					destSlot.val.WriteUnfenced(v)
+					break // Successfully copied this entry
 				}
 			}
 		}
 	}
 	m.table.CompareAndSwap(old, next)
-}
-
-func (m *OFHTMap[K, V]) freezeTable(table *ofhtTable[K, V]) {
-	// var spins int
-	for i := uintptr(0); i <= table.mask; i++ {
-		slot := table.slots.At(i)
-		for {
-			ctrl := slot.ctrl.Load()
-			if ctrl&ofhtFrozen != 0 {
-				break
-			}
-			if ofhtCtrlState(ctrl) == ofhtStateBusy {
-				// delay(&spins)
-				continue
-			}
-			if slot.ctrl.CompareAndSwap(ctrl, ctrl|ofhtFrozen) {
-				break
-			}
-		}
-	}
-}
-
-func (m *OFHTMap[K, V]) copyEntry(
-	table *ofhtTable[K, V],
-	key *K,
-	val *V,
-	h1v uintptr,
-	h2v uint16,
-) {
-	start := ofhtStart(h1v, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		slot := table.slots.At((start + probe) & table.mask)
-		// Because the new table is not yet published to the readers/writers,
-		// and we use unique source chunks, multiple threads might probe here,
-		// but they will write to DIFFERENT empty slots.
-		// We still need a simple CAS to claim the empty slot, but we DO NOT
-		// need the "Busy" state, because no readers can see this table yet!
-		ctrl := slot.ctrl.Load()
-		if ofhtCtrlState(ctrl) != ofhtStateEmpty {
-			continue
-		}
-
-		// Directly claim it as Full! Skip the busy state completely.
-		fullCtrl := ofhtCtrlInsert(ctrl, h2v)
-		if !slot.ctrl.CompareAndSwap(ctrl, fullCtrl) {
-			probe--
-			continue
-		}
-
-		// Unfenced write is safe because the table is not published.
-		// Anyone iterating the table later will see the full state and these values.
-		slot.key.WriteUnfenced(*key)
-		slot.val.WriteUnfenced(*val)
-		return
-	}
-	panic("cc: OFHTMap grow produced a full table")
 }
 
 func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] {

@@ -3,6 +3,7 @@ package cc
 import (
 	"math/bits"
 	"math/rand/v2"
+	"runtime"
 	"sync/atomic"
 	"unsafe"
 )
@@ -20,10 +21,8 @@ import (
 //   - Grow freezes the old table slot-by-slot before copying. Writers that hit
 //     a frozen slot help resize and retry on the newly published table without a global lock.
 type DHLTMap[K comparable, V any] struct {
-	_ noCopy
-
-	table atomic.Pointer[dhltTable[K, V]]
-
+	_        noCopy
+	table    atomic.Pointer[dhltTable[K, V]]
 	intKey   bool
 	seed     uintptr
 	keyHash  HashFunc
@@ -33,12 +32,16 @@ type DHLTMap[K comparable, V any] struct {
 }
 
 type dhltTable[K comparable, V any] struct {
-	slotsBase unsafe.Pointer
-	slotsRaw  []unsafe.Pointer // kept to prevent GC collection of the underlying array
-	nextTable atomic.Pointer[dhltTable[K, V]]
-	mask      uintptr
-	stripeCap int
-	growCap   uintptr
+	slotsBase  unsafe.Pointer
+	mask       uintptr
+	stripeCap  int
+	growCap    uintptr
+	nextTable  atomic.Pointer[dhltTable[K, V]]
+	allocating atomic.Uint32    // Leader election for table allocation
+	freezeIdx  atomic.Uintptr   // Chunk freeze index assigned
+	frozenDone atomic.Uintptr   // Chunk freeze actually completed
+	copyIdx    atomic.Uintptr   // Chunk copy index
+	slotsRaw   []unsafe.Pointer // kept to prevent GC collection of the underlying array
 }
 
 type dhltEntry[K comparable, V any] struct {
@@ -79,6 +82,19 @@ const (
 
 	dhltGrowNumerator   = uintptr(3)
 	dhltGrowDenominator = uintptr(4)
+
+	// dhltMaxProbeThreshold is the threshold of linear probing depth.
+	// If a store operation probes more than this many slots without success,
+	// it will eagerly trigger a resize even if the table is not fully loaded.
+	dhltMaxProbeThreshold = uintptr(128)
+
+	// dhltGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
+	// This reduces the overhead of checking the global size on every insertion.
+	// It MUST be strictly smaller than the initial grow threshold.
+	// Since dhltMinSlots is 64 and the grow factor is 3/4, the first grow
+	// happens at 48. If this mask is too large (e.g., 63), the table could fill up
+	// completely without triggering a resize in highly concurrent cold starts.
+	dhltGrowCheckMask = 7 // Checks every 8th local insert
 )
 
 type dhltStoreStatus uint8
@@ -321,6 +337,9 @@ func (m *DHLTMap[K, V]) loadFrom(
 ) (value V, ok bool) {
 	start := dhltStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > dhltMaxProbeThreshold {
+			return *new(V), false
+		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		switch dhltCtrlState(uint64(ctrl)) {
@@ -359,6 +378,9 @@ func (m *DHLTMap[K, V]) storeInto(
 	)
 	start := dhltStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > dhltMaxProbeThreshold {
+			return dhltStoreFull, *new(V), false
+		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dhltFrozen != 0 {
@@ -453,6 +475,9 @@ func (m *DHLTMap[K, V]) deleteFrom(
 ) (dhltStoreStatus, V, bool) {
 	start := dhltStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > dhltMaxProbeThreshold {
+			return dhltStoreFull, *new(V), false
+		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dhltFrozen != 0 {
@@ -505,6 +530,9 @@ func (m *DHLTMap[K, V]) compareAndSwapIn(
 ) (dhltStoreStatus, bool) {
 	start := dhltStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > dhltMaxProbeThreshold {
+			return dhltStoreFull, false
+		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dhltFrozen != 0 {
@@ -555,6 +583,9 @@ func (m *DHLTMap[K, V]) compareAndDeleteIn(
 ) (dhltStoreStatus, bool) {
 	start := dhltStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > dhltMaxProbeThreshold {
+			return dhltStoreFull, false
+		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dhltFrozen != 0 {
@@ -597,9 +628,11 @@ func (m *DHLTMap[K, V]) compareAndDeleteIn(
 }
 
 func (m *DHLTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
-	if int(m.size.Get().Load()) >= table.stripeCap {
-		if m.size.Value() >= table.growCap {
-			m.tryGrow(table, (table.mask+1)<<1)
+	if int(m.size.Get().Load())&dhltGrowCheckMask == 0 {
+		if int(m.size.Get().Load()) >= table.stripeCap {
+			if m.size.Value() >= table.growCap {
+				m.tryGrow(table, (table.mask+1)<<1)
+			}
 		}
 	}
 }
@@ -608,90 +641,113 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 	if m.table.Load() != old {
 		return
 	}
-	m.freezeTable(old)
 
 	next := old.nextTable.Load()
 	if next == nil {
-		slotLen := old.mask + 1
-		if newLen <= slotLen {
-			newLen = slotLen << 1
-		}
-		newLen = nextPowOf2(max(newLen, m.minLen))
+		if old.allocating.CompareAndSwap(0, 1) {
+			slotLen := old.mask + 1
+			if newLen <= slotLen {
+				newLen = slotLen << 1
+			}
+			newLen = nextPowOf2(max(newLen, m.minLen))
 
-		newTable := newDHLTTable[K, V](newLen)
-		if old.nextTable.CompareAndSwap(nil, newTable) {
-			next = newTable
-		} else {
+			// NOTE: We MUST ensure the new table has enough capacity!
+			neededSize := int(m.size.Value()) * 2 // Roughly double the current size
+			neededLen := dhltCalcSlotLen(uintptr(neededSize))
+			if neededLen > newLen {
+				newLen = neededLen
+			}
+
+			newTable := newDHLTTable[K, V](newLen)
+			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
-		}
-	}
-
-	for i := uintptr(0); i <= old.mask; i++ {
-		slot := old.slot(i)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if dhltCtrlState(uint64(ctrl)) != dhltStateFull {
-			continue
-		}
-		entry := atomic.LoadUintptr(&slot[1])
-		if entry == 0 {
-			continue
-		}
-		e := (*dhltEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
-		h1v, h2v := m.hashKey(noEscape(&e.key))
-		m.copyEntry(next, e, h1v, h2v)
-	}
-	m.table.CompareAndSwap(old, next)
-}
-
-func (m *DHLTMap[K, V]) freezeTable(table *dhltTable[K, V]) {
-	for i := uintptr(0); i <= table.mask; i++ {
-		slot := table.slot(i)
-		for {
-			ctrl := atomic.LoadUintptr(&slot[0])
-			if uint64(ctrl)&dhltFrozen != 0 {
-				break
-			}
-			entry := atomic.LoadUintptr(&slot[1])
-			if dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(uint64(ctrl)|dhltFrozen), entry) {
-				break
-			}
-		}
-	}
-}
-
-func (m *DHLTMap[K, V]) copyEntry(
-	table *dhltTable[K, V],
-	entry *dhltEntry[K, V],
-	h1v uintptr,
-	h2v uint16,
-) {
-	start := dhltStart(h1v, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if dhltCtrlState(uint64(ctrl)) != dhltStateEmpty {
-			// If already full, maybe another goroutine copied it?
-			// Check if it's the same key. If so, we're done.
-			if dhltCtrlState(uint64(ctrl)) == dhltStateFull {
-				ePtr := atomic.LoadUintptr(&slot[1])
-				if ePtr != 0 {
-					e := (*dhltEntry[K, V])(unsafe.Pointer(ePtr)) //nolint:all
-					if e.key == entry.key {
-						return // Already copied
-					}
+		} else {
+			// Wait for leader to allocate
+			for range 16 {
+				next = old.nextTable.Load()
+				if next != nil {
+					break
 				}
 			}
-			continue
+			if next == nil {
+				return // Fallback to retry in caller
+			}
 		}
-		oldEntry := atomic.LoadUintptr(&slot[1])
-		newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
-		if !dwcas(unsafe.Pointer(slot), ctrl, oldEntry, uintptr(newCtrl), uintptr(unsafe.Pointer(entry))) {
-			probe--
-			continue
-		}
-		return
 	}
-	panic("cc: DHLTMap grow produced a full table")
+
+	// Phase 1: Freeze all slots concurrently
+	slotLen := old.mask + 1
+	cpus := maxProcs()
+	chunks := uint32(calcParallelism(slotLen, cpus*resizeOverPartition))
+	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
+
+	for {
+		start := old.freezeIdx.Add(chunkSz) - chunkSz
+		if start >= slotLen {
+			break
+		}
+		end := min(start+chunkSz, slotLen)
+		for i := start; i < end; i++ {
+			slot := old.slot(i)
+			for {
+				ctrl := atomic.LoadUintptr(&slot[0])
+				if uint64(ctrl)&dhltFrozen != 0 {
+					break
+				}
+				entry := atomic.LoadUintptr(&slot[1])
+				if dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(uint64(ctrl)|dhltFrozen), entry) {
+					break
+				}
+			}
+		}
+		old.frozenDone.Add(end - start)
+	}
+
+	// Wait for all threads to finish freezing.
+	// This acts as a barrier to ensure no new writes can occur before copying starts.
+	for old.frozenDone.Load() < slotLen {
+		runtime.Gosched()
+	}
+
+	// Phase 2: Copy chunks
+	for {
+		start := old.copyIdx.Add(chunkSz) - chunkSz
+		if start >= slotLen {
+			break
+		}
+		end := min(start+chunkSz, slotLen)
+		for i := start; i < end; i++ {
+			slot := old.slot(i)
+			ctrl := atomic.LoadUintptr(&slot[0])
+			if dhltCtrlState(uint64(ctrl)) != dhltStateFull {
+				continue
+			}
+			entryPtr := atomic.LoadUintptr(&slot[1])
+			if entryPtr == 0 {
+				continue
+			}
+			e := (*dhltEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
+			h1v, h2v := m.hashKey(&e.key)
+
+			destStart := dhltStart(h1v, next.mask)
+			for probe := uintptr(0); probe <= next.mask; probe++ {
+				destSlot := next.slot((destStart + probe) & next.mask)
+				destCtrl := atomic.LoadUintptr(&destSlot[0])
+				if dhltCtrlState(uint64(destCtrl)) != dhltStateEmpty {
+					continue
+				}
+				destEntry := atomic.LoadUintptr(&destSlot[1])
+				newCtrl := dhltCtrlInsert(uint64(destCtrl), h2v)
+				if !dwcas(unsafe.Pointer(destSlot), destCtrl, destEntry, uintptr(newCtrl), entryPtr) {
+					probe--
+					continue
+				}
+				break
+			}
+		}
+	}
+
+	m.table.CompareAndSwap(old, next)
 }
 
 func (m *DHLTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] {
