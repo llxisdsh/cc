@@ -16,6 +16,156 @@ import (
 
 const total = 100_000_00
 
+func TestInsert_cc_DHLTMap(t *testing.T) {
+	t.Run("1 no_pre_size", func(t *testing.T) {
+		testInsert_cc_DHLTMap(t, total, 1, false, true, true)
+	})
+	t.Run("64 no_pre_size", func(t *testing.T) {
+		testInsert_cc_DHLTMap(t, total, runtime.GOMAXPROCS(0), false, true, false)
+	})
+	t.Run("1 pre_size", func(t *testing.T) {
+		testInsert_cc_DHLTMap(t, total, 1, true, false, false)
+	})
+	t.Run("64 pre_size", func(t *testing.T) {
+		testInsert_cc_DHLTMap(t, total, runtime.GOMAXPROCS(0), true, false, false)
+	})
+}
+
+func testInsert_cc_DHLTMap(
+	t *testing.T,
+	total int,
+	numCPU int,
+	preSize bool,
+	testLoad bool,
+	testDelete bool,
+) {
+	time.Sleep(2 * time.Second)
+	runtime.GC()
+
+	var m *cc.DHLTMap[int, int]
+	if preSize {
+		m = cc.NewDHLTMap[int, int](cc.WithCapacity(total))
+	} else {
+		m = cc.NewDHLTMap[int, int]()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(numCPU)
+
+	start := time.Now()
+
+	batchSize := (total + numCPU - 1) / numCPU
+
+	for i := range numCPU {
+		go func(start, end int) {
+			// defer wg.Done()
+			// t.Logf("start, %04d, %04d", start, end)
+			for j := start; j < end; j++ {
+				m.Store(j, j)
+				// m.Compute(
+				// 	j,
+				// 	func(e *cc.MapEntry[int, int]) {
+				// 		e.Update(j)
+				// 	},
+				// )
+				// t.Logf("%04d", j)
+			}
+			wg.Done()
+		}(i*batchSize, min((i+1)*batchSize, total))
+	}
+
+	wg.Wait()
+
+	elapsed := time.Since(start)
+
+	size := m.Size()
+	if size != total {
+		t.Errorf("Expected size %d, got %d", total, size)
+	}
+	t.Logf("----------------------------------")
+	// t.Logf("cap  %v", m.Stats())
+	t.Logf("Inserted %d items in %v", total, elapsed)
+	t.Logf("Average: %.2f ns/op", float64(elapsed.Nanoseconds())/float64(total))
+	t.Logf(
+		"Throughput: %.2f million ops/sec",
+		float64(total)/(elapsed.Seconds()*1000000),
+	)
+
+	// t.Log(m.Stats())
+
+	// rand check
+	for i := range 1000 {
+		idx := i * (total / 1000)
+		if val, ok := m.Load(idx); !ok || val != idx {
+			t.Errorf(
+				"Expected value %d at key %d, got %d, exists: %v",
+				idx,
+				idx,
+				val,
+				ok,
+			)
+		}
+	}
+
+	if testLoad {
+		time.Sleep(2 * time.Second)
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+		start := time.Now()
+
+		batchSize := (total + numCPU - 1) / numCPU
+		for i := range numCPU {
+			go func(start, end int) {
+				// defer wg.Done()
+
+				for j := start; j < end; j++ {
+					_, _ = m.Load(j)
+				}
+				wg.Done()
+			}(i*batchSize, min((i+1)*batchSize, total))
+		}
+		wg.Wait()
+		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
+		t.Logf("Load %d items in %v", total, elapsed)
+		t.Logf(
+			"Average: %.2f ns/op",
+			float64(elapsed.Nanoseconds())/float64(total),
+		)
+		t.Logf(
+			"Throughput: %.2f million ops/sec",
+			float64(total)/(elapsed.Seconds()*1000000),
+		)
+	}
+
+	if testDelete {
+		var wg sync.WaitGroup
+		wg.Add(numCPU)
+
+		start := time.Now()
+		for k := range m.All() {
+			m.Delete(k)
+		}
+		// for e := range m.Entries() {
+		// 	e.Delete()
+		// }
+		elapsed := time.Since(start)
+		t.Logf("----------------------------------")
+		t.Logf("Delete %d items in %v", total, elapsed)
+		t.Logf(
+			"Average: %.2f ns/op",
+			float64(elapsed.Nanoseconds())/float64(total),
+		)
+		t.Logf(
+			"Throughput: %.2f million ops/sec",
+			float64(total)/(elapsed.Seconds()*1000000),
+		)
+		if m.Size() != 0 {
+			t.Errorf("Map is not zero after TestDelete, size: %d", m.Size())
+		}
+	}
+}
+
 func TestInsert_cc_OFHTMap(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
 		testInsert_cc_OFHTMap(t, total, 1, false, true, true)
