@@ -122,12 +122,12 @@ type ccSkipMapAdapter struct {
 func (a *ccSkipMapAdapter) Store(k, v int)         { a.m.Store(k, v) }
 func (a *ccSkipMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
 
-type ccDHLTMapAdapter struct {
-	m *cc.DHLTMap[int, int]
+type ccOFHTMapAdapter struct {
+	m *cc.OFHTMap[int, int]
 }
 
-func (a *ccDHLTMapAdapter) Store(k, v int)         { a.m.Store(k, v) }
-func (a *ccDHLTMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
+func (a *ccOFHTMapAdapter) Store(k, v int)         { a.m.Store(k, v) }
+func (a *ccOFHTMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
 
 // ============================================================================
 // Latency Result
@@ -294,7 +294,7 @@ func TestLatencySummary(t *testing.T) {
 		{"zhangyunhao116.skipmap", func() MapInterface { return &zhangyunhao116SkipmapAdapter{skipmap.New[int, int]()} }},
 		{"cc.SkipMap", func() MapInterface { return &ccSkipMapAdapter{cc.NewSkipMap[int, int]()} }},
 		{"cc.FunnelMap", func() MapInterface { return &ccFunnelMapAdapter{cc.NewFunnelMap[int, int]()} }},
-		{"cc.DHLTMap", func() MapInterface { return &ccDHLTMapAdapter{cc.NewDHLTMap[int, int]()} }},
+		{"cc.OFHTMap", func() MapInterface { return &ccOFHTMapAdapter{cc.NewOFHTMap[int, int]()} }},
 	}
 
 	var results []*latencyResult

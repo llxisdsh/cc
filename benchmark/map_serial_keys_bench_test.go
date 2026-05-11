@@ -1289,7 +1289,7 @@ func BenchmarkLoad_stdMap(b *testing.B) {
 
 	var i int
 	for b.Loop() {
-		_, _ = m[i]
+		_ = m[i]
 		i++
 		if i >= countLoad {
 			i = 0
@@ -1413,6 +1413,7 @@ func NewRWLockShardedMap[K comparable, V any](
 //go:nosplit
 func noescape(p unsafe.Pointer) unsafe.Pointer {
 	x := uintptr(p)
+	//nolint:all
 	return unsafe.Pointer(x ^ 0)
 }
 

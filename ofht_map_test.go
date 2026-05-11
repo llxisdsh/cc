@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func TestDHLTMapBasic(t *testing.T) {
-	m := NewDHLTMap[string, int](WithCapacity(2))
+func TestOFHTMapBasic(t *testing.T) {
+	m := NewOFHTMap[string, int](WithCapacity(2))
 
 	if _, ok := m.Load("missing"); ok {
 		t.Fatal("unexpected value for missing key")
@@ -59,8 +59,8 @@ func TestDHLTMapBasic(t *testing.T) {
 	m.Delete("b")
 }
 
-func TestDHLTMapGrow(t *testing.T) {
-	m := NewDHLTMap[int, int](WithCapacity(1))
+func TestOFHTMapGrow(t *testing.T) {
+	m := NewOFHTMap[int, int](WithCapacity(1))
 	for i := range 4096 {
 		m.Store(i, i*10)
 	}
@@ -99,8 +99,8 @@ func TestDHLTMapGrow(t *testing.T) {
 	}
 }
 
-func TestDHLTMapConcurrentLoadOrStoreSingleWinner(t *testing.T) {
-	m := NewDHLTMap[string, int]()
+func TestOFHTMapConcurrentLoadOrStoreSingleWinner(t *testing.T) {
+	m := NewOFHTMap[string, int]()
 	const goroutines = 64
 
 	var stored atomic.Int32
@@ -125,8 +125,8 @@ func TestDHLTMapConcurrentLoadOrStoreSingleWinner(t *testing.T) {
 	}
 }
 
-func TestDHLTMap_ConcurrentMixedOperations(t *testing.T) {
-	m := NewDHLTMap[int, int]()
+func TestOFHTMap_ConcurrentMixedOperations(t *testing.T) {
+	m := NewOFHTMap[int, int]()
 	const goroutines = 64
 	const opsPerGoroutine = 1000
 

@@ -75,10 +75,10 @@ func BenchmarkOnceGroupDoChanSameKey(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			ch := g.DoChan(key, func() (any, error) {
-				heavyWork(128)
+				_ = heavyWork(128)
 				return 1, nil
 			})
-			_ = <-ch
+			<-ch
 		}
 	})
 }
@@ -91,10 +91,10 @@ func BenchmarkOnceGroupDoChanSameKey_SingleFlight(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			ch := g.DoChan(key, func() (any, error) {
-				heavyWork(128)
+				_ = heavyWork(128)
 				return 1, nil
 			})
-			_ = <-ch
+			<-ch
 		}
 	})
 }
@@ -108,10 +108,10 @@ func BenchmarkOnceGroupDoChanManyKeys(b *testing.B) {
 		for pb.Next() {
 			key := "k_" + strconvSmall(i&1023)
 			ch := g.DoChan(key, func() (any, error) {
-				heavyWork(64)
+				_ = heavyWork(64)
 				return i, nil
 			})
-			_ = <-ch
+			<-ch
 			i++
 		}
 	})
@@ -126,10 +126,10 @@ func BenchmarkOnceGroupDoChanManyKeys_SingleFlight(b *testing.B) {
 		for pb.Next() {
 			key := "k_" + strconvSmall(i&1023)
 			ch := g.DoChan(key, func() (any, error) {
-				heavyWork(64)
+				_ = heavyWork(64)
 				return i, nil
 			})
-			_ = <-ch
+			<-ch
 			i++
 		}
 	})
@@ -143,7 +143,7 @@ func BenchmarkOnceGroupHeavyWorkSameKey(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			_, _, _ = g.Do(key, func() (any, error) {
-				heavyWork(128)
+				_ = heavyWork(128)
 				return 1, nil
 			})
 		}
@@ -158,7 +158,7 @@ func BenchmarkOnceGroupHeavyWorkSameKey_SingleFlight(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			_, _, _ = g.Do(key, func() (any, error) {
-				heavyWork(128)
+				_ = heavyWork(128)
 				return 1, nil
 			})
 		}
@@ -174,7 +174,7 @@ func BenchmarkOnceGroupHeavyWorkManyKeys(b *testing.B) {
 		for pb.Next() {
 			key := "k_" + strconvSmall(i&1023)
 			_, _, _ = g.Do(key, func() (any, error) {
-				heavyWork(64)
+				_ = heavyWork(64)
 				return i, nil
 			})
 			i++
@@ -191,7 +191,7 @@ func BenchmarkOnceGroupHeavyWorkManyKeys_SingleFlight(b *testing.B) {
 		for pb.Next() {
 			key := "k_" + strconvSmall(i&1023)
 			_, _, _ = g.Do(key, func() (any, error) {
-				heavyWork(64)
+				_ = heavyWork(64)
 				return i, nil
 			})
 			i++

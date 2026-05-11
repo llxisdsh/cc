@@ -245,7 +245,7 @@ func Test_MemoryPeakReduction(t *testing.T) {
 		runtime.GC()
 		runtime.ReadMemStats(&m1)
 
-		m := cc.NewDHLTMap[int, int]()
+		m := cc.NewOFHTMap[int, int]()
 
 		for i := range numItems {
 			m.Store(i, i)
@@ -255,7 +255,7 @@ func Test_MemoryPeakReduction(t *testing.T) {
 		peak := max(int64(m2.Alloc)-int64(m1.Alloc), 0)
 
 		t.Logf(
-			"cc_DHLTMap memory usage: %d bytes, items: %d",
+			"cc_OFHTMap memory usage: %d bytes, items: %d",
 			peak,
 			m.Size(),
 		)

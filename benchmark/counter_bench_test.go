@@ -40,13 +40,6 @@ func makeUnsafeSlice[T any](len uintptr) unsafeSlice[T] {
 	return unsafeSlice[T]{ptr: unsafe.Pointer(unsafe.SliceData(make([]T, len)))}
 }
 
-// toUnsafeSlice converts a pointer to a fixed-size slice/array into an unsafeSlice.
-//
-//go:nosplit
-func toUnsafeSlice[T any](ptr *T) unsafeSlice[T] {
-	return unsafeSlice[T]{ptr: unsafe.Pointer(ptr)}
-}
-
 // At returns a pointer to the i-th element of the slice without bounds checking.
 //
 //go:nosplit

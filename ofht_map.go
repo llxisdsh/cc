@@ -8,7 +8,7 @@ import (
 	"unsafe"
 )
 
-// DHLTMap is an experimental DHLT-style h1v map.
+// OFHTMap is an experimental DHLT-style hash map (Optimistic Flat Hash Table).
 //
 // The implementation is intentionally isolated from Map and FlatMap. It uses
 // open addressing, cache-line friendly slot groups, and per-slot CAS state
@@ -31,10 +31,10 @@ import (
 // This is a prototype for exploring DHLT-style write scalability. It implements
 // most of the standard Map API surface but lacks Compute-style operations and
 // lock-free cooperative resizing.
-type DHLTMap[K comparable, V any] struct {
+type OFHTMap[K comparable, V any] struct {
 	_ noCopy
 
-	table    atomic.Pointer[dhltTable[K, V]]
+	table    atomic.Pointer[ofhtTable[K, V]]
 	resizeMu sync.Mutex
 
 	intKey   bool
@@ -45,62 +45,62 @@ type DHLTMap[K comparable, V any] struct {
 	size     PLocalCounter
 }
 
-type dhltTable[K comparable, V any] struct {
-	slots     unsafeSlice[dhltSlot[K, V]]
+type ofhtTable[K comparable, V any] struct {
+	slots     unsafeSlice[ofhtSlot[K, V]]
 	mask      uintptr
 	stripeCap int
 	growCap   uintptr
 }
 
-type dhltSlot[K comparable, V any] struct {
+type ofhtSlot[K comparable, V any] struct {
 	ctrl atomic.Uint64
 	key  SeqLockSlot[K]
 	val  SeqLockSlot[V]
 }
 
 const (
-	dhltGroupSlots = uintptr(8)
-	dhltMinSlots   = uintptr(64)
+	ofhtGroupSlots = uintptr(8)
+	ofhtMinSlots   = uintptr(64)
 
-	dhltStateMask    = uint64(0x3)
-	dhltStateEmpty   = uint64(0)
-	dhltStateFull    = uint64(1)
-	dhltStateDeleted = uint64(2)
-	dhltStateBusy    = uint64(3)
+	ofhtStateMask    = uint64(0x3)
+	ofhtStateEmpty   = uint64(0)
+	ofhtStateFull    = uint64(1)
+	ofhtStateDeleted = uint64(2)
+	ofhtStateBusy    = uint64(3)
 
-	dhltH2Shift = 2
-	dhltH2Mask  = uint64(0xFFFF)
+	ofhtH2Shift = 2
+	ofhtH2Mask  = uint64(0xFFFF)
 
-	dhltSeqShift = 18
-	dhltSeqInc   = uint64(1) << dhltSeqShift
+	ofhtSeqShift = 18
+	ofhtSeqInc   = uint64(1) << ofhtSeqShift
 
-	dhltFrozen = uint64(1) << 63
+	ofhtFrozen = uint64(1) << 63
 
-	dhltGrowNumerator   = uintptr(3)
-	dhltGrowDenominator = uintptr(4)
+	ofhtGrowNumerator   = uintptr(3)
+	ofhtGrowDenominator = uintptr(4)
 )
 
-type dhltStoreStatus uint8
+type ofhtStoreStatus uint8
 
 const (
-	dhltStoreOK dhltStoreStatus = iota
-	dhltStoreFrozen
-	dhltStoreFull
-	dhltStoreRetry
+	ofhtStoreOK ofhtStoreStatus = iota
+	ofhtStoreFrozen
+	ofhtStoreFull
+	ofhtStoreRetry
 )
 
-// NewDHLTMap creates an experimental DHLT-style map.
-func NewDHLTMap[K comparable, V any](options ...func(*MapConfig)) *DHLTMap[K, V] {
+// NewOFHTMap creates an experimental OFHT-style map.
+func NewOFHTMap[K comparable, V any](options ...func(*MapConfig)) *OFHTMap[K, V] {
 	var cfg MapConfig
 	for _, o := range options {
 		o(noEscape(&cfg))
 	}
-	m := &DHLTMap[K, V]{}
+	m := &OFHTMap[K, V]{}
 	m.init(noEscape(&cfg))
 	return m
 }
 
-func (m *DHLTMap[K, V]) init(cfg *MapConfig) {
+func (m *OFHTMap[K, V]) init(cfg *MapConfig) {
 	if cfg.keyHash == nil {
 		cfg.keyHash = parseKeyInterface[K]()
 	}
@@ -118,12 +118,12 @@ func (m *DHLTMap[K, V]) init(cfg *MapConfig) {
 	}
 
 	m.seed = uintptr(rand.Uint64())
-	m.minLen = dhltCalcSlotLen(cfg.capacity)
-	m.table.Store(newDHLTTable[K, V](m.minLen))
+	m.minLen = ofhtCalcSlotLen(cfg.capacity)
+	m.table.Store(newOFHTTable[K, V](m.minLen))
 }
 
 // Load retrieves the value for a key.
-func (m *DHLTMap[K, V]) Load(key K) (value V, ok bool) {
+func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 	table := m.table.Load()
 	if table == nil {
 		return *new(V), false
@@ -133,21 +133,21 @@ func (m *DHLTMap[K, V]) Load(key K) (value V, ok bool) {
 }
 
 // Store sets the value for a key.
-func (m *DHLTMap[K, V]) Store(key K, value V) {
+func (m *OFHTMap[K, V]) Store(key K, value V) {
 	table := m.ensureTable()
 	h1v, h2v := m.hashKey(noEscape(&key))
 	for {
 		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, false)
 		switch status {
-		case dhltStoreOK:
+		case ofhtStoreOK:
 			m.growIfNeeded(table)
 			return
-		case dhltStoreFrozen:
+		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
-		case dhltStoreFull:
+		case ofhtStoreFull:
 			m.tryGrow(table, (table.mask+1)<<1)
 			table = m.ensureTable()
-		case dhltStoreRetry:
+		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
 	}
@@ -155,30 +155,30 @@ func (m *DHLTMap[K, V]) Store(key K, value V) {
 
 // LoadOrStore returns the existing value for the key if present. Otherwise it
 // stores and returns the given value.
-func (m *DHLTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	table := m.ensureTable()
 	h1v, h2v := m.hashKey(noEscape(&key))
 	for {
 		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, true)
 		switch status {
-		case dhltStoreOK:
+		case ofhtStoreOK:
 			if !loaded {
 				m.growIfNeeded(table)
 			}
 			return actual, loaded
-		case dhltStoreFrozen:
+		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
-		case dhltStoreFull:
+		case ofhtStoreFull:
 			m.tryGrow(table, (table.mask+1)<<1)
 			table = m.ensureTable()
-		case dhltStoreRetry:
+		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
 	}
 }
 
 // Delete removes the value for a key.
-func (m *DHLTMap[K, V]) Delete(key K) {
+func (m *OFHTMap[K, V]) Delete(key K) {
 	table := m.table.Load()
 	if table == nil {
 		return
@@ -186,7 +186,7 @@ func (m *DHLTMap[K, V]) Delete(key K) {
 	h1v, h2v := m.hashKey(noEscape(&key))
 	for {
 		status, _, _ := m.deleteFrom(table, noEscape(&key), h1v, h2v, false)
-		if status == dhltStoreOK {
+		if status == ofhtStoreOK {
 			return
 		}
 		table = m.afterFrozenTable(table)
@@ -194,7 +194,7 @@ func (m *DHLTMap[K, V]) Delete(key K) {
 }
 
 // LoadAndDelete retrieves the value for a key and deletes it from the map.
-func (m *DHLTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
+func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	table := m.table.Load()
 	if table == nil {
 		return *new(V), false
@@ -202,7 +202,7 @@ func (m *DHLTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	h1v, h2v := m.hashKey(noEscape(&key))
 	for {
 		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h1v, h2v, true)
-		if status == dhltStoreOK {
+		if status == ofhtStoreOK {
 			return prev, loaded
 		}
 		table = m.afterFrozenTable(table)
@@ -210,7 +210,7 @@ func (m *DHLTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 }
 
 // CompareAndSwap atomically replaces an existing value with a new value.
-func (m *DHLTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
+func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	table := m.table.Load()
 	if table == nil {
 		return false
@@ -225,7 +225,7 @@ func (m *DHLTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			h1v,
 			h2v,
 		)
-		if status == dhltStoreOK {
+		if status == ofhtStoreOK {
 			return swapped
 		}
 		table = m.afterFrozenTable(table)
@@ -234,7 +234,7 @@ func (m *DHLTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 
 // CompareAndDelete atomically deletes an existing entry.
 // If its value matches the expected value.
-func (m *DHLTMap[K, V]) CompareAndDelete(key K, old V) bool {
+func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	table := m.table.Load()
 	if table == nil {
 		return false
@@ -248,7 +248,7 @@ func (m *DHLTMap[K, V]) CompareAndDelete(key K, old V) bool {
 			h1v,
 			h2v,
 		)
-		if status == dhltStoreOK {
+		if status == ofhtStoreOK {
 			return deleted
 		}
 		table = m.afterFrozenTable(table)
@@ -256,7 +256,7 @@ func (m *DHLTMap[K, V]) CompareAndDelete(key K, old V) bool {
 }
 
 // Range iterates over a weakly consistent snapshot of the table.
-func (m *DHLTMap[K, V]) Range(yield func(K, V) bool) {
+func (m *OFHTMap[K, V]) Range(yield func(K, V) bool) {
 	table := m.table.Load()
 	if table == nil {
 		return
@@ -266,7 +266,7 @@ func (m *DHLTMap[K, V]) Range(yield func(K, V) bool) {
 	retry:
 		for {
 			ctrl := slot.ctrl.Load()
-			if dhltCtrlState(ctrl) != dhltStateFull {
+			if ofhtCtrlState(ctrl) != ofhtStateFull {
 				break
 			}
 			k := slot.key.ReadUnfenced()
@@ -286,16 +286,16 @@ func (m *DHLTMap[K, V]) Range(yield func(K, V) bool) {
 // All returns an iterator function for use with range-over-func.
 //
 //go:nosplit
-func (m *DHLTMap[K, V]) All() func(yield func(K, V) bool) {
+func (m *OFHTMap[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
 // Size returns the approximate number of entries in the map.
-func (m *DHLTMap[K, V]) Size() int {
+func (m *OFHTMap[K, V]) Size() int {
 	return int(m.size.Value())
 }
 
-func (m *DHLTMap[K, V]) ensureTable() *dhltTable[K, V] {
+func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {
 	table := m.table.Load()
 	if table != nil {
 		return table
@@ -311,7 +311,7 @@ func (m *DHLTMap[K, V]) ensureTable() *dhltTable[K, V] {
 }
 
 //go:nosplit
-func (m *DHLTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
+func (m *OFHTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
 	if m.intKey {
 		h1v := intHash[K](noescape(unsafe.Pointer(key)))
 		return h1v, uint16(h1v ^ (h1v >> 16))
@@ -320,26 +320,26 @@ func (m *DHLTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
 	return h1v >> 16, uint16(h1v)
 }
 
-func (m *DHLTMap[K, V]) loadFrom(
-	table *dhltTable[K, V],
+func (m *OFHTMap[K, V]) loadFrom(
+	table *ofhtTable[K, V],
 	key *K,
 	h1v uintptr,
 	h2v uint16,
 ) (value V, ok bool) {
 	// var spins int
-	start := dhltStart(h1v, table.mask)
+	start := ofhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
-		switch dhltCtrlState(ctrl) {
-		case dhltStateEmpty:
+		switch ofhtCtrlState(ctrl) {
+		case ofhtStateEmpty:
 			return *new(V), false
-		case dhltStateBusy:
+		case ofhtStateBusy:
 			// delay(&spins)
 			probe--
 			continue
-		case dhltStateFull:
-			if dhltCtrlH2(ctrl) != h2v {
+		case ofhtStateFull:
+			if ofhtCtrlH2(ctrl) != h2v {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -360,34 +360,34 @@ func (m *DHLTMap[K, V]) loadFrom(
 	return *new(V), false
 }
 
-func (m *DHLTMap[K, V]) storeInto(
-	table *dhltTable[K, V],
+func (m *OFHTMap[K, V]) storeInto(
+	table *ofhtTable[K, V],
 	key *K,
 	val *V,
 	h1v uintptr,
 	h2v uint16,
 	onlyIfAbsent bool,
-) (dhltStoreStatus, V, bool) {
+) (ofhtStoreStatus, V, bool) {
 	var (
 		// spins     int
-		deleted   *dhltSlot[K, V]
+		deleted   *ofhtSlot[K, V]
 		deletedC  uint64
 		deletedOK bool
 	)
-	start := dhltStart(h1v, table.mask)
+	start := ofhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
-		if ctrl&dhltFrozen != 0 {
-			return dhltStoreFrozen, *new(V), false
+		if ctrl&ofhtFrozen != 0 {
+			return ofhtStoreFrozen, *new(V), false
 		}
-		switch dhltCtrlState(ctrl) {
-		case dhltStateBusy:
+		switch ofhtCtrlState(ctrl) {
+		case ofhtStateBusy:
 			// delay(&spins)
 			probe--
 			continue
-		case dhltStateFull:
-			if dhltCtrlH2(ctrl) != h2v {
+		case ofhtStateFull:
+			if ofhtCtrlH2(ctrl) != h2v {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -402,94 +402,94 @@ func (m *DHLTMap[K, V]) storeInto(
 				continue
 			}
 			if onlyIfAbsent {
-				return dhltStoreOK, v, true
+				return ofhtStoreOK, v, true
 			}
 			if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(val))) {
-				return dhltStoreOK, v, true
+				return ofhtStoreOK, v, true
 			}
-			busyCtrl := (ctrl &^ dhltStateMask) | dhltStateBusy
+			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 				probe--
 				continue
 			}
 			slot.val.WriteUnfenced(*val)
-			slot.ctrl.Store(dhltCtrlUpdate(busyCtrl))
-			return dhltStoreOK, *val, true
-		case dhltStateDeleted:
+			slot.ctrl.Store(ofhtCtrlUpdate(busyCtrl))
+			return ofhtStoreOK, *val, true
+		case ofhtStateDeleted:
 			if !deletedOK {
 				deleted, deletedC, deletedOK = slot, ctrl, true
 			}
-		case dhltStateEmpty:
+		case ofhtStateEmpty:
 			if deletedOK {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, key, val, h2v)
-				if status == dhltStoreRetry {
-					return dhltStoreRetry, *new(V), false
+				if status == ofhtStoreRetry {
+					return ofhtStoreRetry, *new(V), false
 				}
 				return status, rVal, loaded
 			}
-			busyCtrl := (ctrl &^ dhltStateMask) | dhltStateBusy
+			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 				probe--
 				continue
 			}
 			slot.key.WriteUnfenced(*key)
 			slot.val.WriteUnfenced(*val)
-			slot.ctrl.Store(dhltCtrlInsert(busyCtrl, h2v))
+			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h2v))
 			m.size.Add(1)
-			return dhltStoreOK, *val, false
+			return ofhtStoreOK, *val, false
 		}
 	}
 	if deletedOK {
 		return m.claimSlot(deleted, deletedC, key, val, h2v)
 	}
-	return dhltStoreFull, *new(V), false
+	return ofhtStoreFull, *new(V), false
 }
 
-func (m *DHLTMap[K, V]) claimSlot(
-	slot *dhltSlot[K, V],
+func (m *OFHTMap[K, V]) claimSlot(
+	slot *ofhtSlot[K, V],
 	ctrl uint64,
 	key *K,
 	val *V,
 	h2v uint16,
-) (dhltStoreStatus, V, bool) {
-	if ctrl&dhltFrozen != 0 {
-		return dhltStoreFrozen, *new(V), false
+) (ofhtStoreStatus, V, bool) {
+	if ctrl&ofhtFrozen != 0 {
+		return ofhtStoreFrozen, *new(V), false
 	}
-	busyCtrl := (ctrl &^ dhltStateMask) | dhltStateBusy
+	busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 	if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
-		return dhltStoreRetry, *new(V), false
+		return ofhtStoreRetry, *new(V), false
 	}
 	slot.key.WriteUnfenced(*key)
 	slot.val.WriteUnfenced(*val)
-	slot.ctrl.Store(dhltCtrlInsert(busyCtrl, h2v))
+	slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h2v))
 	m.size.Add(1)
-	return dhltStoreOK, *val, false
+	return ofhtStoreOK, *val, false
 }
 
-func (m *DHLTMap[K, V]) deleteFrom(
-	table *dhltTable[K, V],
+func (m *OFHTMap[K, V]) deleteFrom(
+	table *ofhtTable[K, V],
 	key *K,
 	h1v uintptr,
 	h2v uint16,
 	needValue bool,
-) (dhltStoreStatus, V, bool) {
+) (ofhtStoreStatus, V, bool) {
 	// var spins int
-	start := dhltStart(h1v, table.mask)
+	start := ofhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
-		if ctrl&dhltFrozen != 0 {
-			return dhltStoreFrozen, *new(V), false
+		if ctrl&ofhtFrozen != 0 {
+			return ofhtStoreFrozen, *new(V), false
 		}
-		switch dhltCtrlState(ctrl) {
-		case dhltStateEmpty:
-			return dhltStoreOK, *new(V), false
-		case dhltStateBusy:
+		switch ofhtCtrlState(ctrl) {
+		case ofhtStateEmpty:
+			return ofhtStoreOK, *new(V), false
+		case ofhtStateBusy:
 			// delay(&spins)
 			probe--
 			continue
-		case dhltStateFull:
-			if dhltCtrlH2(ctrl) != h2v {
+		case ofhtStateFull:
+			if ofhtCtrlH2(ctrl) != h2v {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -502,7 +502,7 @@ func (m *DHLTMap[K, V]) deleteFrom(
 			if k != *key {
 				continue
 			}
-			busyCtrl := (ctrl &^ dhltStateMask) | dhltStateBusy
+			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 				probe--
 				continue
@@ -514,39 +514,39 @@ func (m *DHLTMap[K, V]) deleteFrom(
 			}
 
 			slot.val.WriteUnfenced(*new(V)) // Clear value for GC
-			slot.ctrl.Store(dhltCtrlDelete(busyCtrl))
+			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(^uintptr(0))
-			return dhltStoreOK, prev, true
+			return ofhtStoreOK, prev, true
 		}
 	}
-	return dhltStoreOK, *new(V), false
+	return ofhtStoreOK, *new(V), false
 }
 
-func (m *DHLTMap[K, V]) compareAndSwapIn(
-	table *dhltTable[K, V],
+func (m *OFHTMap[K, V]) compareAndSwapIn(
+	table *ofhtTable[K, V],
 	key *K,
 	old *V,
 	newVal *V,
 	h1v uintptr,
 	h2v uint16,
-) (dhltStoreStatus, bool) {
+) (ofhtStoreStatus, bool) {
 	// var spins int
-	start := dhltStart(h1v, table.mask)
+	start := ofhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
-		if ctrl&dhltFrozen != 0 {
-			return dhltStoreFrozen, false
+		if ctrl&ofhtFrozen != 0 {
+			return ofhtStoreFrozen, false
 		}
-		switch dhltCtrlState(ctrl) {
-		case dhltStateEmpty:
-			return dhltStoreOK, false
-		case dhltStateBusy:
+		switch ofhtCtrlState(ctrl) {
+		case ofhtStateEmpty:
+			return ofhtStoreOK, false
+		case ofhtStateBusy:
 			// delay(&spins)
 			probe--
 			continue
-		case dhltStateFull:
-			if dhltCtrlH2(ctrl) != h2v {
+		case ofhtStateFull:
+			if ofhtCtrlH2(ctrl) != h2v {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -564,46 +564,46 @@ func (m *DHLTMap[K, V]) compareAndSwapIn(
 				panic("cc: value is not comparable; use WithValueEqual")
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(old))) {
-				return dhltStoreOK, false
+				return ofhtStoreOK, false
 			}
-			busyCtrl := (ctrl &^ dhltStateMask) | dhltStateBusy
+			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 				probe--
 				continue
 			}
 
 			slot.val.WriteUnfenced(*newVal)
-			slot.ctrl.Store(dhltCtrlUpdate(busyCtrl))
-			return dhltStoreOK, true
+			slot.ctrl.Store(ofhtCtrlUpdate(busyCtrl))
+			return ofhtStoreOK, true
 		}
 	}
-	return dhltStoreOK, false
+	return ofhtStoreOK, false
 }
 
-func (m *DHLTMap[K, V]) compareAndDeleteIn(
-	table *dhltTable[K, V],
+func (m *OFHTMap[K, V]) compareAndDeleteIn(
+	table *ofhtTable[K, V],
 	key *K,
 	old *V,
 	h1v uintptr,
 	h2v uint16,
-) (dhltStoreStatus, bool) {
+) (ofhtStoreStatus, bool) {
 	// var spins int
-	start := dhltStart(h1v, table.mask)
+	start := ofhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
-		if ctrl&dhltFrozen != 0 {
-			return dhltStoreFrozen, false
+		if ctrl&ofhtFrozen != 0 {
+			return ofhtStoreFrozen, false
 		}
-		switch dhltCtrlState(ctrl) {
-		case dhltStateEmpty:
-			return dhltStoreOK, false
-		case dhltStateBusy:
+		switch ofhtCtrlState(ctrl) {
+		case ofhtStateEmpty:
+			return ofhtStoreOK, false
+		case ofhtStateBusy:
 			// delay(&spins)
 			probe--
 			continue
-		case dhltStateFull:
-			if dhltCtrlH2(ctrl) != h2v {
+		case ofhtStateFull:
+			if ofhtCtrlH2(ctrl) != h2v {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -621,24 +621,24 @@ func (m *DHLTMap[K, V]) compareAndDeleteIn(
 				panic("cc: value is not comparable; use WithValueEqual")
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(old))) {
-				return dhltStoreOK, false
+				return ofhtStoreOK, false
 			}
-			busyCtrl := (ctrl &^ dhltStateMask) | dhltStateBusy
+			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 				probe--
 				continue
 			}
 
 			slot.val.WriteUnfenced(*new(V)) // Clear value for GC
-			slot.ctrl.Store(dhltCtrlDelete(busyCtrl))
+			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(^uintptr(0))
-			return dhltStoreOK, true
+			return ofhtStoreOK, true
 		}
 	}
-	return dhltStoreOK, false
+	return ofhtStoreOK, false
 }
 
-func (m *DHLTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
+func (m *OFHTMap[K, V]) growIfNeeded(table *ofhtTable[K, V]) {
 	if int(m.size.Get().Load()) >= table.stripeCap {
 		if m.size.Value() >= table.growCap {
 			m.tryGrow(table, (table.mask+1)<<1)
@@ -646,7 +646,7 @@ func (m *DHLTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
 	}
 }
 
-func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
+func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 	m.resizeMu.Lock()
 	defer m.resizeMu.Unlock()
 
@@ -660,11 +660,11 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 	newLen = nextPowOf2(max(newLen, m.minLen))
 
 	m.freezeTable(old)
-	newTable := newDHLTTable[K, V](newLen)
+	newTable := newOFHTTable[K, V](newLen)
 	for i := uintptr(0); i <= old.mask; i++ {
 		slot := old.slots.At(i)
 		ctrl := slot.ctrl.Load()
-		if dhltCtrlState(ctrl) != dhltStateFull {
+		if ofhtCtrlState(ctrl) != ofhtStateFull {
 			continue
 		}
 		k := slot.key.ReadUnfenced()
@@ -675,54 +675,54 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 	m.table.Store(newTable)
 }
 
-func (m *DHLTMap[K, V]) freezeTable(table *dhltTable[K, V]) {
+func (m *OFHTMap[K, V]) freezeTable(table *ofhtTable[K, V]) {
 	// var spins int
 	for i := uintptr(0); i <= table.mask; i++ {
 		slot := table.slots.At(i)
 		for {
 			ctrl := slot.ctrl.Load()
-			if ctrl&dhltFrozen != 0 {
+			if ctrl&ofhtFrozen != 0 {
 				break
 			}
-			if dhltCtrlState(ctrl) == dhltStateBusy {
+			if ofhtCtrlState(ctrl) == ofhtStateBusy {
 				// delay(&spins)
 				continue
 			}
-			if slot.ctrl.CompareAndSwap(ctrl, ctrl|dhltFrozen) {
+			if slot.ctrl.CompareAndSwap(ctrl, ctrl|ofhtFrozen) {
 				break
 			}
 		}
 	}
 }
 
-func (m *DHLTMap[K, V]) copyEntry(
-	table *dhltTable[K, V],
+func (m *OFHTMap[K, V]) copyEntry(
+	table *ofhtTable[K, V],
 	key *K,
 	val *V,
 	h1v uintptr,
 	h2v uint16,
 ) {
-	start := dhltStart(h1v, table.mask)
+	start := ofhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
-		if dhltCtrlState(ctrl) != dhltStateEmpty {
+		if ofhtCtrlState(ctrl) != ofhtStateEmpty {
 			continue
 		}
-		busyCtrl := (ctrl &^ dhltStateMask) | dhltStateBusy
+		busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 		if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 			probe--
 			continue
 		}
 		slot.key.WriteUnfenced(*key)
 		slot.val.WriteUnfenced(*val)
-		slot.ctrl.Store(dhltCtrlInsert(busyCtrl, h2v))
+		slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h2v))
 		return
 	}
-	panic("cc: DHLTMap grow produced a full table")
+	panic("cc: OFHTMap grow produced a full table")
 }
 
-func (m *DHLTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] {
+func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 	for {
 		table := m.table.Load()
 		if table != old {
@@ -732,58 +732,58 @@ func (m *DHLTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] 
 	}
 }
 
-func newDHLTTable[K comparable, V any](slotLen uintptr) *dhltTable[K, V] {
-	slotLen = nextPowOf2(max(slotLen, dhltMinSlots))
-	if rem := slotLen & (dhltGroupSlots - 1); rem != 0 {
-		slotLen += dhltGroupSlots - rem
+func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
+	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
+	if rem := slotLen & (ofhtGroupSlots - 1); rem != 0 {
+		slotLen += ofhtGroupSlots - rem
 		slotLen = nextPowOf2(slotLen)
 	}
-	growCap := (slotLen * dhltGrowNumerator) / dhltGrowDenominator
+	growCap := (slotLen * ofhtGrowNumerator) / ofhtGrowDenominator
 	roundedSizeLen := nextPowOf2(maxProcs())
-	return &dhltTable[K, V]{
-		slots:     makeUnsafeSlice[dhltSlot[K, V]](slotLen),
+	return &ofhtTable[K, V]{
+		slots:     makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
 		mask:      slotLen - 1,
 		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
 		growCap:   growCap,
 	}
 }
 
-func dhltCalcSlotLen(capacity uintptr) uintptr {
+func ofhtCalcSlotLen(capacity uintptr) uintptr {
 	if capacity == 0 {
-		return dhltMinSlots
+		return ofhtMinSlots
 	}
-	need := (capacity*dhltGrowDenominator + dhltGrowNumerator - 1) / dhltGrowNumerator
-	return nextPowOf2(max(need, dhltMinSlots))
+	need := (capacity*ofhtGrowDenominator + ofhtGrowNumerator - 1) / ofhtGrowNumerator
+	return nextPowOf2(max(need, ofhtMinSlots))
 }
 
 //go:nosplit
-func dhltStart(h1v, mask uintptr) uintptr {
+func ofhtStart(h1v, mask uintptr) uintptr {
 	return h1v & mask
 }
 
 //go:nosplit
-func dhltCtrlState(ctrl uint64) uint64 {
-	return ctrl & dhltStateMask
+func ofhtCtrlState(ctrl uint64) uint64 {
+	return ctrl & ofhtStateMask
 }
 
 //go:nosplit
-func dhltCtrlH2(ctrl uint64) uint16 {
-	return uint16((ctrl >> dhltH2Shift) /*& 0xFFFF*/)
+func ofhtCtrlH2(ctrl uint64) uint16 {
+	return uint16((ctrl >> ofhtH2Shift) /*& 0xFFFF*/)
 }
 
 //go:nosplit
-func dhltCtrlInsert(busyCtrl uint64, h2v uint16) uint64 {
-	c := (busyCtrl &^ dhltStateMask) | dhltStateFull
-	c = (c &^ (dhltH2Mask << dhltH2Shift)) | (uint64(h2v) << dhltH2Shift)
-	return c + dhltSeqInc
+func ofhtCtrlInsert(busyCtrl uint64, h2v uint16) uint64 {
+	c := (busyCtrl &^ ofhtStateMask) | ofhtStateFull
+	c = (c &^ (ofhtH2Mask << ofhtH2Shift)) | (uint64(h2v) << ofhtH2Shift)
+	return c + ofhtSeqInc
 }
 
 //go:nosplit
-func dhltCtrlUpdate(busyCtrl uint64) uint64 {
-	return (busyCtrl+dhltSeqInc)&^dhltStateMask | dhltStateFull
+func ofhtCtrlUpdate(busyCtrl uint64) uint64 {
+	return (busyCtrl+ofhtSeqInc)&^ofhtStateMask | ofhtStateFull
 }
 
 //go:nosplit
-func dhltCtrlDelete(busyCtrl uint64) uint64 {
-	return (busyCtrl+dhltSeqInc)&^dhltStateMask | dhltStateDeleted
+func ofhtCtrlDelete(busyCtrl uint64) uint64 {
+	return (busyCtrl+ofhtSeqInc)&^ofhtStateMask | ofhtStateDeleted
 }
