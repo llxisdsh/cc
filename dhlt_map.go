@@ -386,6 +386,7 @@ func (m *DHLTMap[K, V]) storeInto(
 		deletedC  uintptr
 		deletedE  uintptr
 		deletedOK bool
+		newEntry  *dhltEntry[K, V]
 	)
 	start := dhltStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
@@ -421,7 +422,9 @@ func (m *DHLTMap[K, V]) storeInto(
 				}
 			}
 
-			newEntry := &dhltEntry[K, V]{key: *key, val: *val}
+			if newEntry == nil {
+				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+			}
 			newCtrl := dhltCtrlUpdate(uint64(ctrl))
 			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
@@ -434,13 +437,15 @@ func (m *DHLTMap[K, V]) storeInto(
 			}
 		case dhltStateEmpty:
 			if deletedOK {
-				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h2v)
+				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h2v, newEntry)
 				if status == dhltStoreRetry {
 					return dhltStoreRetry, *new(V), false
 				}
 				return status, rVal, loaded
 			}
-			newEntry := &dhltEntry[K, V]{key: *key, val: *val}
+			if newEntry == nil {
+				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+			}
 			newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
 			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
@@ -451,7 +456,7 @@ func (m *DHLTMap[K, V]) storeInto(
 		}
 	}
 	if deletedOK {
-		return m.claimSlot(deleted, deletedC, deletedE, key, val, h2v)
+		return m.claimSlot(deleted, deletedC, deletedE, key, val, h2v, newEntry)
 	}
 	return dhltStoreFull, *new(V), false
 }
@@ -463,11 +468,14 @@ func (m *DHLTMap[K, V]) claimSlot(
 	key *K,
 	val *V,
 	h2v uint16,
+	newEntry *dhltEntry[K, V],
 ) (dhltStoreStatus, V, bool) {
 	if uint64(ctrl)&dhltFrozen != 0 {
 		return dhltStoreFrozen, *new(V), false
 	}
-	newEntry := &dhltEntry[K, V]{key: *key, val: *val}
+	if newEntry == nil {
+		newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+	}
 	newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
 	if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 		return dhltStoreRetry, *new(V), false
