@@ -8,6 +8,11 @@ import (
 	"unsafe"
 )
 
+const (
+	dhltEnableIntKey   = false
+	dhltEnableDedupVal = false
+)
+
 // DHLTMap is an experimental DHLT-style hash map (Double-Word CAS Lock-free Table).
 //
 // The implementation uses open addressing, cache-line friendly slot groups, and per-slot
@@ -67,15 +72,19 @@ const (
 	dhltGroupSlots = uintptr(8)
 	dhltMinSlots   = uintptr(64)
 
-	dhltStateMask    = uint64(0x3)
-	dhltStateEmpty   = uint64(0)
-	dhltStateFull    = uint64(1)
-	dhltStateDeleted = uint64(2)
+	// dhltNotPtr is always set on non-empty ctrl words to prevent GC from
+	// treating the ctrl word as a valid pointer, saving scan time.
+	dhltNotPtr = uint64(1)
 
-	dhltH2Shift = 2
+	dhltStateMask    = uint64(0x3) << 1
+	dhltStateEmpty   = uint64(0) << 1
+	dhltStateFull    = uint64(1) << 1
+	dhltStateDeleted = uint64(2) << 1
+
+	dhltH2Shift = 3
 	dhltH2Mask  = uint64(0xFFFF)
 
-	dhltSeqShift = 18
+	dhltSeqShift = 19
 	dhltSeqInc   = uint64(1) << dhltSeqShift
 
 	dhltFrozen = uint64(1) << 63
@@ -321,9 +330,11 @@ func (m *DHLTMap[K, V]) ensureTable() *dhltTable[K, V] {
 
 //go:nosplit
 func (m *DHLTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
-	if m.intKey {
-		h1v := intHash[K](noescape(unsafe.Pointer(key)))
-		return h1v, uint16(h1v ^ (h1v >> 16))
+	if dhltEnableIntKey {
+		if m.intKey {
+			h1v := intHash[K](noescape(unsafe.Pointer(key)))
+			return h1v, uint16(h1v ^ (h1v >> 16))
+		}
 	}
 	h1v := m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 	return h1v >> 16, uint16(h1v)
@@ -404,14 +415,15 @@ func (m *DHLTMap[K, V]) storeInto(
 			if onlyIfAbsent {
 				return dhltStoreOK, e.val, true
 			}
-			if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
-				return dhltStoreOK, e.val, true
+			if dhltEnableDedupVal {
+				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
+					return dhltStoreOK, e.val, true
+				}
 			}
 
 			newEntry := &dhltEntry[K, V]{key: *key, val: *val}
-			escape(unsafe.Pointer(newEntry))
 			newCtrl := dhltCtrlUpdate(uint64(ctrl))
-			if !dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(newCtrl), uintptr(unsafe.Pointer(newEntry))) {
+			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
@@ -429,9 +441,8 @@ func (m *DHLTMap[K, V]) storeInto(
 				return status, rVal, loaded
 			}
 			newEntry := &dhltEntry[K, V]{key: *key, val: *val}
-			escape(unsafe.Pointer(newEntry))
 			newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
-			if !dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(newCtrl), uintptr(unsafe.Pointer(newEntry))) {
+			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
@@ -457,9 +468,8 @@ func (m *DHLTMap[K, V]) claimSlot(
 		return dhltStoreFrozen, *new(V), false
 	}
 	newEntry := &dhltEntry[K, V]{key: *key, val: *val}
-	escape(unsafe.Pointer(newEntry))
 	newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
-	if !dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(newCtrl), uintptr(unsafe.Pointer(newEntry))) {
+	if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 		return dhltStoreRetry, *new(V), false
 	}
 	m.size.Add(1)
@@ -503,7 +513,7 @@ func (m *DHLTMap[K, V]) deleteFrom(
 
 			newCtrl := dhltCtrlDelete(uint64(ctrl))
 			// We can nil the entry to help GC, or keep it to allow lock-free readers to finish
-			if !dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(newCtrl), 0) {
+			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
 				probe--
 				continue
 			}
@@ -562,9 +572,8 @@ func (m *DHLTMap[K, V]) compareAndSwapIn(
 			}
 
 			newEntry := &dhltEntry[K, V]{key: *key, val: *newVal}
-			escape(unsafe.Pointer(newEntry))
 			newCtrl := dhltCtrlUpdate(uint64(ctrl))
-			if !dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(newCtrl), uintptr(unsafe.Pointer(newEntry))) {
+			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
@@ -615,7 +624,7 @@ func (m *DHLTMap[K, V]) compareAndDeleteIn(
 			}
 
 			newCtrl := dhltCtrlDelete(uint64(ctrl))
-			if !dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(newCtrl), 0) {
+			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
 				probe--
 				continue
 			}
@@ -695,7 +704,7 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 					break
 				}
 				entry := atomic.LoadUintptr(&slot[1])
-				if dwcas(unsafe.Pointer(slot), ctrl, entry, uintptr(uint64(ctrl)|dhltFrozen), entry) {
+				if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(uint64(ctrl)|dhltFrozen), unsafe.Pointer(entry)) { //nolint:all
 					break
 				}
 			}
@@ -738,7 +747,7 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				}
 				destEntry := atomic.LoadUintptr(&destSlot[1])
 				newCtrl := dhltCtrlInsert(uint64(destCtrl), h2v)
-				if !dwcas(unsafe.Pointer(destSlot), destCtrl, destEntry, uintptr(newCtrl), entryPtr) {
+				if !dwcas(unsafe.Pointer(destSlot), destCtrl, unsafe.Pointer(destEntry), uintptr(newCtrl), unsafe.Pointer(entryPtr)) { //nolint:all
 					probe--
 					continue
 				}
@@ -809,17 +818,17 @@ func dhltCtrlH2(ctrl uint64) uint16 {
 
 //go:nosplit
 func dhltCtrlInsert(ctrl uint64, h2v uint16) uint64 {
-	c := (ctrl &^ dhltStateMask) | dhltStateFull
+	c := (ctrl &^ dhltStateMask) | dhltStateFull | dhltNotPtr
 	c = (c &^ (dhltH2Mask << dhltH2Shift)) | (uint64(h2v) << dhltH2Shift)
 	return c + dhltSeqInc
 }
 
 //go:nosplit
 func dhltCtrlUpdate(ctrl uint64) uint64 {
-	return (ctrl+dhltSeqInc)&^dhltStateMask | dhltStateFull
+	return (ctrl+dhltSeqInc)&^dhltStateMask | dhltStateFull | dhltNotPtr
 }
 
 //go:nosplit
 func dhltCtrlDelete(ctrl uint64) uint64 {
-	return (ctrl+dhltSeqInc)&^dhltStateMask | dhltStateDeleted
+	return (ctrl+dhltSeqInc)&^dhltStateMask | dhltStateDeleted | dhltNotPtr
 }

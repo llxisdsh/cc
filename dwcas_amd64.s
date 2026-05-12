@@ -2,7 +2,7 @@
 
 #include "textflag.h"
 
-// func dwcas(ptr unsafe.Pointer, old1, old2, new1, new2 uintptr) bool
+// func dwcas(ptr unsafe.Pointer, old1 uintptr, old2 unsafe.Pointer, new1 uintptr, new2 unsafe.Pointer) bool
 TEXT ·dwcas(SB), NOSPLIT, $0-49
 	MOVQ ptr+0(FP), BP
 	MOVQ old1+8(FP), AX

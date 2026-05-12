@@ -8,6 +8,11 @@ import (
 	"unsafe"
 )
 
+const (
+	ofhtEnableIntKey   = false
+	ofhtEnableDedupVal = false
+)
+
 // OFHTMap is an experimental DHLT-style hash map (Optimistic Flat Hash Table).
 //
 // The implementation is intentionally isolated from Map and FlatMap. It uses
@@ -325,9 +330,11 @@ func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {
 
 //go:nosplit
 func (m *OFHTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
-	if m.intKey {
-		h1v := intHash[K](noescape(unsafe.Pointer(key)))
-		return h1v, uint16(h1v ^ (h1v >> 16))
+	if ofhtEnableIntKey {
+		if m.intKey {
+			h1v := intHash[K](noescape(unsafe.Pointer(key)))
+			return h1v, uint16(h1v ^ (h1v >> 16))
+		}
 	}
 	h1v := m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 	return h1v >> 16, uint16(h1v)
@@ -428,8 +435,10 @@ func (m *OFHTMap[K, V]) storeInto(
 			if onlyIfAbsent {
 				return ofhtStoreOK, v, true
 			}
-			if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(val))) {
-				return ofhtStoreOK, v, true
+			if ofhtEnableDedupVal {
+				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(val))) {
+					return ofhtStoreOK, v, true
+				}
 			}
 			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
