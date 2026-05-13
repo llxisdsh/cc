@@ -59,10 +59,10 @@ type dhltSlotWords [2]uintptr
 
 const dhltSlotBytes = unsafe.Sizeof(dhltSlotWords{})
 
-var (
-	_ [16 - dhltSlotBytes]byte
-	_ [dhltSlotBytes - 16]byte
-)
+// var (
+// 	_ [16 - dhltSlotBytes]byte
+// 	_ [dhltSlotBytes - 16]byte
+// )
 
 //go:nosplit
 func (t *dhltTable[K, V]) slot(i uintptr) *[2]uintptr {
@@ -70,9 +70,6 @@ func (t *dhltTable[K, V]) slot(i uintptr) *[2]uintptr {
 }
 
 const (
-	dhltGroupSlots = uintptr(8)
-	dhltMinSlots   = uintptr(64)
-
 	// dhltNotPtr is always set on non-empty ctrl words to prevent GC from
 	// treating the ctrl word as a valid pointer, saving scan time.
 	dhltNotPtr = uint64(1)
@@ -89,14 +86,16 @@ const (
 	dhltSeqInc   = uint64(1) << dhltSeqShift
 
 	dhltFrozen = uint64(1) << 63
+)
 
-	dhltGrowNumerator   = uintptr(3)
-	dhltGrowDenominator = uintptr(4)
+const (
+	dhltMinSlots   = 64
+	dhltLoadFactor = 0.75
 
 	// dhltMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	dhltMaxProbeThreshold = uintptr(128)
+	dhltMaxProbeThreshold = 128
 
 	// dhltGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
@@ -788,18 +787,12 @@ func (m *DHLTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] 
 
 func newDHLTTable[K comparable, V any](slotLen uintptr) *dhltTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dhltMinSlots))
-	if rem := slotLen & (dhltGroupSlots - 1); rem != 0 {
-		slotLen += dhltGroupSlots - rem
-		slotLen = nextPowOf2(slotLen)
-	}
-
 	raw := make([]unsafe.Pointer, int(slotLen)*len(dhltSlotWords{})+1)
 	base := unsafe.Pointer(&raw[0])
 	if uintptr(base)%16 != 0 {
 		base = unsafe.Pointer(&raw[1])
 	}
-
-	growCap := (slotLen * dhltGrowNumerator) / dhltGrowDenominator
+	growCap := uintptr(float64(slotLen) * dhltLoadFactor)
 	roundedSizeLen := nextPowOf2(maxProcs())
 	return &dhltTable[K, V]{
 		slotsBase: base,
@@ -814,7 +807,8 @@ func dhltCalcSlotLen(capacity uintptr) uintptr {
 	if capacity == 0 {
 		return dhltMinSlots
 	}
-	need := (capacity*dhltGrowDenominator + dhltGrowNumerator - 1) / dhltGrowNumerator
+	const invLoadFactor = 1 / dhltLoadFactor
+	need := uintptr(float64(capacity+1) * invLoadFactor)
 	return nextPowOf2(max(need, dhltMinSlots))
 }
 

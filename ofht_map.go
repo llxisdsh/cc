@@ -67,9 +67,6 @@ type ofhtSlot[K comparable, V any] struct {
 }
 
 const (
-	ofhtGroupSlots = uintptr(8)
-	ofhtMinSlots   = uintptr(64)
-
 	ofhtStateMask    = uint64(0x3)
 	ofhtStateEmpty   = uint64(0)
 	ofhtStateFull    = uint64(1)
@@ -83,14 +80,16 @@ const (
 	ofhtSeqInc   = uint64(1) << ofhtSeqShift
 
 	ofhtFrozen = uint64(1) << 63
+)
 
-	ofhtGrowNumerator   = uintptr(3)
-	ofhtGrowDenominator = uintptr(4)
+const (
+	ofhtMinSlots   = 64
+	ofhtLoadFactor = 0.75
 
 	// ofhtMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	ofhtMaxProbeThreshold = uintptr(128)
+	ofhtMaxProbeThreshold = 128
 
 	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
@@ -815,11 +814,7 @@ func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] 
 
 func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
-	if rem := slotLen & (ofhtGroupSlots - 1); rem != 0 {
-		slotLen += ofhtGroupSlots - rem
-		slotLen = nextPowOf2(slotLen)
-	}
-	growCap := (slotLen * ofhtGrowNumerator) / ofhtGrowDenominator
+	growCap := uintptr(float64(slotLen) * ofhtLoadFactor)
 	roundedSizeLen := nextPowOf2(maxProcs())
 	return &ofhtTable[K, V]{
 		slots:     makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
@@ -833,7 +828,8 @@ func ofhtCalcSlotLen(capacity uintptr) uintptr {
 	if capacity == 0 {
 		return ofhtMinSlots
 	}
-	need := (capacity*ofhtGrowDenominator + ofhtGrowNumerator - 1) / ofhtGrowNumerator
+	const invLoadFactor = 1 / ofhtLoadFactor
+	need := uintptr(float64(capacity+1) * invLoadFactor)
 	return nextPowOf2(max(need, ofhtMinSlots))
 }
 
