@@ -57,6 +57,7 @@ type ofhtTable[K comparable, V any] struct {
 	freezeIdx  atomic.Uintptr // Chunk index for cooperative resizing (Phase 1: freeze)
 	frozenDone atomic.Uintptr // Number of slots successfully frozen
 	copyIdx    atomic.Uintptr // Chunk index for cooperative resizing (Phase 2: copy)
+	copyDone   atomic.Uintptr // Number of slots successfully copied
 }
 
 type ofhtSlot[K comparable, V any] struct {
@@ -546,7 +547,8 @@ func (m *OFHTMap[K, V]) deleteFrom(
 				prev = slot.val.ReadUnfenced()
 			}
 
-			slot.val.WriteUnfenced(*new(V)) // Clear value for GC
+			slot.key.WriteUnfenced(*new(K)) // Clear key/value for GC
+			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(^uintptr(0))
 			return ofhtStoreOK, prev, true
@@ -662,7 +664,8 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 				continue
 			}
 
-			slot.val.WriteUnfenced(*new(V)) // Clear value for GC
+			slot.key.WriteUnfenced(*new(K)) // Clear key/value for GC
+			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(^uintptr(0))
 			return ofhtStoreOK, true
@@ -675,8 +678,9 @@ func (m *OFHTMap[K, V]) growIfNeeded(table *ofhtTable[K, V]) {
 	// Fast path: Only do the full size check periodically based on local counter.
 	// Since PLocalCounter is heavily sharded, getting the local value is cheap,
 	// but it still involves a function call and runtime logic.
-	if int(m.size.Get().Load())&ofhtGrowCheckMask == 0 {
-		if int(m.size.Get().Load()) >= table.stripeCap {
+	localSize := int(m.size.Get().Load())
+	if localSize&ofhtGrowCheckMask == 0 {
+		if localSize >= table.stripeCap {
 			if m.size.Value() >= table.growCap {
 				m.tryGrow(table, (table.mask+1)<<1)
 			}
@@ -787,7 +791,13 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 				}
 			}
 		}
+		old.copyDone.Add(end - start)
 	}
+
+	for old.copyDone.Load() < slotLen {
+		runtime.Gosched()
+	}
+
 	m.table.CompareAndSwap(old, next)
 }
 

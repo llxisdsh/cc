@@ -42,10 +42,11 @@ type dhltTable[K comparable, V any] struct {
 	stripeCap  int
 	growCap    uintptr
 	nextTable  atomic.Pointer[dhltTable[K, V]]
-	allocating atomic.Uint32    // Leader election for table allocation
-	freezeIdx  atomic.Uintptr   // Chunk freeze index assigned
+	allocating atomic.Uint32    // 0: no one is allocating, 1: allocating
+	freezeIdx  atomic.Uintptr   // Chunk freeze dispatch index
 	frozenDone atomic.Uintptr   // Chunk freeze actually completed
 	copyIdx    atomic.Uintptr   // Chunk copy index
+	copyDone   atomic.Uintptr   // Number of slots successfully copied
 	slotsRaw   []unsafe.Pointer // kept to prevent GC collection of the underlying array
 }
 
@@ -762,6 +763,11 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				break
 			}
 		}
+		old.copyDone.Add(end - start)
+	}
+
+	for old.copyDone.Load() < slotLen {
+		runtime.Gosched()
 	}
 
 	m.table.CompareAndSwap(old, next)
