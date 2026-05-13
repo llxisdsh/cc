@@ -53,11 +53,11 @@ type ofhtTable[K comparable, V any] struct {
 	stripeCap  int
 	growCap    uintptr
 	nextTable  atomic.Pointer[ofhtTable[K, V]]
-	allocating atomic.Uint32  // 0: no one is allocating, 1: allocating
-	freezeIdx  atomic.Uintptr // Chunk index for cooperative resizing (Phase 1: freeze)
-	frozenDone atomic.Uintptr // Number of slots successfully frozen
-	copyIdx    atomic.Uintptr // Chunk index for cooperative resizing (Phase 2: copy)
-	copyDone   atomic.Uintptr // Number of slots successfully copied
+	allocating atomic.Uint32 // 0: no one is allocating, 1: allocating
+	freezeIdx  atomic.Uint32 // Next chunk index for cooperative resizing (Phase 1: freeze)
+	frozenDone atomic.Uint32 // Number of freeze chunks completed
+	copyIdx    atomic.Uint32 // Next chunk index for cooperative resizing (Phase 2: copy)
+	copyDone   atomic.Uint32 // Number of copy chunks completed
 }
 
 type ofhtSlot[K comparable, V any] struct {
@@ -725,10 +725,11 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 	// All threads must help freeze the old table before anyone can safely copy.
 	// This prevents open-addressing probe crossing boundaries.
 	for {
-		start := old.freezeIdx.Add(chunkSz) - chunkSz
-		if start >= slotLen {
+		chunk := old.freezeIdx.Add(1) - 1
+		if chunk >= chunks {
 			break
 		}
+		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
 			slot := old.slots.At(i)
@@ -745,21 +746,22 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 				}
 			}
 		}
-		old.frozenDone.Add(end - start)
+		old.frozenDone.Add(1)
 	}
 
 	// Wait for all threads to finish freezing.
 	// We use copyIdx2 for the actual copying phase.
-	for old.frozenDone.Load() < slotLen {
+	for old.frozenDone.Load() < chunks {
 		runtime.Gosched()
 	}
 
 	// Phase 2: Cooperative copying.
 	for {
-		start := old.copyIdx.Add(chunkSz) - chunkSz
-		if start >= slotLen {
+		chunk := old.copyIdx.Add(1) - 1
+		if chunk >= chunks {
 			break
 		}
+		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
 			slot := old.slots.At(i)
@@ -771,9 +773,9 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 
 				// Inline copyEntry to avoid function call overhead and
 				// keep the copying logic close to the source.
-				start := ofhtStart(h1v, next.mask)
+				destStart := ofhtStart(h1v, next.mask)
 				for probe := uintptr(0); probe <= next.mask; probe++ {
-					destSlot := next.slots.At((start + probe) & next.mask)
+					destSlot := next.slots.At((destStart + probe) & next.mask)
 					destCtrl := destSlot.ctrl.Load()
 					if ofhtCtrlState(destCtrl) != ofhtStateEmpty {
 						continue
@@ -791,10 +793,10 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 				}
 			}
 		}
-		old.copyDone.Add(end - start)
+		old.copyDone.Add(1)
 	}
 
-	for old.copyDone.Load() < slotLen {
+	for old.copyDone.Load() < chunks {
 		runtime.Gosched()
 	}
 

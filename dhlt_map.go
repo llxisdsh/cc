@@ -43,10 +43,10 @@ type dhltTable[K comparable, V any] struct {
 	growCap    uintptr
 	nextTable  atomic.Pointer[dhltTable[K, V]]
 	allocating atomic.Uint32    // 0: no one is allocating, 1: allocating
-	freezeIdx  atomic.Uintptr   // Chunk freeze dispatch index
-	frozenDone atomic.Uintptr   // Chunk freeze actually completed
-	copyIdx    atomic.Uintptr   // Chunk copy index
-	copyDone   atomic.Uintptr   // Number of slots successfully copied
+	freezeIdx  atomic.Uint32    // Next chunk index for cooperative resizing (Phase 1: freeze)
+	frozenDone atomic.Uint32    // Number of freeze chunks completed
+	copyIdx    atomic.Uint32    // Next chunk index for cooperative resizing (Phase 2: copy)
+	copyDone   atomic.Uint32    // Number of copy chunks completed
 	slotsRaw   []unsafe.Pointer // kept to prevent GC collection of the underlying array
 }
 
@@ -646,8 +646,9 @@ func (m *DHLTMap[K, V]) compareAndDeleteIn(
 }
 
 func (m *DHLTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
-	if int(m.size.Get().Load())&dhltGrowCheckMask == 0 {
-		if int(m.size.Get().Load()) >= table.stripeCap {
+	localSize := int(m.size.Get().Load())
+	if localSize&dhltGrowCheckMask == 0 {
+		if localSize >= table.stripeCap {
 			if m.size.Value() >= table.growCap {
 				m.tryGrow(table, (table.mask+1)<<1)
 			}
@@ -700,10 +701,11 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
 
 	for {
-		start := old.freezeIdx.Add(chunkSz) - chunkSz
-		if start >= slotLen {
+		chunk := old.freezeIdx.Add(1) - 1
+		if chunk >= chunks {
 			break
 		}
+		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
 			slot := old.slot(i)
@@ -718,21 +720,22 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				}
 			}
 		}
-		old.frozenDone.Add(end - start)
+		old.frozenDone.Add(1)
 	}
 
 	// Wait for all threads to finish freezing.
 	// This acts as a barrier to ensure no new writes can occur before copying starts.
-	for old.frozenDone.Load() < slotLen {
+	for old.frozenDone.Load() < chunks {
 		runtime.Gosched()
 	}
 
 	// Phase 2: Copy chunks
 	for {
-		start := old.copyIdx.Add(chunkSz) - chunkSz
-		if start >= slotLen {
+		chunk := old.copyIdx.Add(1) - 1
+		if chunk >= chunks {
 			break
 		}
+		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
 			slot := old.slot(i)
@@ -763,10 +766,10 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				break
 			}
 		}
-		old.copyDone.Add(end - start)
+		old.copyDone.Add(1)
 	}
 
-	for old.copyDone.Load() < slotLen {
+	for old.copyDone.Load() < chunks {
 		runtime.Gosched()
 	}
 
