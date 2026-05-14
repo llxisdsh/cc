@@ -15,29 +15,25 @@ const (
 	ofhtEnableDedupVal = true
 )
 
-// OFHTMap is an experimental DHLT-style hash map (Optimistic Flat Hash Table).
+// OFHTMap is an experimental optimistic flat hash table.
 //
-// The implementation is intentionally isolated from Map and FlatMap. It uses
-// open addressing, cache-line friendly slot groups, and per-slot CAS state
-// transitions instead of root-bucket locks. The current Go implementation uses
-// a single-word slot control CAS plus a short "busy" state to coordinate
-// concurrent updates to the inline key and value slots. This contrasts with
-// pointer-based designs where a hardware DWCAS (Double-Word CAS) could
-// atomically publish both a control word and an *entry pointer, completely
-// eliminating the "busy" state. Since this map inlines generic K/V of
-// arbitrary sizes, the two-phase SeqLock pattern is strictly required.
+// It uses open addressing with linear probing. Each table slot stores the key
+// and value inline, plus a control word containing the slot state, a short hash
+// fingerprint, a version counter, and a frozen bit used during resize.
 //
 // Concurrency model:
-//   - Loads are lock-free and only spin when they observe a slot being updated
-//     (the "busy" state).
-//   - Writes reserve one slot with CAS, write the key and value directly into
-//     the slot, then release the slot by storing a full control word.
-//   - Grow freezes the old table slot-by-slot before copying. Writers that hit
-//     a frozen slot retry on the newly published table.
+//   - Loads read a slot optimistically: control word, key/value, then control
+//     word again. If the control word changed or the slot is busy, the load
+//     retries that slot.
+//   - Writes reserve a slot by CASing its control word to busy, update the
+//     inline key/value fields, then publish a full or deleted control word.
+//   - Resize allocates a next table, cooperatively freezes old slots, copies
+//     frozen full slots, waits for all resize chunks to finish, then publishes
+//     the new table.
 //
-// This is a prototype for exploring DHLT-style write scalability. It implements
-// most of the standard Map API surface but lacks Compute-style operations and
-// lock-free cooperative resizing.
+// OFHTMap avoids root-bucket locks and per-entry heap allocation, but updates
+// to a slot are not single-instruction atomic because generic K/V values are
+// stored inline.
 type OFHTMap[K comparable, V any] struct {
 	_        noCopy
 	table    atomic.Pointer[ofhtTable[K, V]]

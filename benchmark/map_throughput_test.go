@@ -16,22 +16,22 @@ import (
 
 const total = 100_000_00
 
-func TestInsert_cc_DHLTMap(t *testing.T) {
+func TestInsert_cc_DWHTMap(t *testing.T) {
 	t.Run("1 no_pre_size", func(t *testing.T) {
-		testInsert_cc_DHLTMap(t, total, 1, false, true, true)
+		testInsert_cc_DWHTMap(t, total, 1, false, true, true)
 	})
 	t.Run("64 no_pre_size", func(t *testing.T) {
-		testInsert_cc_DHLTMap(t, total, runtime.GOMAXPROCS(0), false, true, false)
+		testInsert_cc_DWHTMap(t, total, runtime.GOMAXPROCS(0), false, true, false)
 	})
 	t.Run("1 pre_size", func(t *testing.T) {
-		testInsert_cc_DHLTMap(t, total, 1, true, false, false)
+		testInsert_cc_DWHTMap(t, total, 1, true, false, false)
 	})
 	t.Run("64 pre_size", func(t *testing.T) {
-		testInsert_cc_DHLTMap(t, total, runtime.GOMAXPROCS(0), true, false, false)
+		testInsert_cc_DWHTMap(t, total, runtime.GOMAXPROCS(0), true, false, false)
 	})
 }
 
-func testInsert_cc_DHLTMap(
+func testInsert_cc_DWHTMap(
 	t *testing.T,
 	total int,
 	numCPU int,
@@ -42,11 +42,11 @@ func testInsert_cc_DHLTMap(
 	time.Sleep(2 * time.Second)
 	runtime.GC()
 
-	var m *cc.DHLTMap[int, int]
+	var m *cc.DWHTMap[int, int]
 	if preSize {
-		m = cc.NewDHLTMap[int, int](cc.WithCapacity(total))
+		m = cc.NewDWHTMap[int, int](cc.WithCapacity(total))
 	} else {
-		m = cc.NewDHLTMap[int, int]()
+		m = cc.NewDWHTMap[int, int]()
 	}
 
 	var wg sync.WaitGroup

@@ -17,19 +17,26 @@ const (
 	dhltEnableDedupVal = true
 )
 
-// DHLTMap is an experimental DHLT-style hash map (Double-Word CAS Lock-free Table).
+// DWHTMap is an experimental double-word-CAS hash table.
 //
-// The implementation uses open addressing, cache-line friendly slot groups, and per-slot
-// DWCAS state transitions. By using DWCAS, it can atomically publish both a control word
-// and an *entry pointer, completely eliminating the "busy" state found in OFHTMap.
+// It uses open addressing with linear probing. Each table slot is two machine
+// words: a control word and an entry pointer. The control word contains the
+// slot state, a short hash fingerprint, a version counter, and a frozen bit
+// used during resize.
 //
 // Concurrency model:
-//   - Loads are wait-free and read the entry pointer directly.
-//   - Writes reserve one slot with DWCAS, replacing the empty state with a full state
-//     and the new entry pointer in one atomic hardware instruction.
-//   - Grow freezes the old table slot-by-slot before copying. Writers that hit
-//     a frozen slot help resize and retry on the newly published table without a global lock.
-type DHLTMap[K comparable, V any] struct {
+//   - Loads read the control word and entry pointer directly from the current
+//     table. A full slot points to an immutable key/value entry.
+//   - Writes publish slot changes with DWCAS, atomically replacing both the
+//     control word and entry pointer. Updates allocate a new immutable entry
+//     and swap the slot to point at it.
+//   - Resize allocates a next table, cooperatively freezes old slots, copies
+//     frozen full slots by reusing their entry pointers, waits for all resize
+//     chunks to finish, then publishes the new table.
+//
+// Compared with OFHTMap, DWHTMap pays one heap object per live entry, but slot
+// publication is atomic and readers never observe a busy inline-update state.
+type DWHTMap[K comparable, V any] struct {
 	_        noCopy
 	table    atomic.Pointer[dhltTable[K, V]]
 	intKey   bool
@@ -117,18 +124,18 @@ const (
 	dhltStoreRetry
 )
 
-// NewDHLTMap creates an experimental DHLT-style map.
-func NewDHLTMap[K comparable, V any](options ...func(*MapConfig)) *DHLTMap[K, V] {
+// NewDWHTMap creates an experimental DWHT-style map.
+func NewDWHTMap[K comparable, V any](options ...func(*MapConfig)) *DWHTMap[K, V] {
 	var cfg MapConfig
 	for _, o := range options {
 		o(noEscape(&cfg))
 	}
-	m := &DHLTMap[K, V]{}
+	m := &DWHTMap[K, V]{}
 	m.init(noEscape(&cfg))
 	return m
 }
 
-func (m *DHLTMap[K, V]) init(cfg *MapConfig) {
+func (m *DWHTMap[K, V]) init(cfg *MapConfig) {
 	if cfg.keyHash == nil {
 		cfg.keyHash = parseKeyInterface[K]()
 	}
@@ -147,11 +154,11 @@ func (m *DHLTMap[K, V]) init(cfg *MapConfig) {
 
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = dhltCalcSlotLen(cfg.capacity)
-	m.table.Store(newDHLTTable[K, V](m.minLen))
+	m.table.Store(newDWHTTable[K, V](m.minLen))
 }
 
 // Load retrieves the value for a key.
-func (m *DHLTMap[K, V]) Load(key K) (value V, ok bool) {
+func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 	table := m.table.Load()
 	if table == nil {
 		return *new(V), false
@@ -195,7 +202,7 @@ func (m *DHLTMap[K, V]) Load(key K) (value V, ok bool) {
 }
 
 // Store sets the value for a key.
-func (m *DHLTMap[K, V]) Store(key K, value V) {
+func (m *DWHTMap[K, V]) Store(key K, value V) {
 	table := m.ensureTable()
 	// Inline hashKey()
 	var h1v uintptr
@@ -227,7 +234,7 @@ func (m *DHLTMap[K, V]) Store(key K, value V) {
 
 // LoadOrStore returns the existing value for the key if present. Otherwise it
 // stores and returns the given value.
-func (m *DHLTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	table := m.ensureTable()
 	// Inline hashKey()
 	var h1v uintptr
@@ -260,7 +267,7 @@ func (m *DHLTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 }
 
 // LoadAndUpdate retrieves the value for a key and updates it if the key exists.
-func (m *DHLTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
+func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
 	table := m.table.Load()
 	if table == nil {
 		return *new(V), false
@@ -293,7 +300,7 @@ func (m *DHLTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 }
 
 // Delete removes the value for a key.
-func (m *DHLTMap[K, V]) Delete(key K) {
+func (m *DWHTMap[K, V]) Delete(key K) {
 	table := m.table.Load()
 	if table == nil {
 		return
@@ -319,7 +326,7 @@ func (m *DHLTMap[K, V]) Delete(key K) {
 }
 
 // LoadAndDelete retrieves the value for a key and deletes it from the map.
-func (m *DHLTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
+func (m *DWHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	table := m.table.Load()
 	if table == nil {
 		return *new(V), false
@@ -345,7 +352,7 @@ func (m *DHLTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 }
 
 // CompareAndSwap atomically replaces an existing value with a new value.
-func (m *DHLTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
+func (m *DWHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	table := m.table.Load()
 	if table == nil {
 		return false
@@ -378,7 +385,7 @@ func (m *DHLTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 }
 
 // CompareAndDelete atomically deletes an existing entry.
-func (m *DHLTMap[K, V]) CompareAndDelete(key K, old V) bool {
+func (m *DWHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	table := m.table.Load()
 	if table == nil {
 		return false
@@ -410,7 +417,7 @@ func (m *DHLTMap[K, V]) CompareAndDelete(key K, old V) bool {
 }
 
 // Range iterates over a weakly consistent snapshot of the table.
-func (m *DHLTMap[K, V]) Range(yield func(K, V) bool) {
+func (m *DWHTMap[K, V]) Range(yield func(K, V) bool) {
 	table := m.table.Load()
 	if table == nil {
 		return
@@ -435,22 +442,22 @@ func (m *DHLTMap[K, V]) Range(yield func(K, V) bool) {
 // All returns an iterator function for use with range-over-func.
 //
 //go:nosplit
-func (m *DHLTMap[K, V]) All() func(yield func(K, V) bool) {
+func (m *DWHTMap[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
 // Size returns the approximate number of entries in the map.
-func (m *DHLTMap[K, V]) Size() int {
+func (m *DWHTMap[K, V]) Size() int {
 	return int(m.size.Value())
 }
 
-func (m *DHLTMap[K, V]) ensureTable() *dhltTable[K, V] {
+func (m *DWHTMap[K, V]) ensureTable() *dhltTable[K, V] {
 	table := m.table.Load()
 	if table != nil {
 		return table
 	}
 	// Lock-free init
-	newTab := newDHLTTable[K, V](m.minLen)
+	newTab := newDWHTTable[K, V](m.minLen)
 	if m.table.CompareAndSwap(nil, newTab) {
 		return newTab
 	}
@@ -458,7 +465,7 @@ func (m *DHLTMap[K, V]) ensureTable() *dhltTable[K, V] {
 }
 
 // //go:nosplit
-// func (m *DHLTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
+// func (m *DWHTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
 // 	if dhltEnableIntKey {
 // 		if m.intKey {
 // 			h1v := intHash[K](noescape(unsafe.Pointer(key)))
@@ -469,7 +476,7 @@ func (m *DHLTMap[K, V]) ensureTable() *dhltTable[K, V] {
 // 	return h1v >> 16, uint16(h1v)
 // }
 
-func (m *DHLTMap[K, V]) storeInto(
+func (m *DWHTMap[K, V]) storeInto(
 	table *dhltTable[K, V],
 	key *K,
 	val *V,
@@ -557,7 +564,7 @@ func (m *DHLTMap[K, V]) storeInto(
 	return dhltStoreFull, *new(V), false
 }
 
-func (m *DHLTMap[K, V]) claimSlot(
+func (m *DWHTMap[K, V]) claimSlot(
 	slot *[2]uintptr,
 	ctrl uintptr,
 	entry uintptr,
@@ -580,7 +587,7 @@ func (m *DHLTMap[K, V]) claimSlot(
 	return dhltStoreOK, *val, false
 }
 
-func (m *DHLTMap[K, V]) loadAndUpdateIn(
+func (m *DWHTMap[K, V]) loadAndUpdateIn(
 	table *dhltTable[K, V],
 	key *K,
 	val *V,
@@ -628,7 +635,7 @@ func (m *DHLTMap[K, V]) loadAndUpdateIn(
 	return dhltStoreOK, *new(V), false
 }
 
-func (m *DHLTMap[K, V]) deleteFrom(
+func (m *DWHTMap[K, V]) deleteFrom(
 	table *dhltTable[K, V],
 	key *K,
 	h1v uintptr,
@@ -682,7 +689,7 @@ func (m *DHLTMap[K, V]) deleteFrom(
 	return dhltStoreOK, *new(V), false
 }
 
-func (m *DHLTMap[K, V]) compareAndSwapIn(
+func (m *DWHTMap[K, V]) compareAndSwapIn(
 	table *dhltTable[K, V],
 	key *K,
 	old *V,
@@ -735,7 +742,7 @@ func (m *DHLTMap[K, V]) compareAndSwapIn(
 	return dhltStoreOK, false
 }
 
-func (m *DHLTMap[K, V]) compareAndDeleteIn(
+func (m *DWHTMap[K, V]) compareAndDeleteIn(
 	table *dhltTable[K, V],
 	key *K,
 	old *V,
@@ -788,7 +795,7 @@ func (m *DHLTMap[K, V]) compareAndDeleteIn(
 	return dhltStoreOK, false
 }
 
-func (m *DHLTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
+func (m *DWHTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
 	localSize := int(m.size.Get().Load())
 	if localSize&dhltGrowCheckMask == 0 {
 		if localSize >= table.stripeCap {
@@ -799,7 +806,7 @@ func (m *DHLTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
 	}
 }
 
-func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
+func (m *DWHTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 	if m.table.Load() != old {
 		return
 	}
@@ -820,7 +827,7 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				newLen = neededLen
 			}
 
-			newTable := newDHLTTable[K, V](newLen)
+			newTable := newDWHTTable[K, V](newLen)
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
@@ -909,7 +916,7 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				break
 			}
 			// if !copied {
-			// 	panic("cc: DHLTMap grow produced a full table")
+			// 	panic("cc: DWHTMap grow produced a full table")
 			// }
 		}
 		old.copyDone.Add(1)
@@ -922,7 +929,7 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 	m.table.CompareAndSwap(old, next)
 }
 
-func (m *DHLTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] {
+func (m *DWHTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] {
 	for {
 		table := m.table.Load()
 		if table != old {
@@ -932,7 +939,7 @@ func (m *DHLTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] 
 	}
 }
 
-func newDHLTTable[K comparable, V any](slotLen uintptr) *dhltTable[K, V] {
+func newDWHTTable[K comparable, V any](slotLen uintptr) *dhltTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dhltMinSlots))
 	raw := make([]unsafe.Pointer, int(slotLen)*len(dhltSlotWords{})+1)
 	base := unsafe.Pointer(&raw[0])

@@ -19,7 +19,7 @@ var writeBarrier struct {
 // DWCAS atomically compares the 16-byte slot at ptr with (old1, old2).
 // On success it publishes (new1, new2). ptr must be 16-byte aligned.
 //
-// The second word is a Go pointer in DHLTMap slots, so the wrapper performs
+// The second word is a Go pointer in DWHTMap slots, so the wrapper performs
 // the runtime atomic write barrier before the raw assembly CAS.
 //
 //go:nosplit
