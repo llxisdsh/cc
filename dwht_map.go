@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	dhltEnableIntKey   = true
-	dhltEnableDedupVal = true
+	dwhtEnableIntKey   = true
+	dwhtEnableDedupVal = true
 )
 
 // DWHTMap is an experimental double-word-CAS hash table.
@@ -38,7 +38,7 @@ const (
 // publication is atomic and readers never observe a busy inline-update state.
 type DWHTMap[K comparable, V any] struct {
 	_        noCopy
-	table    atomic.Pointer[dhltTable[K, V]]
+	table    atomic.Pointer[dwhtTable[K, V]]
 	intKey   bool
 	seed     uintptr
 	keyHash  HashFunc
@@ -47,81 +47,82 @@ type DWHTMap[K comparable, V any] struct {
 	size     PLocalCounter
 }
 
-type dhltTable[K comparable, V any] struct {
+type dwhtTable[K comparable, V any] struct {
 	slotsBase  unsafe.Pointer
 	mask       uintptr
 	stripeCap  int
 	growCap    uintptr
-	nextTable  atomic.Pointer[dhltTable[K, V]]
+	nextTable  atomic.Pointer[dwhtTable[K, V]]
 	allocating atomic.Uint32    // 0: no one is allocating, 1: allocating
 	copyIdx    atomic.Uint32    // Next chunk index for cooperative resize
 	copyDone   atomic.Uint32    // Number of resize chunks completed
 	slotsRaw   []unsafe.Pointer // kept to prevent GC collection of the underlying array
 }
 
-type dhltEntry[K comparable, V any] struct {
+type dwhtEntry[K comparable, V any] struct {
 	key K
 	val V
 }
 
-type dhltSlotWords [2]uintptr
+type dwhtSlotWords [2]uintptr
 
-const dhltSlotBytes = unsafe.Sizeof(dhltSlotWords{})
+const dwhtSlotBytes = unsafe.Sizeof(dwhtSlotWords{})
 
 // var (
-// 	_ [16 - dhltSlotBytes]byte
-// 	_ [dhltSlotBytes - 16]byte
+// 	_ [16 - dwhtSlotBytes]byte
+// 	_ [dwhtSlotBytes - 16]byte
 // )
 
 //go:nosplit
-func (t *dhltTable[K, V]) slot(i uintptr) *[2]uintptr {
-	return (*[2]uintptr)(unsafe.Add(t.slotsBase, i*dhltSlotBytes))
+func (t *dwhtTable[K, V]) slot(i uintptr) *[2]uintptr {
+	return (*[2]uintptr)(unsafe.Add(t.slotsBase, i*dwhtSlotBytes))
 }
 
 const (
-	// dhltNotPtr is always set on non-empty ctrl words to prevent GC from
+	// dwhtNotPtr is always set on non-empty ctrl words to prevent GC from
 	// treating the ctrl word as a valid pointer, saving scan time.
-	dhltNotPtr = uint64(1)
+	dwhtNotPtr = uint64(1)
 
-	dhltStateMask    = uint64(0x3) << 1
-	dhltStateEmpty   = uint64(0) << 1
-	dhltStateFull    = uint64(1) << 1
-	dhltStateDeleted = uint64(2) << 1
+	dwhtStateMask    = uint64(0x3) << 1
+	dwhtStateEmpty   = uint64(0) << 1
+	dwhtStateFull    = uint64(1) << 1
+	dwhtStateDeleted = uint64(2) << 1
 
-	dhltH2Shift = 3
-	dhltH2Mask  = uint64(0xFFFF)
+	dwhtH2Shift = 3
+	dwhtH2Mask  = uint64(0xFFFF)
 
-	dhltSeqShift = 19
-	dhltSeqInc   = uint64(1) << dhltSeqShift
+	dwhtSeqShift = 19
+	dwhtSeqInc   = uint64(1) << dwhtSeqShift
 
-	dhltFrozen = uint64(1) << 63
+	dwhtFrozen = uint64(1) << 63
 )
 
 const (
-	dhltMinSlots   = 64
-	dhltLoadFactor = 0.625
+	dwhtMinSlots   = 64
+	dwhtLoadFactor = 0.625
 
-	// dhltMaxProbeThreshold is the threshold of linear probing depth.
+	// dwhtMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	dhltMaxProbeThreshold = 64
+	dwhtMaxProbeThreshold = 64
 
-	// dhltGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
+	// dwhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
 	// It MUST be strictly smaller than the initial grow threshold.
-	// Since dhltMinSlots is 64 and the grow factor is 3/4, the first grow
-	// happens at 48. If this mask is too large (e.g., 63), the table could fill up
-	// completely without triggering a resize in highly concurrent cold starts.
-	dhltGrowCheckMask = 7 // Checks every 8th local insert
+	// Since dwhtMinSlots is 64 and dwhtLoadFactor is 0.625, the first grow
+	// happens at 40 entries. If this mask is too large, the table could fill up
+	// or hit the probe threshold before sampling the global size in highly
+	// concurrent cold starts.
+	dwhtGrowCheckMask = 7 // Checks every 8th local insert
 )
 
-type dhltStoreStatus uint8
+type dwhtStoreStatus uint8
 
 const (
-	dhltStoreOK dhltStoreStatus = iota
-	dhltStoreFrozen
-	dhltStoreFull
-	dhltStoreRetry
+	dwhtStoreOK dwhtStoreStatus = iota
+	dwhtStoreFrozen
+	dwhtStoreFull
+	dwhtStoreRetry
 )
 
 // NewDWHTMap creates an experimental DWHT-style map.
@@ -153,7 +154,7 @@ func (m *DWHTMap[K, V]) init(cfg *MapConfig) {
 	}
 
 	m.seed = uintptr(rand.Uint64())
-	m.minLen = dhltCalcSlotLen(cfg.capacity)
+	m.minLen = dwhtCalcSlotLen(cfg.capacity)
 	m.table.Store(newDWHTTable[K, V](m.minLen))
 }
 
@@ -166,7 +167,7 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -174,25 +175,25 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 		h2v = uint16(h1v)
 		h1v >>= 16
 	}
-	start := dhltStart(h1v, table.mask)
+	start := dwhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dhltMaxProbeThreshold {
+		if probe > dwhtMaxProbeThreshold {
 			return *new(V), false
 		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		switch dhltCtrlState(uint64(ctrl)) {
-		case dhltStateEmpty:
+		switch dwhtCtrlState(uint64(ctrl)) {
+		case dwhtStateEmpty:
 			return *new(V), false
-		case dhltStateFull:
-			if dhltCtrlH2(uint64(ctrl)) != h2v {
+		case dwhtStateFull:
+			if dwhtCtrlH2(uint64(ctrl)) != h2v {
 				continue
 			}
 			entryPtr := atomic.LoadUintptr(&slot[1])
 			if entryPtr == 0 {
 				continue
 			}
-			entry := (*dhltEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
+			entry := (*dwhtEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
 			if entry.key == key {
 				return entry.val, true
 			}
@@ -207,7 +208,7 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -218,15 +219,15 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 	for {
 		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, false)
 		switch status {
-		case dhltStoreOK:
+		case dwhtStoreOK:
 			m.growIfNeeded(table)
 			return
-		case dhltStoreFrozen:
+		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
-		case dhltStoreFull:
+		case dwhtStoreFull:
 			m.tryGrow(table, (table.mask+1)<<1)
 			table = m.ensureTable()
-		case dhltStoreRetry:
+		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
 	}
@@ -239,7 +240,7 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -250,17 +251,17 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	for {
 		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, true)
 		switch status {
-		case dhltStoreOK:
+		case dwhtStoreOK:
 			if !loaded {
 				m.growIfNeeded(table)
 			}
 			return actual, loaded
-		case dhltStoreFrozen:
+		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
-		case dhltStoreFull:
+		case dwhtStoreFull:
 			m.tryGrow(table, (table.mask+1)<<1)
 			table = m.ensureTable()
-		case dhltStoreRetry:
+		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
 	}
@@ -275,7 +276,7 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -286,14 +287,14 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 	for {
 		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h1v, h2v)
 		switch status {
-		case dhltStoreOK:
+		case dwhtStoreOK:
 			return prev, loaded
-		case dhltStoreFrozen:
+		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
-		case dhltStoreFull:
+		case dwhtStoreFull:
 			m.tryGrow(table, (table.mask+1)<<1)
 			table = m.ensureTable()
-		case dhltStoreRetry:
+		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
 	}
@@ -308,7 +309,7 @@ func (m *DWHTMap[K, V]) Delete(key K) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -318,7 +319,7 @@ func (m *DWHTMap[K, V]) Delete(key K) {
 	}
 	for {
 		status, _, _ := m.deleteFrom(table, noEscape(&key), h1v, h2v, false)
-		if status == dhltStoreOK {
+		if status == dwhtStoreOK {
 			return
 		}
 		table = m.afterFrozenTable(table)
@@ -334,7 +335,7 @@ func (m *DWHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -344,7 +345,7 @@ func (m *DWHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	}
 	for {
 		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h1v, h2v, true)
-		if status == dhltStoreOK {
+		if status == dwhtStoreOK {
 			return prev, loaded
 		}
 		table = m.afterFrozenTable(table)
@@ -360,7 +361,7 @@ func (m *DWHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -377,7 +378,7 @@ func (m *DWHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			h1v,
 			h2v,
 		)
-		if status == dhltStoreOK {
+		if status == dwhtStoreOK {
 			return swapped
 		}
 		table = m.afterFrozenTable(table)
@@ -393,7 +394,7 @@ func (m *DWHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if dwhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -409,7 +410,7 @@ func (m *DWHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 			h1v,
 			h2v,
 		)
-		if status == dhltStoreOK {
+		if status == dwhtStoreOK {
 			return deleted
 		}
 		table = m.afterFrozenTable(table)
@@ -425,14 +426,14 @@ func (m *DWHTMap[K, V]) Range(yield func(K, V) bool) {
 	for i := uintptr(0); i <= table.mask; i++ {
 		slot := table.slot(i)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		if dhltCtrlState(uint64(ctrl)) != dhltStateFull {
+		if dwhtCtrlState(uint64(ctrl)) != dwhtStateFull {
 			continue
 		}
 		entryPtr := atomic.LoadUintptr(&slot[1])
 		if entryPtr == 0 {
 			continue
 		}
-		entry := (*dhltEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
+		entry := (*dwhtEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
 		if !yield(entry.key, entry.val) {
 			return
 		}
@@ -451,7 +452,7 @@ func (m *DWHTMap[K, V]) Size() int {
 	return int(m.size.Value())
 }
 
-func (m *DWHTMap[K, V]) ensureTable() *dhltTable[K, V] {
+func (m *DWHTMap[K, V]) ensureTable() *dwhtTable[K, V] {
 	table := m.table.Load()
 	if table != nil {
 		return table
@@ -466,7 +467,7 @@ func (m *DWHTMap[K, V]) ensureTable() *dhltTable[K, V] {
 
 // //go:nosplit
 // func (m *DWHTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
-// 	if dhltEnableIntKey {
+// 	if dwhtEnableIntKey {
 // 		if m.intKey {
 // 			h1v := intHash[K](noescape(unsafe.Pointer(key)))
 // 			return h1v, uint16(h1v ^ (h1v >> 16))
@@ -477,91 +478,91 @@ func (m *DWHTMap[K, V]) ensureTable() *dhltTable[K, V] {
 // }
 
 func (m *DWHTMap[K, V]) storeInto(
-	table *dhltTable[K, V],
+	table *dwhtTable[K, V],
 	key *K,
 	val *V,
 	h1v uintptr,
 	h2v uint16,
 	onlyIfAbsent bool,
-) (dhltStoreStatus, V, bool) {
+) (dwhtStoreStatus, V, bool) {
 	var (
 		deleted   *[2]uintptr
 		deletedC  uintptr
 		deletedE  uintptr
 		deletedOK bool
-		newEntry  *dhltEntry[K, V]
+		newEntry  *dwhtEntry[K, V]
 	)
-	start := dhltStart(h1v, table.mask)
+	start := dwhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dhltMaxProbeThreshold {
-			return dhltStoreFull, *new(V), false
+		if probe > dwhtMaxProbeThreshold {
+			return dwhtStoreFull, *new(V), false
 		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dhltFrozen != 0 {
-			return dhltStoreFrozen, *new(V), false
+		if uint64(ctrl)&dwhtFrozen != 0 {
+			return dwhtStoreFrozen, *new(V), false
 		}
 
 		entry := atomic.LoadUintptr(&slot[1])
 
-		switch dhltCtrlState(uint64(ctrl)) {
-		case dhltStateFull:
-			if dhltCtrlH2(uint64(ctrl)) != h2v {
+		switch dwhtCtrlState(uint64(ctrl)) {
+		case dwhtStateFull:
+			if dwhtCtrlH2(uint64(ctrl)) != h2v {
 				continue
 			}
 			if entry == 0 {
 				continue
 			}
-			e := (*dhltEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
 			if e.key != *key {
 				continue
 			}
 			if onlyIfAbsent {
-				return dhltStoreOK, e.val, true
+				return dwhtStoreOK, e.val, true
 			}
-			if dhltEnableDedupVal {
+			if dwhtEnableDedupVal {
 				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
-					return dhltStoreOK, e.val, true
+					return dwhtStoreOK, e.val, true
 				}
 			}
 
 			if newEntry == nil {
-				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
-			newCtrl := dhltCtrlUpdate(uint64(ctrl))
+			newCtrl := dwhtCtrlUpdate(uint64(ctrl))
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
-			return dhltStoreOK, *val, true
-		case dhltStateDeleted:
+			return dwhtStoreOK, *val, true
+		case dwhtStateDeleted:
 			if !deletedOK {
 				deleted, deletedC, deletedE, deletedOK = slot, ctrl, entry, true
 			}
-		case dhltStateEmpty:
+		case dwhtStateEmpty:
 			if deletedOK {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h2v, newEntry)
-				if status == dhltStoreRetry {
-					return dhltStoreRetry, *new(V), false
+				if status == dwhtStoreRetry {
+					return dwhtStoreRetry, *new(V), false
 				}
 				return status, rVal, loaded
 			}
 			if newEntry == nil {
-				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
-			newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
+			newCtrl := dwhtCtrlInsert(uint64(ctrl), h2v)
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
 			m.size.Add(1)
-			return dhltStoreOK, *val, false
+			return dwhtStoreOK, *val, false
 		}
 	}
 	if deletedOK {
 		return m.claimSlot(deleted, deletedC, deletedE, key, val, h2v, newEntry)
 	}
-	return dhltStoreFull, *new(V), false
+	return dwhtStoreFull, *new(V), false
 }
 
 func (m *DWHTMap[K, V]) claimSlot(
@@ -571,106 +572,106 @@ func (m *DWHTMap[K, V]) claimSlot(
 	key *K,
 	val *V,
 	h2v uint16,
-	newEntry *dhltEntry[K, V],
-) (dhltStoreStatus, V, bool) {
-	if uint64(ctrl)&dhltFrozen != 0 {
-		return dhltStoreFrozen, *new(V), false
+	newEntry *dwhtEntry[K, V],
+) (dwhtStoreStatus, V, bool) {
+	if uint64(ctrl)&dwhtFrozen != 0 {
+		return dwhtStoreFrozen, *new(V), false
 	}
 	if newEntry == nil {
-		newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+		newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 	}
-	newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
+	newCtrl := dwhtCtrlInsert(uint64(ctrl), h2v)
 	if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
-		return dhltStoreRetry, *new(V), false
+		return dwhtStoreRetry, *new(V), false
 	}
 	m.size.Add(1)
-	return dhltStoreOK, *val, false
+	return dwhtStoreOK, *val, false
 }
 
 func (m *DWHTMap[K, V]) loadAndUpdateIn(
-	table *dhltTable[K, V],
+	table *dwhtTable[K, V],
 	key *K,
 	val *V,
 	h1v uintptr,
 	h2v uint16,
-) (dhltStoreStatus, V, bool) {
-	var newEntry *dhltEntry[K, V]
-	start := dhltStart(h1v, table.mask)
+) (dwhtStoreStatus, V, bool) {
+	var newEntry *dwhtEntry[K, V]
+	start := dwhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dhltMaxProbeThreshold {
-			return dhltStoreFull, *new(V), false
+		if probe > dwhtMaxProbeThreshold {
+			return dwhtStoreFull, *new(V), false
 		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dhltFrozen != 0 {
-			return dhltStoreFrozen, *new(V), false
+		if uint64(ctrl)&dwhtFrozen != 0 {
+			return dwhtStoreFrozen, *new(V), false
 		}
 		entry := atomic.LoadUintptr(&slot[1])
 
-		switch dhltCtrlState(uint64(ctrl)) {
-		case dhltStateEmpty:
-			return dhltStoreOK, *new(V), false
-		case dhltStateFull:
-			if dhltCtrlH2(uint64(ctrl)) != h2v {
+		switch dwhtCtrlState(uint64(ctrl)) {
+		case dwhtStateEmpty:
+			return dwhtStoreOK, *new(V), false
+		case dwhtStateFull:
+			if dwhtCtrlH2(uint64(ctrl)) != h2v {
 				continue
 			}
 			if entry == 0 {
 				continue
 			}
-			e := (*dhltEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
 			if e.key != *key {
 				continue
 			}
 			if newEntry == nil {
-				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
-			newCtrl := dhltCtrlUpdate(uint64(ctrl))
+			newCtrl := dwhtCtrlUpdate(uint64(ctrl))
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
-			return dhltStoreOK, e.val, true
+			return dwhtStoreOK, e.val, true
 		}
 	}
-	return dhltStoreOK, *new(V), false
+	return dwhtStoreOK, *new(V), false
 }
 
 func (m *DWHTMap[K, V]) deleteFrom(
-	table *dhltTable[K, V],
+	table *dwhtTable[K, V],
 	key *K,
 	h1v uintptr,
 	h2v uint16,
 	needValue bool,
-) (dhltStoreStatus, V, bool) {
-	start := dhltStart(h1v, table.mask)
+) (dwhtStoreStatus, V, bool) {
+	start := dwhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dhltMaxProbeThreshold {
-			return dhltStoreFull, *new(V), false
+		if probe > dwhtMaxProbeThreshold {
+			return dwhtStoreFull, *new(V), false
 		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dhltFrozen != 0 {
-			return dhltStoreFrozen, *new(V), false
+		if uint64(ctrl)&dwhtFrozen != 0 {
+			return dwhtStoreFrozen, *new(V), false
 		}
 
 		entry := atomic.LoadUintptr(&slot[1])
 
-		switch dhltCtrlState(uint64(ctrl)) {
-		case dhltStateEmpty:
-			return dhltStoreOK, *new(V), false
-		case dhltStateFull:
-			if dhltCtrlH2(uint64(ctrl)) != h2v {
+		switch dwhtCtrlState(uint64(ctrl)) {
+		case dwhtStateEmpty:
+			return dwhtStoreOK, *new(V), false
+		case dwhtStateFull:
+			if dwhtCtrlH2(uint64(ctrl)) != h2v {
 				continue
 			}
 			if entry == 0 {
 				continue
 			}
-			e := (*dhltEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
 			if e.key != *key {
 				continue
 			}
 
-			newCtrl := dhltCtrlDelete(uint64(ctrl))
+			newCtrl := dwhtCtrlDelete(uint64(ctrl))
 			// We can nil the entry to help GC, or keep it to allow lock-free readers to finish
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
 				probe--
@@ -683,43 +684,43 @@ func (m *DWHTMap[K, V]) deleteFrom(
 			}
 
 			m.size.Add(^uintptr(0))
-			return dhltStoreOK, prev, true
+			return dwhtStoreOK, prev, true
 		}
 	}
-	return dhltStoreOK, *new(V), false
+	return dwhtStoreOK, *new(V), false
 }
 
 func (m *DWHTMap[K, V]) compareAndSwapIn(
-	table *dhltTable[K, V],
+	table *dwhtTable[K, V],
 	key *K,
 	old *V,
 	newVal *V,
 	h1v uintptr,
 	h2v uint16,
-) (dhltStoreStatus, bool) {
-	start := dhltStart(h1v, table.mask)
+) (dwhtStoreStatus, bool) {
+	start := dwhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dhltMaxProbeThreshold {
-			return dhltStoreFull, false
+		if probe > dwhtMaxProbeThreshold {
+			return dwhtStoreFull, false
 		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dhltFrozen != 0 {
-			return dhltStoreFrozen, false
+		if uint64(ctrl)&dwhtFrozen != 0 {
+			return dwhtStoreFrozen, false
 		}
 		entry := atomic.LoadUintptr(&slot[1])
 
-		switch dhltCtrlState(uint64(ctrl)) {
-		case dhltStateEmpty:
-			return dhltStoreOK, false
-		case dhltStateFull:
-			if dhltCtrlH2(uint64(ctrl)) != h2v {
+		switch dwhtCtrlState(uint64(ctrl)) {
+		case dwhtStateEmpty:
+			return dwhtStoreOK, false
+		case dwhtStateFull:
+			if dwhtCtrlH2(uint64(ctrl)) != h2v {
 				continue
 			}
 			if entry == 0 {
 				continue
 			}
-			e := (*dhltEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
 			if e.key != *key {
 				continue
 			}
@@ -727,51 +728,51 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 				panic("cc: value is not comparable; use WithValueEqual")
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
-				return dhltStoreOK, false
+				return dwhtStoreOK, false
 			}
 
-			newEntry := &dhltEntry[K, V]{key: *key, val: *newVal}
-			newCtrl := dhltCtrlUpdate(uint64(ctrl))
+			newEntry := &dwhtEntry[K, V]{key: *key, val: *newVal}
+			newCtrl := dwhtCtrlUpdate(uint64(ctrl))
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
-			return dhltStoreOK, true
+			return dwhtStoreOK, true
 		}
 	}
-	return dhltStoreOK, false
+	return dwhtStoreOK, false
 }
 
 func (m *DWHTMap[K, V]) compareAndDeleteIn(
-	table *dhltTable[K, V],
+	table *dwhtTable[K, V],
 	key *K,
 	old *V,
 	h1v uintptr,
 	h2v uint16,
-) (dhltStoreStatus, bool) {
-	start := dhltStart(h1v, table.mask)
+) (dwhtStoreStatus, bool) {
+	start := dwhtStart(h1v, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dhltMaxProbeThreshold {
-			return dhltStoreFull, false
+		if probe > dwhtMaxProbeThreshold {
+			return dwhtStoreFull, false
 		}
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dhltFrozen != 0 {
-			return dhltStoreFrozen, false
+		if uint64(ctrl)&dwhtFrozen != 0 {
+			return dwhtStoreFrozen, false
 		}
 		entry := atomic.LoadUintptr(&slot[1])
 
-		switch dhltCtrlState(uint64(ctrl)) {
-		case dhltStateEmpty:
-			return dhltStoreOK, false
-		case dhltStateFull:
-			if dhltCtrlH2(uint64(ctrl)) != h2v {
+		switch dwhtCtrlState(uint64(ctrl)) {
+		case dwhtStateEmpty:
+			return dwhtStoreOK, false
+		case dwhtStateFull:
+			if dwhtCtrlH2(uint64(ctrl)) != h2v {
 				continue
 			}
 			if entry == 0 {
 				continue
 			}
-			e := (*dhltEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
 			if e.key != *key {
 				continue
 			}
@@ -779,25 +780,25 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 				panic("cc: value is not comparable; use WithValueEqual")
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
-				return dhltStoreOK, false
+				return dwhtStoreOK, false
 			}
 
-			newCtrl := dhltCtrlDelete(uint64(ctrl))
+			newCtrl := dwhtCtrlDelete(uint64(ctrl))
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
 				probe--
 				continue
 			}
 
 			m.size.Add(^uintptr(0))
-			return dhltStoreOK, true
+			return dwhtStoreOK, true
 		}
 	}
-	return dhltStoreOK, false
+	return dwhtStoreOK, false
 }
 
-func (m *DWHTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
+func (m *DWHTMap[K, V]) growIfNeeded(table *dwhtTable[K, V]) {
 	localSize := int(m.size.Get().Load())
-	if localSize&dhltGrowCheckMask == 0 {
+	if localSize&dwhtGrowCheckMask == 0 {
 		if localSize >= table.stripeCap {
 			if m.size.Value() >= table.growCap {
 				m.tryGrow(table, (table.mask+1)<<1)
@@ -806,7 +807,7 @@ func (m *DWHTMap[K, V]) growIfNeeded(table *dhltTable[K, V]) {
 	}
 }
 
-func (m *DWHTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
+func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V], newLen uintptr) {
 	if m.table.Load() != old {
 		return
 	}
@@ -822,7 +823,7 @@ func (m *DWHTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 
 			// NOTE: We MUST ensure the new table has enough capacity!
 			neededSize := int(m.size.Value()) * 2 // Roughly double the current size
-			neededLen := dhltCalcSlotLen(uintptr(neededSize))
+			neededLen := dwhtCalcSlotLen(uintptr(neededSize))
 			if neededLen > newLen {
 				newLen = neededLen
 			}
@@ -866,30 +867,30 @@ func (m *DWHTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 			var entry uintptr
 			for {
 				ctrl = atomic.LoadUintptr(&slot[0])
-				if uint64(ctrl)&dhltFrozen != 0 {
+				if uint64(ctrl)&dwhtFrozen != 0 {
 					entry = atomic.LoadUintptr(&slot[1])
 					break
 				}
 				entry = atomic.LoadUintptr(&slot[1])
-				if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(uint64(ctrl)|dhltFrozen), unsafe.Pointer(entry)) { //nolint:all
+				if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(uint64(ctrl)|dwhtFrozen), unsafe.Pointer(entry)) { //nolint:all
 					continue
 				}
-				ctrl = uintptr(uint64(ctrl) | dhltFrozen)
+				ctrl = uintptr(uint64(ctrl) | dwhtFrozen)
 				break
 			}
 
-			if dhltCtrlState(uint64(ctrl)) != dhltStateFull {
+			if dwhtCtrlState(uint64(ctrl)) != dwhtStateFull {
 				continue
 			}
 			entryPtr := entry
 			if entryPtr == 0 {
 				continue
 			}
-			e := (*dhltEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
+			e := (*dwhtEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
 			// Inline hashKey()
 			var h1v uintptr
 			var h2v uint16
-			if dhltEnableIntKey && m.intKey {
+			if dwhtEnableIntKey && m.intKey {
 				h1v = intHash[K](noescape(unsafe.Pointer(&e.key)))
 				h2v = uint16(h1v ^ (h1v >> 16))
 			} else {
@@ -898,16 +899,16 @@ func (m *DWHTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				h1v >>= 16
 			}
 
-			destStart := dhltStart(h1v, next.mask)
+			destStart := dwhtStart(h1v, next.mask)
 			// copied := false
 			for probe := uintptr(0); probe <= next.mask; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
 				destCtrl := atomic.LoadUintptr(&destSlot[0])
-				if dhltCtrlState(uint64(destCtrl)) != dhltStateEmpty {
+				if dwhtCtrlState(uint64(destCtrl)) != dwhtStateEmpty {
 					continue
 				}
 				destEntry := atomic.LoadUintptr(&destSlot[1])
-				newCtrl := dhltCtrlInsert(uint64(destCtrl), h2v)
+				newCtrl := dwhtCtrlInsert(uint64(destCtrl), h2v)
 				if !asm.DWCAS(unsafe.Pointer(destSlot), destCtrl, unsafe.Pointer(destEntry), uintptr(newCtrl), unsafe.Pointer(entryPtr)) { //nolint:all
 					probe--
 					continue
@@ -929,7 +930,7 @@ func (m *DWHTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 	m.table.CompareAndSwap(old, next)
 }
 
-func (m *DWHTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] {
+func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 	for {
 		table := m.table.Load()
 		if table != old {
@@ -939,16 +940,16 @@ func (m *DWHTMap[K, V]) afterFrozenTable(old *dhltTable[K, V]) *dhltTable[K, V] 
 	}
 }
 
-func newDWHTTable[K comparable, V any](slotLen uintptr) *dhltTable[K, V] {
-	slotLen = nextPowOf2(max(slotLen, dhltMinSlots))
-	raw := make([]unsafe.Pointer, int(slotLen)*len(dhltSlotWords{})+1)
+func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
+	slotLen = nextPowOf2(max(slotLen, dwhtMinSlots))
+	raw := make([]unsafe.Pointer, int(slotLen)*len(dwhtSlotWords{})+1)
 	base := unsafe.Pointer(&raw[0])
 	if uintptr(base)%16 != 0 {
 		base = unsafe.Pointer(&raw[1])
 	}
-	growCap := uintptr(float64(slotLen) * dhltLoadFactor)
+	growCap := uintptr(float64(slotLen) * dwhtLoadFactor)
 	roundedSizeLen := nextPowOf2(maxProcs())
-	return &dhltTable[K, V]{
+	return &dwhtTable[K, V]{
 		slotsBase: base,
 		slotsRaw:  raw,
 		mask:      slotLen - 1,
@@ -957,43 +958,43 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dhltTable[K, V] {
 	}
 }
 
-func dhltCalcSlotLen(capacity uintptr) uintptr {
+func dwhtCalcSlotLen(capacity uintptr) uintptr {
 	if capacity == 0 {
-		return dhltMinSlots
+		return dwhtMinSlots
 	}
-	const invLoadFactor = 1 / dhltLoadFactor
+	const invLoadFactor = 1 / dwhtLoadFactor
 	need := uintptr(float64(capacity+1) * invLoadFactor)
-	return nextPowOf2(max(need, dhltMinSlots))
+	return nextPowOf2(max(need, dwhtMinSlots))
 }
 
 //go:nosplit
-func dhltStart(h1v, mask uintptr) uintptr {
+func dwhtStart(h1v, mask uintptr) uintptr {
 	return h1v & mask
 }
 
 //go:nosplit
-func dhltCtrlState(ctrl uint64) uint64 {
-	return ctrl & dhltStateMask
+func dwhtCtrlState(ctrl uint64) uint64 {
+	return ctrl & dwhtStateMask
 }
 
 //go:nosplit
-func dhltCtrlH2(ctrl uint64) uint16 {
-	return uint16(ctrl >> dhltH2Shift)
+func dwhtCtrlH2(ctrl uint64) uint16 {
+	return uint16(ctrl >> dwhtH2Shift)
 }
 
 //go:nosplit
-func dhltCtrlInsert(ctrl uint64, h2v uint16) uint64 {
-	c := (ctrl &^ dhltStateMask) | dhltStateFull | dhltNotPtr
-	c = (c &^ (dhltH2Mask << dhltH2Shift)) | (uint64(h2v) << dhltH2Shift)
-	return c + dhltSeqInc
+func dwhtCtrlInsert(ctrl uint64, h2v uint16) uint64 {
+	c := (ctrl &^ dwhtStateMask) | dwhtStateFull | dwhtNotPtr
+	c = (c &^ (dwhtH2Mask << dwhtH2Shift)) | (uint64(h2v) << dwhtH2Shift)
+	return c + dwhtSeqInc
 }
 
 //go:nosplit
-func dhltCtrlUpdate(ctrl uint64) uint64 {
-	return (ctrl+dhltSeqInc)&^dhltStateMask | dhltStateFull | dhltNotPtr
+func dwhtCtrlUpdate(ctrl uint64) uint64 {
+	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateFull | dwhtNotPtr
 }
 
 //go:nosplit
-func dhltCtrlDelete(ctrl uint64) uint64 {
-	return (ctrl+dhltSeqInc)&^dhltStateMask | dhltStateDeleted | dhltNotPtr
+func dwhtCtrlDelete(ctrl uint64) uint64 {
+	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateDeleted | dwhtNotPtr
 }

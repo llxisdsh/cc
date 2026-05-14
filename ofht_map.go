@@ -90,9 +90,10 @@ const (
 	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
 	// It MUST be strictly smaller than the initial grow threshold.
-	// Since ofhtMinSlots is 64 and the grow factor is 3/4, the first grow
-	// happens at 48. If this mask is too large (e.g., 63), the table could fill up
-	// completely without triggering a resize in highly concurrent cold starts.
+	// Since ofhtMinSlots is 64 and ofhtLoadFactor is 0.625, the first grow
+	// happens at 40 entries. If this mask is too large, the table could fill up
+	// or hit the probe threshold before sampling the global size in highly
+	// concurrent cold starts.
 	ofhtGrowCheckMask = 7 // Checks every 8th local insert
 )
 
