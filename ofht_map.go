@@ -1,3 +1,5 @@
+//go:build !race
+
 package cc
 
 import (
@@ -54,10 +56,8 @@ type ofhtTable[K comparable, V any] struct {
 	growCap    uintptr
 	nextTable  atomic.Pointer[ofhtTable[K, V]]
 	allocating atomic.Uint32 // 0: no one is allocating, 1: allocating
-	freezeIdx  atomic.Uint32 // Next chunk index for cooperative resizing (Phase 1: freeze)
-	frozenDone atomic.Uint32 // Number of freeze chunks completed
-	copyIdx    atomic.Uint32 // Next chunk index for cooperative resizing (Phase 2: copy)
-	copyDone   atomic.Uint32 // Number of copy chunks completed
+	copyIdx    atomic.Uint32 // Next chunk index for cooperative resize
+	copyDone   atomic.Uint32 // Number of resize chunks completed
 }
 
 type ofhtSlot[K comparable, V any] struct {
@@ -151,7 +151,7 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -204,7 +204,7 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -236,7 +236,7 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -272,7 +272,7 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -305,7 +305,7 @@ func (m *OFHTMap[K, V]) Delete(key K) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -331,7 +331,7 @@ func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -357,7 +357,7 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -391,7 +391,7 @@ func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	// Inline hashKey()
 	var h1v uintptr
 	var h2v uint16
-	if dhltEnableIntKey && m.intKey {
+	if ofhtEnableIntKey && m.intKey {
 		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
 		h2v = uint16(h1v ^ (h1v >> 16))
 	} else {
@@ -865,11 +865,12 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 	chunks := uint32(calcParallelism(slotLen, cpus*resizeOverPartition))
 	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
 
-	// Phase 1: Cooperative freezing.
-	// All threads must help freeze the old table before anyone can safely copy.
-	// This prevents open-addressing probe crossing boundaries.
+	// Cooperative resize.
+	// Each slot is frozen before it is copied. This removes the old global
+	// freeze barrier while preserving the key rule: a copied slot can no longer
+	// be modified in the old table.
 	for {
-		chunk := old.freezeIdx.Add(1) - 1
+		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= chunks {
 			break
 		}
@@ -877,8 +878,9 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
 			slot := old.slots.At(i)
+			var ctrl uint64
 			for {
-				ctrl := slot.ctrl.Load()
+				ctrl = slot.ctrl.Load()
 				if ctrl&ofhtFrozen != 0 {
 					break
 				}
@@ -889,34 +891,14 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 					break
 				}
 			}
-		}
-		old.frozenDone.Add(1)
-	}
 
-	// Wait for all threads to finish freezing.
-	// We use copyIdx2 for the actual copying phase.
-	for old.frozenDone.Load() < chunks {
-		runtime.Gosched()
-	}
-
-	// Phase 2: Cooperative copying.
-	for {
-		chunk := old.copyIdx.Add(1) - 1
-		if chunk >= chunks {
-			break
-		}
-		start := uintptr(chunk) * chunkSz
-		end := min(start+chunkSz, slotLen)
-		for i := start; i < end; i++ {
-			slot := old.slots.At(i)
-			ctrl := slot.ctrl.Load()
 			if ofhtCtrlState(ctrl) == ofhtStateFull {
 				k := slot.key.ReadUnfenced()
 				v := slot.val.ReadUnfenced()
 				// Inline hashKey()
 				var h1v uintptr
 				var h2v uint16
-				if dhltEnableIntKey && m.intKey {
+				if ofhtEnableIntKey && m.intKey {
 					h1v = intHash[K](noescape(unsafe.Pointer(&k)))
 					h2v = uint16(h1v ^ (h1v >> 16))
 				} else {
@@ -928,6 +910,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 				// Inline copyEntry to avoid function call overhead and
 				// keep the copying logic close to the source.
 				destStart := ofhtStart(h1v, next.mask)
+				// copied := false
 				for probe := uintptr(0); probe <= next.mask; probe++ {
 					destSlot := next.slots.At((destStart + probe) & next.mask)
 					destCtrl := destSlot.ctrl.Load()
@@ -943,8 +926,12 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 
 					destSlot.key.WriteUnfenced(k)
 					destSlot.val.WriteUnfenced(v)
+					// copied = true
 					break // Successfully copied this entry
 				}
+				// if !copied {
+				// 	panic("cc: OFHTMap grow produced a full table")
+				// }
 			}
 		}
 		old.copyDone.Add(1)

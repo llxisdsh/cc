@@ -1,3 +1,5 @@
+//go:build !race && (amd64 || arm64)
+
 package cc
 
 import (
@@ -6,6 +8,8 @@ import (
 	"runtime"
 	"sync/atomic"
 	"unsafe"
+
+	"github.com/llxisdsh/cc/internal/asm"
 )
 
 const (
@@ -43,10 +47,8 @@ type dhltTable[K comparable, V any] struct {
 	growCap    uintptr
 	nextTable  atomic.Pointer[dhltTable[K, V]]
 	allocating atomic.Uint32    // 0: no one is allocating, 1: allocating
-	freezeIdx  atomic.Uint32    // Next chunk index for cooperative resizing (Phase 1: freeze)
-	frozenDone atomic.Uint32    // Number of freeze chunks completed
-	copyIdx    atomic.Uint32    // Next chunk index for cooperative resizing (Phase 2: copy)
-	copyDone   atomic.Uint32    // Number of copy chunks completed
+	copyIdx    atomic.Uint32    // Next chunk index for cooperative resize
+	copyDone   atomic.Uint32    // Number of resize chunks completed
 	slotsRaw   []unsafe.Pointer // kept to prevent GC collection of the underlying array
 }
 
@@ -520,7 +522,7 @@ func (m *DHLTMap[K, V]) storeInto(
 				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
 			}
 			newCtrl := dhltCtrlUpdate(uint64(ctrl))
-			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
@@ -541,7 +543,7 @@ func (m *DHLTMap[K, V]) storeInto(
 				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
 			}
 			newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
-			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
@@ -571,7 +573,7 @@ func (m *DHLTMap[K, V]) claimSlot(
 		newEntry = &dhltEntry[K, V]{key: *key, val: *val}
 	}
 	newCtrl := dhltCtrlInsert(uint64(ctrl), h2v)
-	if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+	if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 		return dhltStoreRetry, *new(V), false
 	}
 	m.size.Add(1)
@@ -616,7 +618,7 @@ func (m *DHLTMap[K, V]) loadAndUpdateIn(
 				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
 			}
 			newCtrl := dhltCtrlUpdate(uint64(ctrl))
-			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
@@ -663,7 +665,7 @@ func (m *DHLTMap[K, V]) deleteFrom(
 
 			newCtrl := dhltCtrlDelete(uint64(ctrl))
 			// We can nil the entry to help GC, or keep it to allow lock-free readers to finish
-			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
 				probe--
 				continue
 			}
@@ -723,7 +725,7 @@ func (m *DHLTMap[K, V]) compareAndSwapIn(
 
 			newEntry := &dhltEntry[K, V]{key: *key, val: *newVal}
 			newCtrl := dhltCtrlUpdate(uint64(ctrl))
-			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
 			}
@@ -774,7 +776,7 @@ func (m *DHLTMap[K, V]) compareAndDeleteIn(
 			}
 
 			newCtrl := dhltCtrlDelete(uint64(ctrl))
-			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
 				probe--
 				continue
 			}
@@ -835,42 +837,15 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 		}
 	}
 
-	// Phase 1: Freeze all slots concurrently
 	slotLen := old.mask + 1
 	cpus := maxProcs()
 	chunks := uint32(calcParallelism(slotLen, cpus*resizeOverPartition))
 	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
 
-	for {
-		chunk := old.freezeIdx.Add(1) - 1
-		if chunk >= chunks {
-			break
-		}
-		start := uintptr(chunk) * chunkSz
-		end := min(start+chunkSz, slotLen)
-		for i := start; i < end; i++ {
-			slot := old.slot(i)
-			for {
-				ctrl := atomic.LoadUintptr(&slot[0])
-				if uint64(ctrl)&dhltFrozen != 0 {
-					break
-				}
-				entry := atomic.LoadUintptr(&slot[1])
-				if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(uint64(ctrl)|dhltFrozen), unsafe.Pointer(entry)) { //nolint:all
-					break
-				}
-			}
-		}
-		old.frozenDone.Add(1)
-	}
-
-	// Wait for all threads to finish freezing.
-	// This acts as a barrier to ensure no new writes can occur before copying starts.
-	for old.frozenDone.Load() < chunks {
-		runtime.Gosched()
-	}
-
-	// Phase 2: Copy chunks
+	// Cooperative resize.
+	// Each slot is frozen before it is copied. This removes the old global
+	// freeze barrier while preserving the key rule: a copied slot can no longer
+	// be modified in the old table.
 	for {
 		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= chunks {
@@ -880,11 +855,26 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
 			slot := old.slot(i)
-			ctrl := atomic.LoadUintptr(&slot[0])
+			var ctrl uintptr
+			var entry uintptr
+			for {
+				ctrl = atomic.LoadUintptr(&slot[0])
+				if uint64(ctrl)&dhltFrozen != 0 {
+					entry = atomic.LoadUintptr(&slot[1])
+					break
+				}
+				entry = atomic.LoadUintptr(&slot[1])
+				if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(uint64(ctrl)|dhltFrozen), unsafe.Pointer(entry)) { //nolint:all
+					continue
+				}
+				ctrl = uintptr(uint64(ctrl) | dhltFrozen)
+				break
+			}
+
 			if dhltCtrlState(uint64(ctrl)) != dhltStateFull {
 				continue
 			}
-			entryPtr := atomic.LoadUintptr(&slot[1])
+			entryPtr := entry
 			if entryPtr == 0 {
 				continue
 			}
@@ -902,6 +892,7 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 			}
 
 			destStart := dhltStart(h1v, next.mask)
+			// copied := false
 			for probe := uintptr(0); probe <= next.mask; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
 				destCtrl := atomic.LoadUintptr(&destSlot[0])
@@ -910,12 +901,16 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				}
 				destEntry := atomic.LoadUintptr(&destSlot[1])
 				newCtrl := dhltCtrlInsert(uint64(destCtrl), h2v)
-				if !dwcas(unsafe.Pointer(destSlot), destCtrl, unsafe.Pointer(destEntry), uintptr(newCtrl), unsafe.Pointer(entryPtr)) { //nolint:all
+				if !asm.DWCAS(unsafe.Pointer(destSlot), destCtrl, unsafe.Pointer(destEntry), uintptr(newCtrl), unsafe.Pointer(entryPtr)) { //nolint:all
 					probe--
 					continue
 				}
+				// copied = true
 				break
 			}
+			// if !copied {
+			// 	panic("cc: DHLTMap grow produced a full table")
+			// }
 		}
 		old.copyDone.Add(1)
 	}

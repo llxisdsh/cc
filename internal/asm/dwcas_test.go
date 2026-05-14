@@ -1,4 +1,6 @@
-package cc
+//go:build !race && (amd64 || arm64)
+
+package asm
 
 import (
 	"testing"
@@ -17,7 +19,7 @@ func TestDWCAS(t *testing.T) {
 	ptr[1] = 20
 
 	// successful CAS
-	ok := dwcas(base, uintptr(10), unsafe.Pointer(uintptr(20)), uintptr(30), unsafe.Pointer(uintptr(40))) //nolint:all
+	ok := DWCAS(base, uintptr(10), unsafe.Pointer(uintptr(20)), uintptr(30), unsafe.Pointer(uintptr(40))) //nolint:all
 	if !ok {
 		t.Fatalf("expected CAS to succeed")
 	}
@@ -26,7 +28,7 @@ func TestDWCAS(t *testing.T) {
 	}
 
 	// failed CAS
-	ok = dwcas(base, uintptr(10), unsafe.Pointer(uintptr(20)), uintptr(50), unsafe.Pointer(uintptr(60))) //nolint:all
+	ok = DWCAS(base, uintptr(10), unsafe.Pointer(uintptr(20)), uintptr(50), unsafe.Pointer(uintptr(60))) //nolint:all
 	if ok {
 		t.Fatalf("expected CAS to fail")
 	}
