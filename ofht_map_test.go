@@ -28,20 +28,33 @@ func TestOFHTMapBasic(t *testing.T) {
 		t.Fatalf("LoadOrStore new=(%d,%v), want (5,false)", got, loaded)
 	}
 
-	if !m.CompareAndSwap("a", 3, 6) {
-		t.Fatal("CompareAndSwap should succeed")
-	}
-	if m.CompareAndSwap("a", 3, 7) {
-		t.Fatal("CompareAndSwap should fail with stale value")
+	if prev, loaded := m.LoadAndUpdate("a", 6); !loaded || prev != 3 {
+		t.Fatalf("LoadAndUpdate(a)=(%d,%v), want (3,true)", prev, loaded)
 	}
 	if got, ok := m.Load("a"); !ok || got != 6 {
-		t.Fatalf("Load(a) after CAS=(%d,%v), want (6,true)", got, ok)
+		t.Fatalf("Load(a) after LoadAndUpdate=(%d,%v), want (6,true)", got, ok)
+	}
+	if prev, loaded := m.LoadAndUpdate("missing", 9); loaded || prev != 0 {
+		t.Fatalf("LoadAndUpdate(missing)=(%d,%v), want (0,false)", prev, loaded)
+	}
+	if _, ok := m.Load("missing"); ok {
+		t.Fatal("LoadAndUpdate inserted missing key")
 	}
 
-	if m.CompareAndDelete("a", 3) {
+	if !m.CompareAndSwap("a", 6, 7) {
+		t.Fatal("CompareAndSwap should succeed")
+	}
+	if m.CompareAndSwap("a", 6, 8) {
+		t.Fatal("CompareAndSwap should fail with stale value")
+	}
+	if got, ok := m.Load("a"); !ok || got != 7 {
+		t.Fatalf("Load(a) after CAS=(%d,%v), want (7,true)", got, ok)
+	}
+
+	if m.CompareAndDelete("a", 6) {
 		t.Fatal("CompareAndDelete should fail with stale value")
 	}
-	if !m.CompareAndDelete("a", 6) {
+	if !m.CompareAndDelete("a", 7) {
 		t.Fatal("CompareAndDelete should succeed")
 	}
 	if _, ok := m.Load("a"); ok {

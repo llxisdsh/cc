@@ -2,14 +2,14 @@
 
 #include "textflag.h"
 
-// func dwcas(ptr unsafe.Pointer, old1 uintptr, old2 unsafe.Pointer, new1 uintptr, new2 unsafe.Pointer) bool
-TEXT ·dwcas(SB), NOSPLIT, $0-49
-	MOVQ ptr+0(FP), BP
+// func dwcasAsm(ptr unsafe.Pointer, old1 uintptr, old2 unsafe.Pointer, new1 uintptr, new2 unsafe.Pointer) bool
+TEXT ·dwcasAsm(SB), NOSPLIT|NOFRAME, $0-41
+	MOVQ ptr+0(FP), DI
 	MOVQ old1+8(FP), AX
 	MOVQ old2+16(FP), DX
 	MOVQ new1+24(FP), BX
 	MOVQ new2+32(FP), CX
 	LOCK
-	CMPXCHG16B (BP)
+	CMPXCHG16B (DI)
 	SETEQ ret+40(FP)
 	RET

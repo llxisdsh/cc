@@ -203,6 +203,29 @@ func (m *DHLTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	}
 }
 
+// LoadAndUpdate retrieves the value for a key and updates it if the key exists.
+func (m *DHLTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
+	table := m.table.Load()
+	if table == nil {
+		return *new(V), false
+	}
+	h1v, h2v := m.hashKey(noEscape(&key))
+	for {
+		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h1v, h2v)
+		switch status {
+		case dhltStoreOK:
+			return prev, loaded
+		case dhltStoreFrozen:
+			table = m.afterFrozenTable(table)
+		case dhltStoreFull:
+			m.tryGrow(table, (table.mask+1)<<1)
+			table = m.ensureTable()
+		case dhltStoreRetry:
+			table = m.ensureTable()
+		}
+	}
+}
+
 // Delete removes the value for a key.
 func (m *DHLTMap[K, V]) Delete(key K) {
 	table := m.table.Load()
@@ -482,6 +505,54 @@ func (m *DHLTMap[K, V]) claimSlot(
 	}
 	m.size.Add(1)
 	return dhltStoreOK, *val, false
+}
+
+func (m *DHLTMap[K, V]) loadAndUpdateIn(
+	table *dhltTable[K, V],
+	key *K,
+	val *V,
+	h1v uintptr,
+	h2v uint16,
+) (dhltStoreStatus, V, bool) {
+	var newEntry *dhltEntry[K, V]
+	start := dhltStart(h1v, table.mask)
+	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > dhltMaxProbeThreshold {
+			return dhltStoreFull, *new(V), false
+		}
+		slot := table.slot((start + probe) & table.mask)
+		ctrl := atomic.LoadUintptr(&slot[0])
+		if uint64(ctrl)&dhltFrozen != 0 {
+			return dhltStoreFrozen, *new(V), false
+		}
+		entry := atomic.LoadUintptr(&slot[1])
+
+		switch dhltCtrlState(uint64(ctrl)) {
+		case dhltStateEmpty:
+			return dhltStoreOK, *new(V), false
+		case dhltStateFull:
+			if dhltCtrlH2(uint64(ctrl)) != h2v {
+				continue
+			}
+			if entry == 0 {
+				continue
+			}
+			e := (*dhltEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			if e.key != *key {
+				continue
+			}
+			if newEntry == nil {
+				newEntry = &dhltEntry[K, V]{key: *key, val: *val}
+			}
+			newCtrl := dhltCtrlUpdate(uint64(ctrl))
+			if !dwcas(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+				probe--
+				continue
+			}
+			return dhltStoreOK, e.val, true
+		}
+	}
+	return dhltStoreOK, *new(V), false
 }
 
 func (m *DHLTMap[K, V]) deleteFrom(

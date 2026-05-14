@@ -197,6 +197,29 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	}
 }
 
+// LoadAndUpdate retrieves the value for a key and updates it if the key exists.
+func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
+	table := m.table.Load()
+	if table == nil {
+		return *new(V), false
+	}
+	h1v, h2v := m.hashKey(noEscape(&key))
+	for {
+		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h1v, h2v)
+		switch status {
+		case ofhtStoreOK:
+			return prev, loaded
+		case ofhtStoreFrozen:
+			table = m.afterFrozenTable(table)
+		case ofhtStoreFull:
+			m.tryGrow(table, (table.mask+1)<<1)
+			table = m.ensureTable()
+		case ofhtStoreRetry:
+			table = m.ensureTable()
+		}
+	}
+}
+
 // Delete removes the value for a key.
 func (m *OFHTMap[K, V]) Delete(key K) {
 	table := m.table.Load()
@@ -497,6 +520,57 @@ func (m *OFHTMap[K, V]) claimSlot(
 	slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h2v))
 	m.size.Add(1)
 	return ofhtStoreOK, *val, false
+}
+
+func (m *OFHTMap[K, V]) loadAndUpdateIn(
+	table *ofhtTable[K, V],
+	key *K,
+	val *V,
+	h1v uintptr,
+	h2v uint16,
+) (ofhtStoreStatus, V, bool) {
+	start := ofhtStart(h1v, table.mask)
+	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > ofhtMaxProbeThreshold {
+			return ofhtStoreFull, *new(V), false
+		}
+		slot := table.slots.At((start + probe) & table.mask)
+		ctrl := slot.ctrl.Load()
+		if ctrl&ofhtFrozen != 0 {
+			return ofhtStoreFrozen, *new(V), false
+		}
+		switch ofhtCtrlState(ctrl) {
+		case ofhtStateEmpty:
+			return ofhtStoreOK, *new(V), false
+		case ofhtStateBusy:
+			probe--
+			continue
+		case ofhtStateFull:
+			if ofhtCtrlH2(ctrl) != h2v {
+				continue
+			}
+			k := slot.key.ReadUnfenced()
+			prev := slot.val.ReadUnfenced()
+			ctrl2 := slot.ctrl.Load()
+			if ctrl != ctrl2 {
+				probe--
+				continue
+			}
+			if k != *key {
+				continue
+			}
+			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
+			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
+				probe--
+				continue
+			}
+
+			slot.val.WriteUnfenced(*val)
+			slot.ctrl.Store(ofhtCtrlUpdate(busyCtrl))
+			return ofhtStoreOK, prev, true
+		}
+	}
+	return ofhtStoreOK, *new(V), false
 }
 
 func (m *OFHTMap[K, V]) deleteFrom(
