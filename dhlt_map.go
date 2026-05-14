@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	dhltEnableIntKey   = false
-	dhltEnableDedupVal = false
+	dhltEnableIntKey   = true
+	dhltEnableDedupVal = true
 )
 
 // DHLTMap is an experimental DHLT-style hash map (Double-Word CAS Lock-free Table).
@@ -90,12 +90,12 @@ const (
 
 const (
 	dhltMinSlots   = 64
-	dhltLoadFactor = 0.75
+	dhltLoadFactor = 0.625
 
 	// dhltMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	dhltMaxProbeThreshold = 128
+	dhltMaxProbeThreshold = 64
 
 	// dhltGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
@@ -154,14 +154,58 @@ func (m *DHLTMap[K, V]) Load(key K) (value V, ok bool) {
 	if table == nil {
 		return *new(V), false
 	}
-	h1v, h2v := m.hashKey(noEscape(&key))
-	return m.loadFrom(table, noEscape(&key), h1v, h2v)
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
+	start := dhltStart(h1v, table.mask)
+	for probe := uintptr(0); probe <= table.mask; probe++ {
+		if probe > dhltMaxProbeThreshold {
+			return *new(V), false
+		}
+		slot := table.slot((start + probe) & table.mask)
+		ctrl := atomic.LoadUintptr(&slot[0])
+		switch dhltCtrlState(uint64(ctrl)) {
+		case dhltStateEmpty:
+			return *new(V), false
+		case dhltStateFull:
+			if dhltCtrlH2(uint64(ctrl)) != h2v {
+				continue
+			}
+			entryPtr := atomic.LoadUintptr(&slot[1])
+			if entryPtr == 0 {
+				continue
+			}
+			entry := (*dhltEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
+			if entry.key == key {
+				return entry.val, true
+			}
+		}
+	}
+	return *new(V), false
 }
 
 // Store sets the value for a key.
 func (m *DHLTMap[K, V]) Store(key K, value V) {
 	table := m.ensureTable()
-	h1v, h2v := m.hashKey(noEscape(&key))
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
 	for {
 		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, false)
 		switch status {
@@ -183,7 +227,17 @@ func (m *DHLTMap[K, V]) Store(key K, value V) {
 // stores and returns the given value.
 func (m *DHLTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	table := m.ensureTable()
-	h1v, h2v := m.hashKey(noEscape(&key))
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
 	for {
 		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, true)
 		switch status {
@@ -209,7 +263,17 @@ func (m *DHLTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 	if table == nil {
 		return *new(V), false
 	}
-	h1v, h2v := m.hashKey(noEscape(&key))
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
 	for {
 		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h1v, h2v)
 		switch status {
@@ -232,7 +296,17 @@ func (m *DHLTMap[K, V]) Delete(key K) {
 	if table == nil {
 		return
 	}
-	h1v, h2v := m.hashKey(noEscape(&key))
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
 	for {
 		status, _, _ := m.deleteFrom(table, noEscape(&key), h1v, h2v, false)
 		if status == dhltStoreOK {
@@ -248,7 +322,17 @@ func (m *DHLTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	if table == nil {
 		return *new(V), false
 	}
-	h1v, h2v := m.hashKey(noEscape(&key))
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
 	for {
 		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h1v, h2v, true)
 		if status == dhltStoreOK {
@@ -264,7 +348,17 @@ func (m *DHLTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	if table == nil {
 		return false
 	}
-	h1v, h2v := m.hashKey(noEscape(&key))
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
 	for {
 		status, swapped := m.compareAndSwapIn(
 			table,
@@ -287,7 +381,17 @@ func (m *DHLTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	if table == nil {
 		return false
 	}
-	h1v, h2v := m.hashKey(noEscape(&key))
+	// Inline hashKey()
+	var h1v uintptr
+	var h2v uint16
+	if dhltEnableIntKey && m.intKey {
+		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
+		h2v = uint16(h1v ^ (h1v >> 16))
+	} else {
+		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h2v = uint16(h1v)
+		h1v >>= 16
+	}
 	for {
 		status, deleted := m.compareAndDeleteIn(
 			table,
@@ -351,50 +455,17 @@ func (m *DHLTMap[K, V]) ensureTable() *dhltTable[K, V] {
 	return m.table.Load()
 }
 
-//go:nosplit
-func (m *DHLTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
-	if dhltEnableIntKey {
-		if m.intKey {
-			h1v := intHash[K](noescape(unsafe.Pointer(key)))
-			return h1v, uint16(h1v ^ (h1v >> 16))
-		}
-	}
-	h1v := m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
-	return h1v >> 16, uint16(h1v)
-}
-
-func (m *DHLTMap[K, V]) loadFrom(
-	table *dhltTable[K, V],
-	key *K,
-	h1v uintptr,
-	h2v uint16,
-) (value V, ok bool) {
-	start := dhltStart(h1v, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dhltMaxProbeThreshold {
-			return *new(V), false
-		}
-		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		switch dhltCtrlState(uint64(ctrl)) {
-		case dhltStateEmpty:
-			return *new(V), false
-		case dhltStateFull:
-			if dhltCtrlH2(uint64(ctrl)) != h2v {
-				continue
-			}
-			entryPtr := atomic.LoadUintptr(&slot[1])
-			if entryPtr == 0 {
-				continue
-			}
-			entry := (*dhltEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
-			if entry.key == *key {
-				return entry.val, true
-			}
-		}
-	}
-	return *new(V), false
-}
+// //go:nosplit
+// func (m *DHLTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
+// 	if dhltEnableIntKey {
+// 		if m.intKey {
+// 			h1v := intHash[K](noescape(unsafe.Pointer(key)))
+// 			return h1v, uint16(h1v ^ (h1v >> 16))
+// 		}
+// 	}
+// 	h1v := m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+// 	return h1v >> 16, uint16(h1v)
+// }
 
 func (m *DHLTMap[K, V]) storeInto(
 	table *dhltTable[K, V],
@@ -818,7 +889,17 @@ func (m *DHLTMap[K, V]) tryGrow(old *dhltTable[K, V], newLen uintptr) {
 				continue
 			}
 			e := (*dhltEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
-			h1v, h2v := m.hashKey(&e.key)
+			// Inline hashKey()
+			var h1v uintptr
+			var h2v uint16
+			if dhltEnableIntKey && m.intKey {
+				h1v = intHash[K](noescape(unsafe.Pointer(&e.key)))
+				h2v = uint16(h1v ^ (h1v >> 16))
+			} else {
+				h1v = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+				h2v = uint16(h1v)
+				h1v >>= 16
+			}
 
 			destStart := dhltStart(h1v, next.mask)
 			for probe := uintptr(0); probe <= next.mask; probe++ {
