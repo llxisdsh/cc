@@ -70,9 +70,9 @@ const (
 	ofhtStateBusy    = uint64(3)
 
 	ofhtH2Shift = 2
-	ofhtH2Mask  = uint64(0xFFFF)
+	ofhtH2Mask  = uint64(0xFFFFFFFF)
 
-	ofhtSeqShift = 18
+	ofhtSeqShift = 34
 	ofhtSeqInc   = uint64(1) << ofhtSeqShift
 
 	ofhtFrozen = uint64(1) << 63
@@ -146,18 +146,14 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	// var spins int
-	start := ofhtStart(h1v, table.mask)
+	start := ofhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
@@ -174,7 +170,7 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 			probe--
 			continue
 		case ofhtStateFull:
-			if ofhtCtrlH2(ctrl) != h2v {
+			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -199,18 +195,14 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 func (m *OFHTMap[K, V]) Store(key K, value V) {
 	table := m.ensureTable()
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, false)
+		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h, false)
 		switch status {
 		case ofhtStoreOK:
 			m.growIfNeeded(table)
@@ -231,18 +223,14 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	table := m.ensureTable()
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, true)
+		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h, true)
 		switch status {
 		case ofhtStoreOK:
 			if !loaded {
@@ -267,18 +255,14 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		return *new(V), false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h1v, h2v)
+		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h)
 		switch status {
 		case ofhtStoreOK:
 			return prev, loaded
@@ -300,18 +284,14 @@ func (m *OFHTMap[K, V]) Delete(key K) {
 		return
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, _, _ := m.deleteFrom(table, noEscape(&key), h1v, h2v, false)
+		status, _, _ := m.deleteFrom(table, noEscape(&key), h, false)
 		if status == ofhtStoreOK {
 			return
 		}
@@ -326,18 +306,14 @@ func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 		return *new(V), false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h1v, h2v, true)
+		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h, true)
 		if status == ofhtStoreOK {
 			return prev, loaded
 		}
@@ -352,15 +328,11 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		return false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
 		status, swapped := m.compareAndSwapIn(
@@ -368,8 +340,7 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			noEscape(&key),
 			noEscape(&old),
 			noEscape(&new),
-			h1v,
-			h2v,
+			h,
 		)
 		if status == ofhtStoreOK {
 			return swapped
@@ -386,23 +357,18 @@ func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 		return false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
 		status, deleted := m.compareAndDeleteIn(
 			table,
 			noEscape(&key),
 			noEscape(&old),
-			h1v,
-			h2v,
+			h,
 		)
 		if status == ofhtStoreOK {
 			return deleted
@@ -480,8 +446,7 @@ func (m *OFHTMap[K, V]) storeInto(
 	table *ofhtTable[K, V],
 	key *K,
 	val *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 	onlyIfAbsent bool,
 ) (ofhtStoreStatus, V, bool) {
 	var (
@@ -490,7 +455,7 @@ func (m *OFHTMap[K, V]) storeInto(
 		deletedC  uint64
 		deletedOK bool
 	)
-	start := ofhtStart(h1v, table.mask)
+	start := ofhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
@@ -509,7 +474,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			probe--
 			continue
 		case ofhtStateFull:
-			if ofhtCtrlH2(ctrl) != h2v {
+			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -545,7 +510,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			}
 		case ofhtStateEmpty:
 			if deletedOK {
-				status, rVal, loaded := m.claimSlot(deleted, deletedC, key, val, h2v)
+				status, rVal, loaded := m.claimSlot(deleted, deletedC, key, val, h)
 				if status == ofhtStoreRetry {
 					return ofhtStoreRetry, *new(V), false
 				}
@@ -558,13 +523,13 @@ func (m *OFHTMap[K, V]) storeInto(
 			}
 			slot.key.WriteUnfenced(*key)
 			slot.val.WriteUnfenced(*val)
-			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h2v))
+			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
 			m.size.Add(1)
 			return ofhtStoreOK, *val, false
 		}
 	}
 	if deletedOK {
-		return m.claimSlot(deleted, deletedC, key, val, h2v)
+		return m.claimSlot(deleted, deletedC, key, val, h)
 	}
 	return ofhtStoreFull, *new(V), false
 }
@@ -574,7 +539,7 @@ func (m *OFHTMap[K, V]) claimSlot(
 	ctrl uint64,
 	key *K,
 	val *V,
-	h2v uint16,
+	h2v uint32,
 ) (ofhtStoreStatus, V, bool) {
 	if ctrl&ofhtFrozen != 0 {
 		return ofhtStoreFrozen, *new(V), false
@@ -594,10 +559,9 @@ func (m *OFHTMap[K, V]) loadAndUpdateIn(
 	table *ofhtTable[K, V],
 	key *K,
 	val *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 ) (ofhtStoreStatus, V, bool) {
-	start := ofhtStart(h1v, table.mask)
+	start := ofhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > ofhtMaxProbeThreshold {
 			return ofhtStoreFull, *new(V), false
@@ -614,7 +578,7 @@ func (m *OFHTMap[K, V]) loadAndUpdateIn(
 			probe--
 			continue
 		case ofhtStateFull:
-			if ofhtCtrlH2(ctrl) != h2v {
+			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -644,12 +608,11 @@ func (m *OFHTMap[K, V]) loadAndUpdateIn(
 func (m *OFHTMap[K, V]) deleteFrom(
 	table *ofhtTable[K, V],
 	key *K,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 	needValue bool,
 ) (ofhtStoreStatus, V, bool) {
 	// var spins int
-	start := ofhtStart(h1v, table.mask)
+	start := ofhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -664,7 +627,7 @@ func (m *OFHTMap[K, V]) deleteFrom(
 			probe--
 			continue
 		case ofhtStateFull:
-			if ofhtCtrlH2(ctrl) != h2v {
+			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -703,11 +666,10 @@ func (m *OFHTMap[K, V]) compareAndSwapIn(
 	key *K,
 	old *V,
 	newVal *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 ) (ofhtStoreStatus, bool) {
 	// var spins int
-	start := ofhtStart(h1v, table.mask)
+	start := ofhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -722,7 +684,7 @@ func (m *OFHTMap[K, V]) compareAndSwapIn(
 			probe--
 			continue
 		case ofhtStateFull:
-			if ofhtCtrlH2(ctrl) != h2v {
+			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -760,11 +722,10 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 	table *ofhtTable[K, V],
 	key *K,
 	old *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 ) (ofhtStoreStatus, bool) {
 	// var spins int
-	start := ofhtStart(h1v, table.mask)
+	start := ofhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -779,7 +740,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 			probe--
 			continue
 		case ofhtStateFull:
-			if ofhtCtrlH2(ctrl) != h2v {
+			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
 			k := slot.key.ReadUnfenced()
@@ -892,21 +853,10 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 			if ofhtCtrlState(ctrl) == ofhtStateFull {
 				k := slot.key.ReadUnfenced()
 				v := slot.val.ReadUnfenced()
-				// Inline hashKey()
-				var h1v uintptr
-				var h2v uint16
-				if ofhtEnableIntKey && m.intKey {
-					h1v = intHash[K](noescape(unsafe.Pointer(&k)))
-					h2v = uint16(h1v ^ (h1v >> 16))
-				} else {
-					h1v = m.keyHash(noescape(unsafe.Pointer(&k)), m.seed)
-					h2v = uint16(h1v)
-					h1v >>= 16
-				}
-
+				h := ofhtCtrlH2(ctrl)
 				// Inline copyEntry to avoid function call overhead and
 				// keep the copying logic close to the source.
-				destStart := ofhtStart(h1v, next.mask)
+				destStart := ofhtStart(h, next.mask)
 				// copied := false
 				for probe := uintptr(0); probe <= next.mask; probe++ {
 					destSlot := next.slots.At((destStart + probe) & next.mask)
@@ -915,7 +865,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 						continue
 					}
 
-					fullCtrl := ofhtCtrlInsert(destCtrl, h2v)
+					fullCtrl := ofhtCtrlInsert(destCtrl, h)
 					if !destSlot.ctrl.CompareAndSwap(destCtrl, fullCtrl) {
 						probe--
 						continue
@@ -973,8 +923,8 @@ func ofhtCalcSlotLen(capacity uintptr) uintptr {
 }
 
 //go:nosplit
-func ofhtStart(h1v, mask uintptr) uintptr {
-	return h1v & mask
+func ofhtStart(h1v uint32, mask uintptr) uintptr {
+	return uintptr(h1v) & mask
 }
 
 //go:nosplit
@@ -983,12 +933,12 @@ func ofhtCtrlState(ctrl uint64) uint64 {
 }
 
 //go:nosplit
-func ofhtCtrlH2(ctrl uint64) uint16 {
-	return uint16(ctrl >> ofhtH2Shift)
+func ofhtCtrlH2(ctrl uint64) uint32 {
+	return uint32(ctrl >> ofhtH2Shift)
 }
 
 //go:nosplit
-func ofhtCtrlInsert(busyCtrl uint64, h2v uint16) uint64 {
+func ofhtCtrlInsert(busyCtrl uint64, h2v uint32) uint64 {
 	c := (busyCtrl &^ ofhtStateMask) | ofhtStateFull
 	c = (c &^ (ofhtH2Mask << ofhtH2Shift)) | (uint64(h2v) << ofhtH2Shift)
 	return c + ofhtSeqInc

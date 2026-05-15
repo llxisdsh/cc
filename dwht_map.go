@@ -80,18 +80,20 @@ func (t *dwhtTable[K, V]) slot(i uintptr) *[2]uintptr {
 
 const (
 	// dwhtNotPtr is always set on non-empty ctrl words to prevent GC from
-	// treating the ctrl word as a valid pointer, saving scan time.
-	dwhtNotPtr = uint64(1)
+	// treating the ctrl word as a valid pointer. By setting bit 62, we ensure
+	// the value is > maxLegalPointer on all archs, preventing "pointer to
+	// unallocated span" crashes when the GC scans slotsRaw ([]unsafe.Pointer).
+	dwhtNotPtr = uint64(1) << 62
 
-	dwhtStateMask    = uint64(0x3) << 1
-	dwhtStateEmpty   = uint64(0) << 1
-	dwhtStateFull    = uint64(1) << 1
-	dwhtStateDeleted = uint64(2) << 1
+	dwhtStateMask    = uint64(0x3)
+	dwhtStateEmpty   = uint64(0)
+	dwhtStateFull    = uint64(1)
+	dwhtStateDeleted = uint64(2)
 
-	dwhtH2Shift = 3
-	dwhtH2Mask  = uint64(0xFFFF)
+	dwhtH2Shift = 2
+	dwhtH2Mask  = uint64(0xFFFFFFFF)
 
-	dwhtSeqShift = 19
+	dwhtSeqShift = 34
 	dwhtSeqInc   = uint64(1) << dwhtSeqShift
 
 	dwhtFrozen = uint64(1) << 63
@@ -165,17 +167,13 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
-	start := dwhtStart(h1v, table.mask)
+	start := dwhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > dwhtMaxProbeThreshold {
 			return *new(V), false
@@ -186,7 +184,7 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 		case dwhtStateEmpty:
 			return *new(V), false
 		case dwhtStateFull:
-			if dwhtCtrlH2(uint64(ctrl)) != h2v {
+			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
 			entryPtr := atomic.LoadUintptr(&slot[1])
@@ -206,18 +204,14 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 func (m *DWHTMap[K, V]) Store(key K, value V) {
 	table := m.ensureTable()
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, false)
+		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h, false)
 		switch status {
 		case dwhtStoreOK:
 			m.growIfNeeded(table)
@@ -238,18 +232,14 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	table := m.ensureTable()
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h1v, h2v, true)
+		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h, true)
 		switch status {
 		case dwhtStoreOK:
 			if !loaded {
@@ -274,18 +264,14 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		return *new(V), false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h1v, h2v)
+		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h)
 		switch status {
 		case dwhtStoreOK:
 			return prev, loaded
@@ -307,18 +293,14 @@ func (m *DWHTMap[K, V]) Delete(key K) {
 		return
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, _, _ := m.deleteFrom(table, noEscape(&key), h1v, h2v, false)
+		status, _, _ := m.deleteFrom(table, noEscape(&key), h, false)
 		if status == dwhtStoreOK {
 			return
 		}
@@ -333,18 +315,14 @@ func (m *DWHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 		return *new(V), false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
-		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h1v, h2v, true)
+		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h, true)
 		if status == dwhtStoreOK {
 			return prev, loaded
 		}
@@ -359,15 +337,11 @@ func (m *DWHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		return false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
 		status, swapped := m.compareAndSwapIn(
@@ -375,8 +349,7 @@ func (m *DWHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			noEscape(&key),
 			noEscape(&old),
 			noEscape(&new),
-			h1v,
-			h2v,
+			h,
 		)
 		if status == dwhtStoreOK {
 			return swapped
@@ -392,23 +365,18 @@ func (m *DWHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 		return false
 	}
 	// Inline hashKey()
-	var h1v uintptr
-	var h2v uint16
+	var h uint32
 	if dwhtEnableIntKey && m.intKey {
-		h1v = intHash[K](noescape(unsafe.Pointer(&key)))
-		h2v = uint16(h1v ^ (h1v >> 16))
+		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
 	} else {
-		h1v = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
-		h2v = uint16(h1v)
-		h1v >>= 16
+		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
 	}
 	for {
 		status, deleted := m.compareAndDeleteIn(
 			table,
 			noEscape(&key),
 			noEscape(&old),
-			h1v,
-			h2v,
+			h,
 		)
 		if status == dwhtStoreOK {
 			return deleted
@@ -481,8 +449,7 @@ func (m *DWHTMap[K, V]) storeInto(
 	table *dwhtTable[K, V],
 	key *K,
 	val *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 	onlyIfAbsent bool,
 ) (dwhtStoreStatus, V, bool) {
 	var (
@@ -492,7 +459,7 @@ func (m *DWHTMap[K, V]) storeInto(
 		deletedOK bool
 		newEntry  *dwhtEntry[K, V]
 	)
-	start := dwhtStart(h1v, table.mask)
+	start := dwhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > dwhtMaxProbeThreshold {
 			return dwhtStoreFull, *new(V), false
@@ -507,7 +474,7 @@ func (m *DWHTMap[K, V]) storeInto(
 
 		switch dwhtCtrlState(uint64(ctrl)) {
 		case dwhtStateFull:
-			if dwhtCtrlH2(uint64(ctrl)) != h2v {
+			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
 			if entry == 0 {
@@ -541,7 +508,7 @@ func (m *DWHTMap[K, V]) storeInto(
 			}
 		case dwhtStateEmpty:
 			if deletedOK {
-				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h2v, newEntry)
+				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
 				if status == dwhtStoreRetry {
 					return dwhtStoreRetry, *new(V), false
 				}
@@ -550,7 +517,7 @@ func (m *DWHTMap[K, V]) storeInto(
 			if newEntry == nil {
 				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
-			newCtrl := dwhtCtrlInsert(uint64(ctrl), h2v)
+			newCtrl := dwhtCtrlInsert(uint64(ctrl), h)
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
 				continue
@@ -560,7 +527,7 @@ func (m *DWHTMap[K, V]) storeInto(
 		}
 	}
 	if deletedOK {
-		return m.claimSlot(deleted, deletedC, deletedE, key, val, h2v, newEntry)
+		return m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
 	}
 	return dwhtStoreFull, *new(V), false
 }
@@ -571,7 +538,7 @@ func (m *DWHTMap[K, V]) claimSlot(
 	entry uintptr,
 	key *K,
 	val *V,
-	h2v uint16,
+	h2v uint32,
 	newEntry *dwhtEntry[K, V],
 ) (dwhtStoreStatus, V, bool) {
 	if uint64(ctrl)&dwhtFrozen != 0 {
@@ -592,11 +559,10 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 	table *dwhtTable[K, V],
 	key *K,
 	val *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 ) (dwhtStoreStatus, V, bool) {
 	var newEntry *dwhtEntry[K, V]
-	start := dwhtStart(h1v, table.mask)
+	start := dwhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > dwhtMaxProbeThreshold {
 			return dwhtStoreFull, *new(V), false
@@ -612,7 +578,7 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 		case dwhtStateEmpty:
 			return dwhtStoreOK, *new(V), false
 		case dwhtStateFull:
-			if dwhtCtrlH2(uint64(ctrl)) != h2v {
+			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
 			if entry == 0 {
@@ -639,11 +605,10 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 func (m *DWHTMap[K, V]) deleteFrom(
 	table *dwhtTable[K, V],
 	key *K,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 	needValue bool,
 ) (dwhtStoreStatus, V, bool) {
-	start := dwhtStart(h1v, table.mask)
+	start := dwhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > dwhtMaxProbeThreshold {
 			return dwhtStoreFull, *new(V), false
@@ -660,7 +625,7 @@ func (m *DWHTMap[K, V]) deleteFrom(
 		case dwhtStateEmpty:
 			return dwhtStoreOK, *new(V), false
 		case dwhtStateFull:
-			if dwhtCtrlH2(uint64(ctrl)) != h2v {
+			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
 			if entry == 0 {
@@ -695,10 +660,9 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 	key *K,
 	old *V,
 	newVal *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 ) (dwhtStoreStatus, bool) {
-	start := dwhtStart(h1v, table.mask)
+	start := dwhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > dwhtMaxProbeThreshold {
 			return dwhtStoreFull, false
@@ -714,7 +678,7 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 		case dwhtStateEmpty:
 			return dwhtStoreOK, false
 		case dwhtStateFull:
-			if dwhtCtrlH2(uint64(ctrl)) != h2v {
+			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
 			if entry == 0 {
@@ -747,10 +711,9 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 	table *dwhtTable[K, V],
 	key *K,
 	old *V,
-	h1v uintptr,
-	h2v uint16,
+	h uint32,
 ) (dwhtStoreStatus, bool) {
-	start := dwhtStart(h1v, table.mask)
+	start := dwhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > dwhtMaxProbeThreshold {
 			return dwhtStoreFull, false
@@ -766,7 +729,7 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 		case dwhtStateEmpty:
 			return dwhtStoreOK, false
 		case dwhtStateFull:
-			if dwhtCtrlH2(uint64(ctrl)) != h2v {
+			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
 			if entry == 0 {
@@ -886,20 +849,9 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V], newLen uintptr) {
 			if entryPtr == 0 {
 				continue
 			}
-			e := (*dwhtEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
-			// Inline hashKey()
-			var h1v uintptr
-			var h2v uint16
-			if dwhtEnableIntKey && m.intKey {
-				h1v = intHash[K](noescape(unsafe.Pointer(&e.key)))
-				h2v = uint16(h1v ^ (h1v >> 16))
-			} else {
-				h1v = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
-				h2v = uint16(h1v)
-				h1v >>= 16
-			}
 
-			destStart := dwhtStart(h1v, next.mask)
+			h := dwhtCtrlH2(uint64(ctrl))
+			destStart := dwhtStart(h, next.mask)
 			// copied := false
 			for probe := uintptr(0); probe <= next.mask; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
@@ -908,7 +860,7 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V], newLen uintptr) {
 					continue
 				}
 				destEntry := atomic.LoadUintptr(&destSlot[1])
-				newCtrl := dwhtCtrlInsert(uint64(destCtrl), h2v)
+				newCtrl := dwhtCtrlInsert(uint64(destCtrl), h)
 				if !asm.DWCAS(unsafe.Pointer(destSlot), destCtrl, unsafe.Pointer(destEntry), uintptr(newCtrl), unsafe.Pointer(entryPtr)) { //nolint:all
 					probe--
 					continue
@@ -968,8 +920,8 @@ func dwhtCalcSlotLen(capacity uintptr) uintptr {
 }
 
 //go:nosplit
-func dwhtStart(h1v, mask uintptr) uintptr {
-	return h1v & mask
+func dwhtStart(h1v uint32, mask uintptr) uintptr {
+	return uintptr(h1v) & mask
 }
 
 //go:nosplit
@@ -978,12 +930,12 @@ func dwhtCtrlState(ctrl uint64) uint64 {
 }
 
 //go:nosplit
-func dwhtCtrlH2(ctrl uint64) uint16 {
-	return uint16(ctrl >> dwhtH2Shift)
+func dwhtCtrlH2(ctrl uint64) uint32 {
+	return uint32(ctrl >> dwhtH2Shift)
 }
 
 //go:nosplit
-func dwhtCtrlInsert(ctrl uint64, h2v uint16) uint64 {
+func dwhtCtrlInsert(ctrl uint64, h2v uint32) uint64 {
 	c := (ctrl &^ dwhtStateMask) | dwhtStateFull | dwhtNotPtr
 	c = (c &^ (dwhtH2Mask << dwhtH2Shift)) | (uint64(h2v) << dwhtH2Shift)
 	return c + dwhtSeqInc
