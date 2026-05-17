@@ -101,18 +101,18 @@ const (
 
 const (
 	dwhtMinSlots   = 64
-	dwhtLoadFactor = 0.625
+	dwhtLoadFactor = 0.75
 
 	// dwhtMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	dwhtMaxProbeThreshold = 64
+	dwhtMaxProbeThreshold = 1024
 
 	// dwhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
 	// It MUST be strictly smaller than the initial grow threshold.
-	// Since dwhtMinSlots is 64 and dwhtLoadFactor is 0.625, the first grow
-	// happens at 40 entries. If this mask is too large, the table could fill up
+	// Since dwhtMinSlots is 64 and dwhtLoadFactor is 0.75, the first grow
+	// happens at 48 entries. If this mask is too large, the table could fill up
 	// or hit the probe threshold before sampling the global size in highly
 	// concurrent cold starts.
 	dwhtGrowCheckMask = 7 // Checks every 8th local insert
