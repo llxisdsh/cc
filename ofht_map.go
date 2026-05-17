@@ -15,6 +15,26 @@ const (
 	ofhtEnableDedupVal = true
 )
 
+const (
+	ofhtMinSlots = 128
+	// ofhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
+	ofhtLoadFactor = 0.75
+
+	// ofhtMaxProbeThreshold is the threshold of linear probing depth.
+	// If a store operation probes more than this many slots without success,
+	// it will eagerly trigger a resize even if the table is not fully loaded.
+	ofhtMaxProbeThreshold = 1024
+
+	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
+	// This reduces the overhead of checking the global size on every insertion.
+	// It MUST be strictly smaller than the initial grow threshold.
+	// Since ofhtMinSlots is 64 and ofhtLoadFactor is 0.75, the first grow
+	// happens at 96 entries. If this mask is too large, the table could fill up
+	// or hit the probe threshold before sampling the global size in highly
+	// concurrent cold starts.
+	ofhtGrowCheckMask = ofhtMinSlots/8 - 1 // Checks every 8th local insert
+)
+
 // OFHTMap is an experimental optimistic flat hash table.
 //
 // It uses open addressing with linear probing. Each table slot stores the key
@@ -78,25 +98,6 @@ const (
 	ofhtFrozen = uint64(1) << 63
 )
 
-const (
-	ofhtMinSlots   = 64
-	ofhtLoadFactor = 0.75
-
-	// ofhtMaxProbeThreshold is the threshold of linear probing depth.
-	// If a store operation probes more than this many slots without success,
-	// it will eagerly trigger a resize even if the table is not fully loaded.
-	ofhtMaxProbeThreshold = 1024
-
-	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
-	// This reduces the overhead of checking the global size on every insertion.
-	// It MUST be strictly smaller than the initial grow threshold.
-	// Since ofhtMinSlots is 64 and ofhtLoadFactor is 0.75, the first grow
-	// happens at 48 entries. If this mask is too large, the table could fill up
-	// or hit the probe threshold before sampling the global size in highly
-	// concurrent cold starts.
-	ofhtGrowCheckMask = 7 // Checks every 8th local insert
-)
-
 type ofhtStoreStatus uint8
 
 const (
@@ -148,9 +149,11 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	// var spins int
 	start := ofhtStart(h, table.mask)
@@ -197,9 +200,11 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
 		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h, false)
@@ -225,9 +230,11 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
 		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h, true)
@@ -257,9 +264,11 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
 		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h)
@@ -286,9 +295,11 @@ func (m *OFHTMap[K, V]) Delete(key K) {
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
 		status, _, _ := m.deleteFrom(table, noEscape(&key), h, false)
@@ -308,9 +319,11 @@ func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
 		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h, true)
@@ -330,9 +343,11 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
 		status, swapped := m.compareAndSwapIn(
@@ -359,9 +374,11 @@ func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
-		h = uint32(intHash[K](noescape(unsafe.Pointer(&key))))
+		hash := intHash[K](noescape(unsafe.Pointer(&key)))
+		h = uint32(hash ^ (hash >> 32))
 	} else {
-		h = uint32(m.keyHash(noescape(unsafe.Pointer(&key)), m.seed))
+		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
 		status, deleted := m.compareAndDeleteIn(
