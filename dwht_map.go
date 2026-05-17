@@ -103,6 +103,14 @@ const dwhtSlotBytes = unsafe.Sizeof(dwhtSlotWords{})
 // 	_ [dwhtSlotBytes - 16]byte
 // )
 
+const (
+	dwhtSlotLayoutUnknown uint32 = iota
+	dwhtSlotLayoutRaw
+	dwhtSlotLayoutRot8
+)
+
+var dwhtSlotLayoutHints [bits.UintSize]atomic.Uint32
+
 //go:nosplit
 func (t *dwhtTable[K, V]) slot(i uintptr) *[2]uintptr {
 	return (*[2]uintptr)(unsafe.Add(t.slotsBase, i*dwhtSlotBytes))
@@ -928,19 +936,54 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 }
 
 func makeDWHTSlots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer) {
-	raw := make([]dwhtSlotRaw, int(slotLen))
-	base := unsafe.Pointer(&raw[0].ctrl)
-	if uintptr(base)&(dwhtSlotBytes-1) == 0 {
-		return base, unsafe.Pointer(unsafe.SliceData(raw))
+	hint := &dwhtSlotLayoutHints[bits.TrailingZeros(uint(slotLen))]
+	triedRaw := false
+	triedRot8 := false
+	switch hint.Load() {
+	case dwhtSlotLayoutRaw:
+		triedRaw = true
+		if base, raw, ok := makeDWHTRawSlots(slotLen); ok {
+			return base, raw
+		}
+	case dwhtSlotLayoutRot8:
+		triedRot8 = true
+		if base, raw, ok := makeDWHTRot8Slots(slotLen); ok {
+			return base, raw
+		}
 	}
 
-	rot := make([]dwhtSlotRawRot8, int(slotLen)+1)
-	base = unsafe.Pointer(&rot[0].ctrl)
-	if uintptr(base)&(dwhtSlotBytes-1) == 0 {
-		return base, unsafe.Pointer(unsafe.SliceData(rot))
+	if !triedRaw {
+		if base, raw, ok := makeDWHTRawSlots(slotLen); ok {
+			hint.Store(dwhtSlotLayoutRaw)
+			return base, raw
+		}
+	}
+	if !triedRot8 {
+		if base, raw, ok := makeDWHTRot8Slots(slotLen); ok {
+			hint.Store(dwhtSlotLayoutRot8)
+			return base, raw
+		}
 	}
 
 	panic("cc: DWHTMap slot storage is not 16-byte aligned")
+}
+
+func makeDWHTRawSlots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer, bool) {
+	raw := make([]dwhtSlotRaw, int(slotLen))
+	base := unsafe.Pointer(&raw[0].ctrl)
+	if uintptr(base)&(dwhtSlotBytes-1) == 0 {
+		return base, unsafe.Pointer(unsafe.SliceData(raw)), true
+	}
+	return nil, nil, false
+}
+
+func makeDWHTRot8Slots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer, bool) {
+	rot := make([]dwhtSlotRawRot8, int(slotLen)+1)
+	base := unsafe.Pointer(&rot[0].ctrl)
+	if uintptr(base)&(dwhtSlotBytes-1) == 0 {
+		return base, unsafe.Pointer(unsafe.SliceData(rot)), true
+	}
+	return nil, nil, false
 }
 
 func dwhtCalcSlotLen(capacity uintptr) uintptr {

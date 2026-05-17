@@ -1,6 +1,7 @@
 package cc
 
 import (
+	"math/bits"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -8,9 +9,17 @@ import (
 )
 
 func TestDWHTSlotStorageLayout(t *testing.T) {
+	idx := bits.TrailingZeros(uint(dwhtMinSlots))
+	hint := &dwhtSlotLayoutHints[idx]
+	hint.Store(dwhtSlotLayoutUnknown)
+
 	table := newDWHTTable[int, int](128)
 	if uintptr(table.slotsBase)&(dwhtSlotBytes-1) != 0 {
 		t.Fatalf("slotsBase=%#x is not %d-byte aligned", uintptr(table.slotsBase), dwhtSlotBytes)
+	}
+	first := hint.Load()
+	if first != dwhtSlotLayoutRaw && first != dwhtSlotLayoutRot8 {
+		t.Fatalf("hint=%d, want raw or rot8", first)
 	}
 	for i := range uintptr(4) {
 		slot := table.slot(i)
@@ -20,6 +29,17 @@ func TestDWHTSlotStorageLayout(t *testing.T) {
 		if unsafe.Pointer(&slot[1]) != unsafe.Add(unsafe.Pointer(slot), unsafe.Sizeof(uintptr(0))) {
 			t.Fatalf("slot(%d) entry word is not adjacent to ctrl word", i)
 		}
+	}
+
+	table = newDWHTTable[int, int](128)
+	if uintptr(table.slotsBase)&(dwhtSlotBytes-1) != 0 {
+		t.Fatalf("hinted slotsBase=%#x is not %d-byte aligned", uintptr(table.slotsBase), dwhtSlotBytes)
+	}
+	if table.slotsRaw == nil {
+		t.Fatal("hinted slot storage is nil")
+	}
+	if got := hint.Load(); got != first {
+		t.Fatalf("hint changed from %d to %d", first, got)
 	}
 }
 
