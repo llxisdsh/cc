@@ -73,15 +73,25 @@ type dwhtTable[K comparable, V any] struct {
 	stripeCap  int
 	growCap    uintptr
 	nextTable  atomic.Pointer[dwhtTable[K, V]]
-	allocating atomic.Uint32    // 0: no one is allocating, 1: allocating
-	copyIdx    atomic.Uint32    // Next chunk index for cooperative resize
-	copyDone   atomic.Uint32    // Number of resize chunks completed
-	slotsRaw   []unsafe.Pointer // kept to prevent GC collection of the underlying array
+	allocating atomic.Uint32  // 0: no one is allocating, 1: allocating
+	copyIdx    atomic.Uint32  // Next chunk index for cooperative resize
+	copyDone   atomic.Uint32  // Number of resize chunks completed
+	slotsRaw   unsafe.Pointer // keeps the typed backing array alive for GC
 }
 
 type dwhtEntry[K comparable, V any] struct {
 	key K
 	val V
+}
+
+type dwhtSlotRaw struct {
+	ctrl  uintptr
+	entry unsafe.Pointer
+}
+
+type dwhtSlotRawRot8 struct {
+	entry unsafe.Pointer
+	ctrl  uintptr
 }
 
 type dwhtSlotWords [2]uintptr
@@ -99,12 +109,6 @@ func (t *dwhtTable[K, V]) slot(i uintptr) *[2]uintptr {
 }
 
 const (
-	// dwhtNotPtr is always set on non-empty ctrl words to prevent GC from
-	// treating the ctrl word as a valid pointer. By setting bit 62, we ensure
-	// the value is > maxLegalPointer on all archs, preventing "pointer to
-	// unallocated span" crashes when the GC scans slotsRaw ([]unsafe.Pointer).
-	dwhtNotPtr = uint64(1) << 62
-
 	dwhtStateMask    = uint64(0x3)
 	dwhtStateEmpty   = uint64(0)
 	dwhtStateFull    = uint64(1)
@@ -911,11 +915,7 @@ func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] 
 
 func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dwhtMinSlots))
-	raw := make([]unsafe.Pointer, int(slotLen)*len(dwhtSlotWords{})+1)
-	base := unsafe.Pointer(&raw[0])
-	if uintptr(base)%16 != 0 {
-		base = unsafe.Pointer(&raw[1])
-	}
+	base, raw := makeDWHTSlots(slotLen)
 	growCap := uintptr(float64(slotLen) * dwhtLoadFactor)
 	roundedSizeLen := nextPowOf2(maxProcs())
 	return &dwhtTable[K, V]{
@@ -925,6 +925,22 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
 		growCap:   growCap,
 	}
+}
+
+func makeDWHTSlots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer) {
+	raw := make([]dwhtSlotRaw, int(slotLen))
+	base := unsafe.Pointer(&raw[0].ctrl)
+	if uintptr(base)&(dwhtSlotBytes-1) == 0 {
+		return base, unsafe.Pointer(unsafe.SliceData(raw))
+	}
+
+	rot := make([]dwhtSlotRawRot8, int(slotLen)+1)
+	base = unsafe.Pointer(&rot[0].ctrl)
+	if uintptr(base)&(dwhtSlotBytes-1) == 0 {
+		return base, unsafe.Pointer(unsafe.SliceData(rot))
+	}
+
+	panic("cc: DWHTMap slot storage is not 16-byte aligned")
 }
 
 func dwhtCalcSlotLen(capacity uintptr) uintptr {
@@ -953,17 +969,17 @@ func dwhtCtrlH2(ctrl uint64) uint32 {
 
 //go:nosplit
 func dwhtCtrlInsert(ctrl uint64, h2v uint32) uint64 {
-	c := (ctrl &^ dwhtStateMask) | dwhtStateFull | dwhtNotPtr
+	c := (ctrl &^ dwhtStateMask) | dwhtStateFull
 	c = (c &^ (dwhtH2Mask << dwhtH2Shift)) | (uint64(h2v) << dwhtH2Shift)
 	return c + dwhtSeqInc
 }
 
 //go:nosplit
 func dwhtCtrlUpdate(ctrl uint64) uint64 {
-	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateFull | dwhtNotPtr
+	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateFull
 }
 
 //go:nosplit
 func dwhtCtrlDelete(ctrl uint64) uint64 {
-	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateDeleted | dwhtNotPtr
+	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateDeleted
 }

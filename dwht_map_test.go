@@ -4,7 +4,24 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 )
+
+func TestDWHTSlotStorageLayout(t *testing.T) {
+	table := newDWHTTable[int, int](128)
+	if uintptr(table.slotsBase)&(dwhtSlotBytes-1) != 0 {
+		t.Fatalf("slotsBase=%#x is not %d-byte aligned", uintptr(table.slotsBase), dwhtSlotBytes)
+	}
+	for i := range uintptr(4) {
+		slot := table.slot(i)
+		if unsafe.Pointer(slot) != unsafe.Add(table.slotsBase, i*dwhtSlotBytes) {
+			t.Fatalf("slot(%d) address mismatch", i)
+		}
+		if unsafe.Pointer(&slot[1]) != unsafe.Add(unsafe.Pointer(slot), unsafe.Sizeof(uintptr(0))) {
+			t.Fatalf("slot(%d) entry word is not adjacent to ctrl word", i)
+		}
+	}
+}
 
 func TestDWHTMapBasic(t *testing.T) {
 	m := NewDWHTMap[string, int](WithCapacity(2))
