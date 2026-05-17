@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	ofhtEnableIntKey   = true
-	ofhtEnableDedupVal = true
+	ofhtEnableIntKey         = true
+	ofhtEnableDedupVal       = true
+	ofhtEnableAggressiveGrow = true
 )
 
 const (
@@ -215,7 +216,7 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			m.tryGrow(table, (table.mask+1)<<1)
+			m.tryGrow(table)
 			table = m.ensureTable()
 		case ofhtStoreRetry:
 			table = m.ensureTable()
@@ -247,7 +248,7 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			m.tryGrow(table, (table.mask+1)<<1)
+			m.tryGrow(table)
 			table = m.ensureTable()
 		case ofhtStoreRetry:
 			table = m.ensureTable()
@@ -278,7 +279,7 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			m.tryGrow(table, (table.mask+1)<<1)
+			m.tryGrow(table)
 			table = m.ensureTable()
 		case ofhtStoreRetry:
 			table = m.ensureTable()
@@ -477,7 +478,7 @@ func (m *OFHTMap[K, V]) storeInto(
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
 		if probe > ofhtMaxProbeThreshold {
-			m.tryGrow(table, (table.mask+1)<<1)
+			m.tryGrow(table)
 			return ofhtStoreRetry, *new(V), false
 		}
 		slot := table.slots.At((start + probe) & table.mask)
@@ -801,13 +802,13 @@ func (m *OFHTMap[K, V]) growIfNeeded(table *ofhtTable[K, V]) {
 	if localSize&ofhtGrowCheckMask == 0 {
 		if localSize >= table.stripeCap {
 			if m.size.Value() >= table.growCap {
-				m.tryGrow(table, (table.mask+1)<<1)
+				m.tryGrow(table)
 			}
 		}
 	}
 }
 
-func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
+func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
 	if m.table.Load() != old {
 		return
 	}
@@ -815,13 +816,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			slotLen := old.mask + 1
-			if newLen <= slotLen {
-				newLen = slotLen << 1
-			}
-			newLen = nextPowOf2(max(newLen, m.minLen))
-
-			newTable := newOFHTTable[K, V](newLen)
+			newTable := newOFHTTable[K, V](m.nextGrowSlotLen(old))
 			old.nextTable.Store(newTable)
 			next = newTable
 		} else {
@@ -908,13 +903,32 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V], newLen uintptr) {
 	m.table.CompareAndSwap(old, next)
 }
 
+func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {
+	slotLen := old.mask + 1
+	nextLen := slotLen << 1
+	if !ofhtEnableAggressiveGrow {
+		return nextLen
+	}
+
+	// Resize does not stop all writers immediately; goroutines that already
+	// hold old can keep inserting into slots that have not been frozen yet.
+	// When that concurrent window makes old much denser than the normal grow
+	// threshold, grow for roughly another table worth of inserts instead of
+	// forcing a near-immediate second resize.
+	size := m.size.Value()
+	if size > 0 {
+		nextLen = max(nextLen, ofhtCalcSlotLen(size<<1))
+	}
+	return nextLen
+}
+
 func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 	for {
 		table := m.table.Load()
 		if table != old {
 			return table
 		}
-		m.tryGrow(old, (old.mask+1)<<1)
+		m.tryGrow(old)
 	}
 }
 

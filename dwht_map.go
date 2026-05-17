@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	dwhtEnableIntKey   = true
-	dwhtEnableDedupVal = true
+	dwhtEnableIntKey         = true
+	dwhtEnableDedupVal       = true
+	dwhtEnableAggressiveGrow = true
 )
 
 const (
@@ -236,7 +237,7 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			m.tryGrow(table, (table.mask+1)<<1)
+			m.tryGrow(table)
 			table = m.ensureTable()
 		case dwhtStoreRetry:
 			table = m.ensureTable()
@@ -268,7 +269,7 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			m.tryGrow(table, (table.mask+1)<<1)
+			m.tryGrow(table)
 			table = m.ensureTable()
 		case dwhtStoreRetry:
 			table = m.ensureTable()
@@ -299,7 +300,7 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			m.tryGrow(table, (table.mask+1)<<1)
+			m.tryGrow(table)
 			table = m.ensureTable()
 		case dwhtStoreRetry:
 			table = m.ensureTable()
@@ -793,13 +794,13 @@ func (m *DWHTMap[K, V]) growIfNeeded(table *dwhtTable[K, V]) {
 	if localSize&dwhtGrowCheckMask == 0 {
 		if localSize >= table.stripeCap {
 			if m.size.Value() >= table.growCap {
-				m.tryGrow(table, (table.mask+1)<<1)
+				m.tryGrow(table)
 			}
 		}
 	}
 }
 
-func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V], newLen uintptr) {
+func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) {
 	if m.table.Load() != old {
 		return
 	}
@@ -807,20 +808,7 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V], newLen uintptr) {
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			slotLen := old.mask + 1
-			if newLen <= slotLen {
-				newLen = slotLen << 1
-			}
-			newLen = nextPowOf2(max(newLen, m.minLen))
-
-			// NOTE: We MUST ensure the new table has enough capacity!
-			neededSize := int(m.size.Value()) * 2 // Roughly double the current size
-			neededLen := dwhtCalcSlotLen(uintptr(neededSize))
-			if neededLen > newLen {
-				newLen = neededLen
-			}
-
-			newTable := newDWHTTable[K, V](newLen)
+			newTable := newDWHTTable[K, V](m.nextGrowSlotLen(old))
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
@@ -911,13 +899,32 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V], newLen uintptr) {
 	m.table.CompareAndSwap(old, next)
 }
 
+func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
+	slotLen := old.mask + 1
+	nextLen := slotLen << 1
+	if !dwhtEnableAggressiveGrow {
+		return nextLen
+	}
+
+	// Resize does not stop all writers immediately; goroutines that already
+	// hold old can keep inserting into slots that have not been frozen yet.
+	// When that concurrent window makes old much denser than the normal grow
+	// threshold, grow for roughly another table worth of inserts instead of
+	// forcing a near-immediate second resize.
+	size := m.size.Value()
+	if size > 0 {
+		nextLen = max(nextLen, dwhtCalcSlotLen(size<<1))
+	}
+	return nextLen
+}
+
 func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 	for {
 		table := m.table.Load()
 		if table != old {
 			return table
 		}
-		m.tryGrow(old, (old.mask+1)<<1)
+		m.tryGrow(old)
 	}
 }
 
