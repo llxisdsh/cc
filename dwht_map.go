@@ -237,8 +237,7 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			m.tryGrow(table)
-			table = m.ensureTable()
+			table = m.tryGrow(table)
 		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -269,8 +268,7 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			m.tryGrow(table)
-			table = m.ensureTable()
+			table = m.tryGrow(table)
 		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -300,8 +298,7 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			m.tryGrow(table)
-			table = m.ensureTable()
+			table = m.tryGrow(table)
 		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -803,9 +800,9 @@ func (m *DWHTMap[K, V]) growIfNeeded(table *dwhtTable[K, V]) {
 	}
 }
 
-func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) {
-	if m.table.Load() != old {
-		return
+func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
+	if table := m.table.Load(); table != old {
+		return table
 	}
 
 	next := old.nextTable.Load()
@@ -823,7 +820,7 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) {
 			// 	}
 			// 	runtime.Gosched()
 			// }
-			return // Fallback to retry in caller
+			return old // Fallback to retry in caller
 		}
 	}
 
@@ -872,7 +869,8 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) {
 			h := dwhtCtrlH2(uint64(ctrl))
 			destStart := dwhtStart(h, next.mask)
 			// copied := false
-			for probe := uintptr(0); probe <= next.mask; probe++ {
+			probe := uintptr(0)
+			for ; probe <= next.mask; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
 				destCtrl := atomic.LoadUintptr(&destSlot[0])
 				if dwhtCtrlState(uint64(destCtrl)) != dwhtStateEmpty {
@@ -887,9 +885,9 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) {
 				// copied = true
 				break
 			}
-			// if !copied {
-			// 	panic("cc: DWHTMap grow produced a full table")
-			// }
+			if probe > next.mask {
+				panic("cc: DWHTMap grow produced a full table")
+			}
 		}
 		old.copyDone.Add(1)
 	}
@@ -899,6 +897,7 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) {
 	}
 
 	m.table.CompareAndSwap(old, next)
+	return m.table.Load()
 }
 
 func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
@@ -922,11 +921,10 @@ func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
 
 func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 	for {
-		table := m.table.Load()
-		if table != old {
+		if table := m.tryGrow(old); table != old {
 			return table
 		}
-		m.tryGrow(old)
+		runtime.Gosched()
 	}
 }
 

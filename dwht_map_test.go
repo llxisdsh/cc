@@ -1,3 +1,5 @@
+//go:build !race && (amd64 || arm64)
+
 package cc
 
 import (

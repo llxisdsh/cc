@@ -13,13 +13,13 @@ import (
 const (
 	ofhtEnableIntKey         = true
 	ofhtEnableDedupVal       = true
-	ofhtEnableAggressiveGrow = false
+	ofhtEnableAggressiveGrow = true
 )
 
 const (
 	ofhtMinSlots = 128
 	// ofhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
-	ofhtLoadFactor = 0.75
+	ofhtLoadFactor = 0.625
 
 	// ofhtMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
@@ -216,8 +216,7 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			m.tryGrow(table)
-			table = m.ensureTable()
+			table = m.tryGrow(table)
 		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -248,8 +247,7 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			m.tryGrow(table)
-			table = m.ensureTable()
+			table = m.tryGrow(table)
 		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -279,8 +277,7 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			m.tryGrow(table)
-			table = m.ensureTable()
+			table = m.tryGrow(table)
 		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -478,8 +475,7 @@ func (m *OFHTMap[K, V]) storeInto(
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
 		if probe > ofhtMaxProbeThreshold {
-			m.tryGrow(table)
-			return ofhtStoreRetry, *new(V), false
+			return ofhtStoreFull, *new(V), false
 		}
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -808,9 +804,9 @@ func (m *OFHTMap[K, V]) growIfNeeded(table *ofhtTable[K, V]) {
 	}
 }
 
-func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
-	if m.table.Load() != old {
-		return
+func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
+	if table := m.table.Load(); table != old {
+		return table
 	}
 
 	next := old.nextTable.Load()
@@ -821,14 +817,14 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
 			next = newTable
 		} else {
 			// Wait for leader to allocate
-			for {
-				next = old.nextTable.Load()
-				if next != nil {
-					break
-				}
-				runtime.Gosched()
-			}
-			// return // Fallback to retry in caller
+			// for {
+			// 	next = old.nextTable.Load()
+			// 	if next != nil {
+			// 		break
+			// 	}
+			// 	runtime.Gosched()
+			// }
+			return old // Fallback to retry in caller
 		}
 	}
 
@@ -872,7 +868,8 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
 				// keep the copying logic close to the source.
 				destStart := ofhtStart(h, next.mask)
 				// copied := false
-				for probe := uintptr(0); probe <= next.mask; probe++ {
+				probe := uintptr(0)
+				for ; probe <= next.mask; probe++ {
 					destSlot := next.slots.At((destStart + probe) & next.mask)
 					destCtrl := destSlot.ctrl.Load()
 					if ofhtCtrlState(destCtrl) != ofhtStateEmpty {
@@ -890,9 +887,9 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
 					// copied = true
 					break // Successfully copied this entry
 				}
-				// if !copied {
-				// 	panic("cc: OFHTMap grow produced a full table")
-				// }
+				if probe > next.mask {
+					panic("cc: OFHTMap grow produced a full table")
+				}
 			}
 		}
 		old.copyDone.Add(1)
@@ -903,6 +900,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
 	}
 
 	m.table.CompareAndSwap(old, next)
+	return m.table.Load()
 }
 
 func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {
@@ -926,11 +924,10 @@ func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {
 
 func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 	for {
-		table := m.table.Load()
-		if table != old {
+		if table := m.tryGrow(old); table != old {
 			return table
 		}
-		m.tryGrow(old)
+		runtime.Gosched()
 	}
 }
 
