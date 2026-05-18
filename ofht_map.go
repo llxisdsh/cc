@@ -19,7 +19,7 @@ const (
 const (
 	ofhtMinSlots = 128
 	// ofhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
-	ofhtLoadFactor = 0.625
+	ofhtLoadFactor = 0.75
 
 	// ofhtMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
@@ -820,6 +820,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
 			old.nextTable.Store(newTable)
 			next = newTable
 		} else {
+			// Wait for leader to allocate
 			for {
 				next = old.nextTable.Load()
 				if next != nil {
@@ -827,6 +828,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) {
 				}
 				runtime.Gosched()
 			}
+			// return // Fallback to retry in caller
 		}
 	}
 

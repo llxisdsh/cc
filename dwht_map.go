@@ -15,7 +15,7 @@ import (
 const (
 	dwhtEnableIntKey         = true
 	dwhtEnableDedupVal       = true
-	dwhtEnableAggressiveGrow = false
+	dwhtEnableAggressiveGrow = true
 )
 
 const (
@@ -813,15 +813,14 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) {
 			next = old.nextTable.Load()
 		} else {
 			// Wait for leader to allocate
-			for range 16 {
-				next = old.nextTable.Load()
-				if next != nil {
-					break
-				}
-			}
-			if next == nil {
-				return // Fallback to retry in caller
-			}
+			// for {
+			// 	next = old.nextTable.Load()
+			// 	if next != nil {
+			// 		break
+			// 	}
+			// 	runtime.Gosched()
+			// }
+			return // Fallback to retry in caller
 		}
 	}
 
