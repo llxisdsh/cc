@@ -70,7 +70,7 @@ type ofhtTable[K comparable, V any] struct {
 	slots      unsafeSlice[ofhtSlot[K, V]]
 	mask       uintptr
 	stripeCap  int
-	growCap    uintptr
+	growCap    int
 	nextTable  atomic.Pointer[ofhtTable[K, V]]
 	allocating atomic.Uint32 // 0: no one is allocating, 1: allocating
 	copyIdx    atomic.Uint32 // Next chunk index for cooperative resize
@@ -801,7 +801,7 @@ func (m *OFHTMap[K, V]) growIfNeeded(table *ofhtTable[K, V]) {
 	localSize := int(m.size.Get().Load())
 	if localSize&ofhtGrowCheckMask == 0 {
 		if localSize >= table.stripeCap {
-			if m.size.Value() >= table.growCap {
+			if int(m.size.Value()) >= table.growCap {
 				m.tryGrow(table)
 			}
 		}
@@ -934,7 +934,7 @@ func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] 
 
 func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
-	growCap := uintptr(float64(slotLen) * ofhtLoadFactor)
+	growCap := int(float64(slotLen) * ofhtLoadFactor)
 	roundedSizeLen := nextPowOf2(maxProcs())
 	return &ofhtTable[K, V]{
 		slots:     makeUnsafeSlice[ofhtSlot[K, V]](slotLen),

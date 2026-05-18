@@ -72,7 +72,7 @@ type dwhtTable[K comparable, V any] struct {
 	slotsBase  unsafe.Pointer
 	mask       uintptr
 	stripeCap  int
-	growCap    uintptr
+	growCap    int
 	nextTable  atomic.Pointer[dwhtTable[K, V]]
 	allocating atomic.Uint32  // 0: no one is allocating, 1: allocating
 	copyIdx    atomic.Uint32  // Next chunk index for cooperative resize
@@ -793,7 +793,7 @@ func (m *DWHTMap[K, V]) growIfNeeded(table *dwhtTable[K, V]) {
 	localSize := int(m.size.Get().Load())
 	if localSize&dwhtGrowCheckMask == 0 {
 		if localSize >= table.stripeCap {
-			if m.size.Value() >= table.growCap {
+			if int(m.size.Value()) >= table.growCap {
 				m.tryGrow(table)
 			}
 		}
@@ -931,7 +931,7 @@ func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] 
 func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dwhtMinSlots))
 	base, raw := makeDWHTSlots(slotLen)
-	growCap := uintptr(float64(slotLen) * dwhtLoadFactor)
+	growCap := int(float64(slotLen) * dwhtLoadFactor)
 	roundedSizeLen := nextPowOf2(maxProcs())
 	return &dwhtTable[K, V]{
 		slotsBase: base,
