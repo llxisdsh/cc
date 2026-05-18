@@ -692,6 +692,7 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 	newVal *V,
 	h uint32,
 ) (dwhtStoreStatus, bool) {
+	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		if probe > dwhtMaxProbeThreshold {
@@ -725,7 +726,9 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 				return dwhtStoreOK, false
 			}
 
-			newEntry := &dwhtEntry[K, V]{key: *key, val: *newVal}
+			if newEntry == nil {
+				newEntry = &dwhtEntry[K, V]{key: *key, val: *newVal}
+			}
 			newCtrl := dwhtCtrlUpdate(uint64(ctrl))
 			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
 				probe--
