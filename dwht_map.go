@@ -15,13 +15,13 @@ import (
 const (
 	dwhtEnableIntKey         = true
 	dwhtEnableDedupVal       = true
-	dwhtEnableAggressiveGrow = true
+	dwhtEnableAggressiveGrow = false
 )
 
 const (
 	dwhtMinSlots = 128
 	// dwhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
-	dwhtLoadFactor = 0.75
+	dwhtLoadFactor = 0.625
 
 	// dwhtMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,

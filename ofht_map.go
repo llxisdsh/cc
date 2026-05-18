@@ -13,13 +13,13 @@ import (
 const (
 	ofhtEnableIntKey         = true
 	ofhtEnableDedupVal       = true
-	ofhtEnableAggressiveGrow = true
+	ofhtEnableAggressiveGrow = false
 )
 
 const (
 	ofhtMinSlots = 128
 	// ofhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
-	ofhtLoadFactor = 0.75
+	ofhtLoadFactor = 0.625
 
 	// ofhtMaxProbeThreshold is the threshold of linear probing depth.
 	// If a store operation probes more than this many slots without success,
