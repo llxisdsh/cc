@@ -158,22 +158,14 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 	}
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
+	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
-		if probe > ofhtMaxProbeThreshold {
-			return *new(V), false
-		}
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
-		switch ofhtCtrlState(ctrl) {
-		case ofhtStateEmpty:
-			return *new(V), false
-		case ofhtStateBusy:
-			// delay(&spins)
-			probe--
-			continue
-		case ofhtStateFull:
+		state := ofhtCtrlState(ctrl)
+		if state == ofhtStateFull {
 			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
@@ -190,6 +182,12 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 				probe--
 				continue
 			}
+		} else if state == ofhtStateEmpty {
+			return *new(V), false
+		} else if state == ofhtStateBusy {
+			// delay(&spins)
+			probe--
+			continue
 		}
 	}
 	return *new(V), false
@@ -471,23 +469,17 @@ func (m *OFHTMap[K, V]) storeInto(
 		deletedOK bool
 	)
 	start := ofhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
+	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
-		if probe > ofhtMaxProbeThreshold {
-			return ofhtStoreFull, *new(V), false
-		}
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
 		if ctrl&ofhtFrozen != 0 {
 			return ofhtStoreFrozen, *new(V), false
 		}
-		switch ofhtCtrlState(ctrl) {
-		case ofhtStateBusy:
-			// delay(&spins)
-			probe--
-			continue
-		case ofhtStateFull:
+		state := ofhtCtrlState(ctrl)
+		if state == ofhtStateFull {
 			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
@@ -518,11 +510,15 @@ func (m *OFHTMap[K, V]) storeInto(
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlUpdate(busyCtrl))
 			return ofhtStoreOK, *val, true
-		case ofhtStateDeleted:
+		} else if state == ofhtStateBusy {
+			// delay(&spins)
+			probe--
+			continue
+		} else if state == ofhtStateDeleted {
 			if !deletedOK {
 				deleted, deletedC, deletedOK = slot, ctrl, true
 			}
-		case ofhtStateEmpty:
+		} else if state == ofhtStateEmpty {
 			if deletedOK {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, key, val, h)
 				if status == ofhtStoreRetry {
@@ -576,22 +572,15 @@ func (m *OFHTMap[K, V]) loadAndUpdateIn(
 	h uint32,
 ) (ofhtStoreStatus, V, bool) {
 	start := ofhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > ofhtMaxProbeThreshold {
-			return ofhtStoreFull, *new(V), false
-		}
+	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
 		if ctrl&ofhtFrozen != 0 {
 			return ofhtStoreFrozen, *new(V), false
 		}
-		switch ofhtCtrlState(ctrl) {
-		case ofhtStateEmpty:
-			return ofhtStoreOK, *new(V), false
-		case ofhtStateBusy:
-			probe--
-			continue
-		case ofhtStateFull:
+		state := ofhtCtrlState(ctrl)
+		if state == ofhtStateFull {
 			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
@@ -614,6 +603,11 @@ func (m *OFHTMap[K, V]) loadAndUpdateIn(
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlUpdate(busyCtrl))
 			return ofhtStoreOK, prev, true
+		} else if state == ofhtStateEmpty {
+			return ofhtStoreOK, *new(V), false
+		} else if state == ofhtStateBusy {
+			probe--
+			continue
 		}
 	}
 	return ofhtStoreOK, *new(V), false
@@ -627,20 +621,15 @@ func (m *OFHTMap[K, V]) deleteFrom(
 ) (ofhtStoreStatus, V, bool) {
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
+	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
 		if ctrl&ofhtFrozen != 0 {
 			return ofhtStoreFrozen, *new(V), false
 		}
-		switch ofhtCtrlState(ctrl) {
-		case ofhtStateEmpty:
-			return ofhtStoreOK, *new(V), false
-		case ofhtStateBusy:
-			// delay(&spins)
-			probe--
-			continue
-		case ofhtStateFull:
+		state := ofhtCtrlState(ctrl)
+		if state == ofhtStateFull {
 			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
@@ -670,6 +659,12 @@ func (m *OFHTMap[K, V]) deleteFrom(
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(^uintptr(0))
 			return ofhtStoreOK, prev, true
+		} else if state == ofhtStateEmpty {
+			return ofhtStoreOK, *new(V), false
+		} else if state == ofhtStateBusy {
+			// delay(&spins)
+			probe--
+			continue
 		}
 	}
 	return ofhtStoreOK, *new(V), false
@@ -684,20 +679,15 @@ func (m *OFHTMap[K, V]) compareAndSwapIn(
 ) (ofhtStoreStatus, bool) {
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
+	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
 		if ctrl&ofhtFrozen != 0 {
 			return ofhtStoreFrozen, false
 		}
-		switch ofhtCtrlState(ctrl) {
-		case ofhtStateEmpty:
-			return ofhtStoreOK, false
-		case ofhtStateBusy:
-			// delay(&spins)
-			probe--
-			continue
-		case ofhtStateFull:
+		state := ofhtCtrlState(ctrl)
+		if state == ofhtStateFull {
 			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
@@ -727,6 +717,12 @@ func (m *OFHTMap[K, V]) compareAndSwapIn(
 			slot.val.WriteUnfenced(*newVal)
 			slot.ctrl.Store(ofhtCtrlUpdate(busyCtrl))
 			return ofhtStoreOK, true
+		} else if state == ofhtStateEmpty {
+			return ofhtStoreOK, false
+		} else if state == ofhtStateBusy {
+			// delay(&spins)
+			probe--
+			continue
 		}
 	}
 	return ofhtStoreOK, false
@@ -740,20 +736,15 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 ) (ofhtStoreStatus, bool) {
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
+	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
 		if ctrl&ofhtFrozen != 0 {
 			return ofhtStoreFrozen, false
 		}
-		switch ofhtCtrlState(ctrl) {
-		case ofhtStateEmpty:
-			return ofhtStoreOK, false
-		case ofhtStateBusy:
-			// delay(&spins)
-			probe--
-			continue
-		case ofhtStateFull:
+		state := ofhtCtrlState(ctrl)
+		if state == ofhtStateFull {
 			if ofhtCtrlH2(ctrl) != h {
 				continue
 			}
@@ -785,6 +776,12 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(^uintptr(0))
 			return ofhtStoreOK, true
+		} else if state == ofhtStateEmpty {
+			return ofhtStoreOK, false
+		} else if state == ofhtStateBusy {
+			// delay(&spins)
+			probe--
+			continue
 		}
 	}
 	return ofhtStoreOK, false

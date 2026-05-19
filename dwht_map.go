@@ -190,16 +190,12 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 		h = uint32(hash ^ (hash >> 32))
 	}
 	start := dwhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dwhtMaxProbeThreshold {
-			return *new(V), false
-		}
+	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
-		switch dwhtCtrlState(uint64(ctrl)) {
-		case dwhtStateEmpty:
-			return *new(V), false
-		case dwhtStateFull:
+		state := dwhtCtrlState(uint64(ctrl))
+		if state == dwhtStateFull {
 			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
@@ -211,6 +207,8 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 			if entry.key == key {
 				return entry.val, true
 			}
+		} else if state == dwhtStateEmpty {
+			return *new(V), false
 		}
 	}
 	return *new(V), false
@@ -487,23 +485,19 @@ func (m *DWHTMap[K, V]) storeInto(
 		newEntry  *dwhtEntry[K, V]
 	)
 	start := dwhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dwhtMaxProbeThreshold {
-			return dwhtStoreFull, *new(V), false
-		}
+	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, *new(V), false
 		}
-
-		entry := atomic.LoadUintptr(&slot[1])
-
-		switch dwhtCtrlState(uint64(ctrl)) {
-		case dwhtStateFull:
+		state := dwhtCtrlState(uint64(ctrl))
+		if state == dwhtStateFull {
 			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
+			entry := atomic.LoadUintptr(&slot[1])
 			if entry == 0 {
 				continue
 			}
@@ -529,11 +523,13 @@ func (m *DWHTMap[K, V]) storeInto(
 				continue
 			}
 			return dwhtStoreOK, *val, true
-		case dwhtStateDeleted:
+		} else if state == dwhtStateDeleted {
 			if !deletedOK {
+				entry := atomic.LoadUintptr(&slot[1])
 				deleted, deletedC, deletedE, deletedOK = slot, ctrl, entry, true
 			}
-		case dwhtStateEmpty:
+		} else if state == dwhtStateEmpty {
+			entry := atomic.LoadUintptr(&slot[1])
 			if deletedOK {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
 				if status == dwhtStoreRetry {
@@ -590,24 +586,19 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 ) (dwhtStoreStatus, V, bool) {
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dwhtMaxProbeThreshold {
-			return dwhtStoreFull, *new(V), false
-		}
+	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, *new(V), false
 		}
-		entry := atomic.LoadUintptr(&slot[1])
-
-		switch dwhtCtrlState(uint64(ctrl)) {
-		case dwhtStateEmpty:
-			return dwhtStoreOK, *new(V), false
-		case dwhtStateFull:
+		state := dwhtCtrlState(uint64(ctrl))
+		if state == dwhtStateFull {
 			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
+			entry := atomic.LoadUintptr(&slot[1])
 			if entry == 0 {
 				continue
 			}
@@ -624,6 +615,8 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 				continue
 			}
 			return dwhtStoreOK, e.val, true
+		} else if state == dwhtStateEmpty {
+			return dwhtStoreOK, *new(V), false
 		}
 	}
 	return dwhtStoreOK, *new(V), false
@@ -636,25 +629,19 @@ func (m *DWHTMap[K, V]) deleteFrom(
 	needValue bool,
 ) (dwhtStoreStatus, V, bool) {
 	start := dwhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dwhtMaxProbeThreshold {
-			return dwhtStoreFull, *new(V), false
-		}
+	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, *new(V), false
 		}
-
-		entry := atomic.LoadUintptr(&slot[1])
-
-		switch dwhtCtrlState(uint64(ctrl)) {
-		case dwhtStateEmpty:
-			return dwhtStoreOK, *new(V), false
-		case dwhtStateFull:
+		state := dwhtCtrlState(uint64(ctrl))
+		if state == dwhtStateFull {
 			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
+			entry := atomic.LoadUintptr(&slot[1])
 			if entry == 0 {
 				continue
 			}
@@ -677,6 +664,8 @@ func (m *DWHTMap[K, V]) deleteFrom(
 
 			m.size.Add(^uintptr(0))
 			return dwhtStoreOK, prev, true
+		} else if state == dwhtStateEmpty {
+			return dwhtStoreOK, *new(V), false
 		}
 	}
 	return dwhtStoreOK, *new(V), false
@@ -691,24 +680,19 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 ) (dwhtStoreStatus, bool) {
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dwhtMaxProbeThreshold {
-			return dwhtStoreFull, false
-		}
+	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, false
 		}
-		entry := atomic.LoadUintptr(&slot[1])
-
-		switch dwhtCtrlState(uint64(ctrl)) {
-		case dwhtStateEmpty:
-			return dwhtStoreOK, false
-		case dwhtStateFull:
+		state := dwhtCtrlState(uint64(ctrl))
+		if state == dwhtStateFull {
 			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
+			entry := atomic.LoadUintptr(&slot[1])
 			if entry == 0 {
 				continue
 			}
@@ -732,6 +716,8 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 				continue
 			}
 			return dwhtStoreOK, true
+		} else if state == dwhtStateEmpty {
+			return dwhtStoreOK, false
 		}
 	}
 	return dwhtStoreOK, false
@@ -744,24 +730,19 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 	h uint32,
 ) (dwhtStoreStatus, bool) {
 	start := dwhtStart(h, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		if probe > dwhtMaxProbeThreshold {
-			return dwhtStoreFull, false
-		}
+	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUintptr(&slot[0])
 		if uint64(ctrl)&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, false
 		}
-		entry := atomic.LoadUintptr(&slot[1])
-
-		switch dwhtCtrlState(uint64(ctrl)) {
-		case dwhtStateEmpty:
-			return dwhtStoreOK, false
-		case dwhtStateFull:
+		state := dwhtCtrlState(uint64(ctrl))
+		if state == dwhtStateFull {
 			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
+			entry := atomic.LoadUintptr(&slot[1])
 			if entry == 0 {
 				continue
 			}
@@ -784,6 +765,8 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 
 			m.size.Add(^uintptr(0))
 			return dwhtStoreOK, true
+		} else if state == dwhtStateEmpty {
+			return dwhtStoreOK, false
 		}
 	}
 	return dwhtStoreOK, false
