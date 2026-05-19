@@ -112,6 +112,66 @@ func TestOFHTMapGrow(t *testing.T) {
 	}
 }
 
+func TestOFHTMapZeroValueReady(t *testing.T) {
+	var m OFHTMap[string, int]
+
+	if got, ok := m.Load("missing"); ok || got != 0 {
+		t.Fatalf("Load(missing)=(%d,%v), want (0,false)", got, ok)
+	}
+
+	m.Store("a", 1)
+	if got, ok := m.Load("a"); !ok || got != 1 {
+		t.Fatalf("Load(a) after Store=(%d,%v), want (1,true)", got, ok)
+	}
+
+	if got, loaded := m.LoadOrStore("a", 2); !loaded || got != 1 {
+		t.Fatalf("LoadOrStore existing=(%d,%v), want (1,true)", got, loaded)
+	}
+	if got, loaded := m.LoadOrStore("b", 3); loaded || got != 3 {
+		t.Fatalf("LoadOrStore new=(%d,%v), want (3,false)", got, loaded)
+	}
+
+	if prev, loaded := m.LoadAndUpdate("a", 4); !loaded || prev != 1 {
+		t.Fatalf("LoadAndUpdate(a)=(%d,%v), want (1,true)", prev, loaded)
+	}
+	if prev, loaded := m.LoadAndUpdate("missing", 9); loaded || prev != 0 {
+		t.Fatalf("LoadAndUpdate(missing)=(%d,%v), want (0,false)", prev, loaded)
+	}
+
+	if !m.CompareAndSwap("a", 4, 5) {
+		t.Fatal("CompareAndSwap should succeed")
+	}
+	if m.CompareAndSwap("a", 4, 6) {
+		t.Fatal("CompareAndSwap should fail with stale value")
+	}
+
+	if m.CompareAndDelete("a", 4) {
+		t.Fatal("CompareAndDelete should fail with stale value")
+	}
+	if !m.CompareAndDelete("a", 5) {
+		t.Fatal("CompareAndDelete should succeed")
+	}
+	if _, ok := m.Load("a"); ok {
+		t.Fatal("key a should be deleted")
+	}
+
+	if prev, loaded := m.LoadAndDelete("b"); !loaded || prev != 3 {
+		t.Fatalf("LoadAndDelete(b)=(%d,%v), want (3,true)", prev, loaded)
+	}
+	if prev, loaded := m.LoadAndDelete("b"); loaded || prev != 0 {
+		t.Fatalf("LoadAndDelete(b) second=(%d,%v), want (0,false)", prev, loaded)
+	}
+
+	count := 0
+	m.Range(func(k string, v int) bool {
+		count++
+		return true
+	})
+	if count != 0 {
+		t.Fatalf("Range count=%d, want 0", count)
+	}
+}
+
 func TestOFHTMapConcurrentLoadOrStoreSingleWinner(t *testing.T) {
 	m := NewOFHTMap[string, int]()
 	const goroutines = 64

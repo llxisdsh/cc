@@ -59,14 +59,15 @@ const (
 // Compared with OFHTMap, DWHTMap pays one heap object per live entry, but slot
 // publication is atomic and readers never observe a busy inline-update state.
 type DWHTMap[K comparable, V any] struct {
-	_        noCopy
-	table    atomic.Pointer[dwhtTable[K, V]]
-	intKey   bool
-	seed     uintptr
-	keyHash  HashFunc
-	valEqual EqualFunc
-	minLen   uintptr
-	size     PLocalCounter
+	_         noCopy
+	table     atomic.Pointer[dwhtTable[K, V]]
+	initState atomic.Uint32
+	intKey    bool
+	seed      uintptr
+	keyHash   HashFunc
+	valEqual  EqualFunc
+	minLen    uintptr
+	size      PLocalCounter
 }
 
 type dwhtTable[K comparable, V any] struct {
@@ -451,25 +452,28 @@ func (m *DWHTMap[K, V]) ensureTable() *dwhtTable[K, V] {
 	if table != nil {
 		return table
 	}
-	// Lock-free init
-	newTab := newDWHTTable[K, V](m.minLen)
-	if m.table.CompareAndSwap(nil, newTab) {
-		return newTab
-	}
-	return m.table.Load()
+	return m.slowInit()
 }
 
-// //go:nosplit
-// func (m *DWHTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
-// 	if dwhtEnableIntKey {
-// 		if m.intKey {
-// 			h1v := intHash[K](noescape(unsafe.Pointer(key)))
-// 			return h1v, uint16(h1v ^ (h1v >> 16))
-// 		}
-// 	}
-// 	h1v := m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
-// 	return h1v >> 16, uint16(h1v)
-// }
+//go:noinline
+func (m *DWHTMap[K, V]) slowInit() *dwhtTable[K, V] {
+	for {
+		table := m.table.Load()
+		if table != nil {
+			return table
+		}
+		if m.initState.CompareAndSwap(0, 1) {
+			table = m.table.Load()
+			if table == nil {
+				var cfg MapConfig
+				m.init(noEscape(&cfg))
+				table = m.table.Load()
+			}
+			return table
+		}
+		runtime.Gosched()
+	}
+}
 
 func (m *DWHTMap[K, V]) storeInto(
 	table *dwhtTable[K, V],

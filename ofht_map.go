@@ -57,14 +57,15 @@ const (
 // to a slot are not single-instruction atomic because generic K/V values are
 // stored inline.
 type OFHTMap[K comparable, V any] struct {
-	_        noCopy
-	table    atomic.Pointer[ofhtTable[K, V]]
-	intKey   bool
-	seed     uintptr
-	keyHash  HashFunc
-	valEqual EqualFunc
-	minLen   uintptr
-	size     PLocalCounter
+	_         noCopy
+	table     atomic.Pointer[ofhtTable[K, V]]
+	initState atomic.Uint32
+	intKey    bool
+	seed      uintptr
+	keyHash   HashFunc
+	valEqual  EqualFunc
+	minLen    uintptr
+	size      PLocalCounter
 }
 
 type ofhtTable[K comparable, V any] struct {
@@ -436,25 +437,28 @@ func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {
 	if table != nil {
 		return table
 	}
-	// Lock-free init
-	newTab := newOFHTTable[K, V](m.minLen)
-	if m.table.CompareAndSwap(nil, newTab) {
-		return newTab
-	}
-	return m.table.Load()
+	return m.slowInit()
 }
 
-// //go:nosplit
-// func (m *OFHTMap[K, V]) hashKey(key *K) (uintptr, uint16) {
-// 	if ofhtEnableIntKey {
-// 		if m.intKey {
-// 			h1v := intHash[K](noescape(unsafe.Pointer(key)))
-// 			return h1v, uint16(h1v ^ (h1v >> 16))
-// 		}
-// 	}
-// 	h1v := m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
-// 	return h1v >> 16, uint16(h1v)
-// }
+//go:noinline
+func (m *OFHTMap[K, V]) slowInit() *ofhtTable[K, V] {
+	for {
+		table := m.table.Load()
+		if table != nil {
+			return table
+		}
+		if m.initState.CompareAndSwap(0, 1) {
+			table = m.table.Load()
+			if table == nil {
+				var cfg MapConfig
+				m.init(noEscape(&cfg))
+				table = m.table.Load()
+			}
+			return table
+		}
+		runtime.Gosched()
+	}
+}
 
 func (m *OFHTMap[K, V]) storeInto(
 	table *ofhtTable[K, V],
