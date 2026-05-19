@@ -14,6 +14,7 @@ const (
 	ofhtEnableIntKey         = true
 	ofhtEnableDedupVal       = true
 	ofhtEnableAggressiveGrow = true
+	ofhtEnableStoreInGrow    = false
 )
 
 const (
@@ -813,22 +814,24 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 			old.nextTable.Store(newTable)
 			next = newTable
 		} else {
+			if ofhtEnableStoreInGrow {
+				return old // Fallback to retry in caller
+			}
 			// Wait for leader to allocate
-			// for {
-			// 	next = old.nextTable.Load()
-			// 	if next != nil {
-			// 		break
-			// 	}
-			// 	runtime.Gosched()
-			// }
-			return old // Fallback to retry in caller
+			for {
+				next = old.nextTable.Load()
+				if next != nil {
+					break
+				}
+				runtime.Gosched()
+			}
 		}
 	}
 
 	slotLen := old.mask + 1
-	cpus := maxProcs()
-	chunks := uint32(calcParallelism(slotLen, cpus*resizeOverPartition))
+	chunks := uint32(calcParallelism(slotLen, maxProcs()*resizeOverPartition))
 	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
+	probeLimit := min(next.mask, uintptr(ofhtMaxProbeThreshold))
 
 	// Cooperative resize.
 	// Each slot is frozen before it is copied. This removes the old global
@@ -837,7 +840,13 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 	for {
 		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= chunks {
-			break
+			for {
+				table := m.table.Load()
+				if table != old {
+					return table
+				}
+				runtime.Gosched()
+			}
 		}
 		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
@@ -864,9 +873,8 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 				// Inline copyEntry to avoid function call overhead and
 				// keep the copying logic close to the source.
 				destStart := ofhtStart(h, next.mask)
-				// copied := false
 				probe := uintptr(0)
-				for ; probe <= next.mask; probe++ {
+				for ; probe <= probeLimit; probe++ {
 					destSlot := next.slots.At((destStart + probe) & next.mask)
 					destCtrl := destSlot.ctrl.Load()
 					if ofhtCtrlState(destCtrl) != ofhtStateEmpty {
@@ -881,23 +889,18 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 
 					destSlot.key.WriteUnfenced(k)
 					destSlot.val.WriteUnfenced(v)
-					// copied = true
 					break // Successfully copied this entry
 				}
-				if probe > next.mask {
-					panic("cc: OFHTMap grow produced a full table")
+				if probe > probeLimit {
+					panic("cc: OFHTMap grow exceeded max probe threshold")
 				}
 			}
 		}
-		old.copyDone.Add(1)
+		if old.copyDone.Add(1) == chunks {
+			m.table.CompareAndSwap(old, next)
+			return next
+		}
 	}
-
-	for old.copyDone.Load() < chunks {
-		runtime.Gosched()
-	}
-
-	m.table.CompareAndSwap(old, next)
-	return m.table.Load()
 }
 
 func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {

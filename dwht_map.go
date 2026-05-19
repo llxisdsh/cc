@@ -16,6 +16,7 @@ const (
 	dwhtEnableIntKey         = true
 	dwhtEnableDedupVal       = true
 	dwhtEnableAggressiveGrow = true
+	dwhtEnableStoreInGrow    = true
 )
 
 const (
@@ -795,23 +796,24 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
+			if dwhtEnableStoreInGrow {
+				return old // Fallback to retry in caller
+			}
 			// Wait for leader to allocate
-			// for {
-			// 	next = old.nextTable.Load()
-			// 	if next != nil {
-			// 		break
-			// 	}
-			// 	runtime.Gosched()
-			// }
-			return old // Fallback to retry in caller
+			for {
+				next = old.nextTable.Load()
+				if next != nil {
+					break
+				}
+				runtime.Gosched()
+			}
 		}
 	}
 
 	slotLen := old.mask + 1
-	cpus := maxProcs()
-	chunks := uint32(calcParallelism(slotLen, cpus*resizeOverPartition))
+	chunks := uint32(calcParallelism(slotLen, maxProcs()*resizeOverPartition))
 	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
-
+	probeLimit := min(next.mask, uintptr(dwhtMaxProbeThreshold))
 	// Cooperative resize.
 	// Each slot is frozen before it is copied. This removes the old global
 	// freeze barrier while preserving the key rule: a copied slot can no longer
@@ -819,7 +821,13 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 	for {
 		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= chunks {
-			break
+			for {
+				table := m.table.Load()
+				if table != old {
+					return table
+				}
+				runtime.Gosched()
+			}
 		}
 		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
@@ -851,9 +859,8 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 
 			h := dwhtCtrlH2(uint64(ctrl))
 			destStart := dwhtStart(h, next.mask)
-			// copied := false
 			probe := uintptr(0)
-			for ; probe <= next.mask; probe++ {
+			for ; probe <= probeLimit; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
 				destCtrl := atomic.LoadUintptr(&destSlot[0])
 				if dwhtCtrlState(uint64(destCtrl)) != dwhtStateEmpty {
@@ -865,22 +872,17 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 					probe--
 					continue
 				}
-				// copied = true
 				break
 			}
-			if probe > next.mask {
+			if probe > probeLimit {
 				panic("cc: DWHTMap grow produced a full table")
 			}
 		}
-		old.copyDone.Add(1)
+		if old.copyDone.Add(1) == chunks {
+			m.table.CompareAndSwap(old, next)
+			return next
+		}
 	}
-
-	for old.copyDone.Load() < chunks {
-		runtime.Gosched()
-	}
-
-	m.table.CompareAndSwap(old, next)
-	return m.table.Load()
 }
 
 func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
