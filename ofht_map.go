@@ -815,6 +815,10 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 			next = newTable
 		} else {
 			if ofhtEnableStoreInGrow {
+				// When this switch is on, writers may keep retrying store paths while
+				// resize is still allocating/cooperating. In OFHT, busy-slot handshakes
+				// (ofhtStateBusy) can amplify that contention; turning this switch off
+				// usually makes tryGrow progress more smoothly.
 				return old // Fallback to retry in caller
 			}
 			// Wait for leader to allocate
