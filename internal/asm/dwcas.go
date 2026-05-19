@@ -23,7 +23,7 @@ var writeBarrier struct {
 // the runtime atomic write barrier before the raw assembly CAS.
 //
 //go:nosplit
-func DWCAS(ptr unsafe.Pointer, old1 uintptr, old2 unsafe.Pointer, new1 uintptr, new2 unsafe.Pointer) bool {
+func DWCAS(ptr unsafe.Pointer, old1 uint64, old2 unsafe.Pointer, new1 uint64, new2 unsafe.Pointer) bool {
 	if writeBarrier.enabled {
 		runtime_atomicwb((*unsafe.Pointer)(unsafe.Add(ptr, 8)), new2)
 	}
@@ -31,7 +31,7 @@ func DWCAS(ptr unsafe.Pointer, old1 uintptr, old2 unsafe.Pointer, new1 uintptr, 
 }
 
 //go:nosplit
-func dwcasAsm(ptr unsafe.Pointer, old1 uintptr, old2 unsafe.Pointer, new1 uintptr, new2 unsafe.Pointer) bool
+func dwcasAsm(ptr unsafe.Pointer, old1 uint64, old2 unsafe.Pointer, new1 uint64, new2 unsafe.Pointer) bool
 
 //go:nosplit
 //go:linkname runtime_atomicwb runtime.atomicwb

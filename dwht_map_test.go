@@ -28,7 +28,7 @@ func TestDWHTSlotStorageLayout(t *testing.T) {
 		if unsafe.Pointer(slot) != unsafe.Add(table.slotsBase, i*dwhtSlotBytes) {
 			t.Fatalf("slot(%d) address mismatch", i)
 		}
-		if unsafe.Pointer(&slot[1]) != unsafe.Add(unsafe.Pointer(slot), unsafe.Sizeof(uintptr(0))) {
+		if unsafe.Pointer(&slot.entry) != unsafe.Add(unsafe.Pointer(slot), unsafe.Sizeof(uintptr(0))) {
 			t.Fatalf("slot(%d) entry word is not adjacent to ctrl word", i)
 		}
 	}

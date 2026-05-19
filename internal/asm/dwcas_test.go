@@ -19,7 +19,7 @@ func TestDWCAS(t *testing.T) {
 	ptr[1] = 20
 
 	// successful CAS
-	ok := DWCAS(base, uintptr(10), unsafe.Pointer(uintptr(20)), uintptr(30), unsafe.Pointer(uintptr(40))) //nolint:all
+	ok := DWCAS(base, uint64(10), unsafe.Pointer(uintptr(20)), uint64(30), unsafe.Pointer(uintptr(40))) //nolint:all
 	if !ok {
 		t.Fatalf("expected CAS to succeed")
 	}
@@ -28,7 +28,7 @@ func TestDWCAS(t *testing.T) {
 	}
 
 	// failed CAS
-	ok = DWCAS(base, uintptr(10), unsafe.Pointer(uintptr(20)), uintptr(50), unsafe.Pointer(uintptr(60))) //nolint:all
+	ok = DWCAS(base, uint64(10), unsafe.Pointer(uintptr(20)), uint64(50), unsafe.Pointer(uintptr(60))) //nolint:all
 	if ok {
 		t.Fatalf("expected CAS to fail")
 	}

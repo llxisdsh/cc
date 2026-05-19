@@ -2,7 +2,7 @@
 
 #include "textflag.h"
 
-// func dwcasAsm(ptr unsafe.Pointer, old1 uintptr, old2 unsafe.Pointer, new1 uintptr, new2 unsafe.Pointer) bool
+// func dwcasAsm(ptr unsafe.Pointer, old1 uint64, old2 unsafe.Pointer, new1 uint64, new2 unsafe.Pointer) bool
 //
 // Uses ARMv8.1-A LSE CASPAL for maximum throughput. This experimental map
 // intentionally targets newer ARM64 CPUs; non-LSE ARMv8.0 hardware is not

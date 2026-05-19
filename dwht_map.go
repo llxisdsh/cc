@@ -88,18 +88,21 @@ type dwhtEntry[K comparable, V any] struct {
 }
 
 type dwhtSlotRaw struct {
-	ctrl  uintptr
+	ctrl  uint64
 	entry unsafe.Pointer
 }
 
 type dwhtSlotRawRot8 struct {
 	entry unsafe.Pointer
-	ctrl  uintptr
+	ctrl  uint64
 }
 
-type dwhtSlotWords [2]uintptr
+type dwhtSlotView struct {
+	ctrl  uint64
+	entry unsafe.Pointer
+}
 
-const dwhtSlotBytes = unsafe.Sizeof(dwhtSlotWords{})
+const dwhtSlotBytes = unsafe.Sizeof(dwhtSlotView{})
 
 // var (
 // 	_ [16 - dwhtSlotBytes]byte
@@ -115,8 +118,8 @@ const (
 var dwhtSlotLayoutHints [bits.UintSize]atomic.Uint32
 
 //go:nosplit
-func (t *dwhtTable[K, V]) slot(i uintptr) *[2]uintptr {
-	return (*[2]uintptr)(unsafe.Add(t.slotsBase, i*dwhtSlotBytes))
+func (t *dwhtTable[K, V]) slot(i uintptr) *dwhtSlotView {
+	return (*dwhtSlotView)(unsafe.Add(t.slotsBase, i*dwhtSlotBytes))
 }
 
 const (
@@ -195,17 +198,17 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		state := dwhtCtrlState(uint64(ctrl))
+		ctrl := atomic.LoadUint64(&slot.ctrl)
+		state := dwhtCtrlState(ctrl)
 		if state == dwhtStateFull {
-			if dwhtCtrlH2(uint64(ctrl)) != h {
+			if dwhtCtrlH2(ctrl) != h {
 				continue
 			}
-			entryPtr := atomic.LoadUintptr(&slot[1])
-			if entryPtr == 0 {
+			entryPtr := atomic.LoadPointer(&slot.entry)
+			if entryPtr == nil {
 				continue
 			}
-			entry := (*dwhtEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
+			entry := (*dwhtEntry[K, V])(entryPtr)
 			if entry.key == key {
 				return entry.val, true
 			}
@@ -420,15 +423,15 @@ func (m *DWHTMap[K, V]) Range(yield func(K, V) bool) {
 	}
 	for i := uintptr(0); i <= table.mask; i++ {
 		slot := table.slot(i)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if dwhtCtrlState(uint64(ctrl)) != dwhtStateFull {
+		ctrl := atomic.LoadUint64(&slot.ctrl)
+		if dwhtCtrlState(ctrl) != dwhtStateFull {
 			continue
 		}
-		entryPtr := atomic.LoadUintptr(&slot[1])
-		if entryPtr == 0 {
+		entryPtr := atomic.LoadPointer(&slot.entry)
+		if entryPtr == nil {
 			continue
 		}
-		entry := (*dwhtEntry[K, V])(unsafe.Pointer(entryPtr)) //nolint:all
+		entry := (*dwhtEntry[K, V])(entryPtr)
 		if !yield(entry.key, entry.val) {
 			return
 		}
@@ -483,9 +486,9 @@ func (m *DWHTMap[K, V]) storeInto(
 	onlyIfAbsent bool,
 ) (dwhtStoreStatus, V, bool) {
 	var (
-		deleted   *[2]uintptr
-		deletedC  uintptr
-		deletedE  uintptr
+		deleted   *dwhtSlotView
+		deletedC  uint64
+		deletedE  unsafe.Pointer
 		deletedOK bool
 		newEntry  *dwhtEntry[K, V]
 	)
@@ -493,20 +496,20 @@ func (m *DWHTMap[K, V]) storeInto(
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dwhtFrozen != 0 {
+		ctrl := atomic.LoadUint64(&slot.ctrl)
+		if ctrl&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, *new(V), false
 		}
-		state := dwhtCtrlState(uint64(ctrl))
+		state := dwhtCtrlState(ctrl)
 		if state == dwhtStateFull {
-			if dwhtCtrlH2(uint64(ctrl)) != h {
+			if dwhtCtrlH2(ctrl) != h {
 				continue
 			}
-			entry := atomic.LoadUintptr(&slot[1])
-			if entry == 0 {
+			entry := atomic.LoadPointer(&slot.entry)
+			if entry == nil {
 				continue
 			}
-			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(entry)
 			if e.key != *key {
 				continue
 			}
@@ -522,19 +525,19 @@ func (m *DWHTMap[K, V]) storeInto(
 			if newEntry == nil {
 				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
-			newCtrl := dwhtCtrlUpdate(uint64(ctrl))
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			newCtrl := dwhtCtrlUpdate(ctrl)
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, unsafe.Pointer(newEntry)) {
 				probe--
 				continue
 			}
 			return dwhtStoreOK, *val, true
 		} else if state == dwhtStateDeleted {
 			if !deletedOK {
-				entry := atomic.LoadUintptr(&slot[1])
+				entry := atomic.LoadPointer(&slot.entry)
 				deleted, deletedC, deletedE, deletedOK = slot, ctrl, entry, true
 			}
 		} else if state == dwhtStateEmpty {
-			entry := atomic.LoadUintptr(&slot[1])
+			entry := atomic.LoadPointer(&slot.entry)
 			if deletedOK {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
 				if status == dwhtStoreRetry {
@@ -545,8 +548,8 @@ func (m *DWHTMap[K, V]) storeInto(
 			if newEntry == nil {
 				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
-			newCtrl := dwhtCtrlInsert(uint64(ctrl), h)
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			newCtrl := dwhtCtrlInsert(ctrl, h)
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, unsafe.Pointer(newEntry)) {
 				probe--
 				continue
 			}
@@ -561,9 +564,9 @@ func (m *DWHTMap[K, V]) storeInto(
 }
 
 func (m *DWHTMap[K, V]) claimSlot(
-	slot *[2]uintptr,
-	ctrl uintptr,
-	entry uintptr,
+	slot *dwhtSlotView,
+	ctrl uint64,
+	entry unsafe.Pointer,
 	key *K,
 	val *V,
 	h2v uint32,
@@ -575,8 +578,8 @@ func (m *DWHTMap[K, V]) claimSlot(
 	if newEntry == nil {
 		newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 	}
-	newCtrl := dwhtCtrlInsert(uint64(ctrl), h2v)
-	if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+	newCtrl := dwhtCtrlInsert(ctrl, h2v)
+	if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, unsafe.Pointer(newEntry)) {
 		return dwhtStoreRetry, *new(V), false
 	}
 	m.size.Add(1)
@@ -594,8 +597,8 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dwhtFrozen != 0 {
+		ctrl := atomic.LoadUint64(&slot.ctrl)
+		if ctrl&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, *new(V), false
 		}
 		state := dwhtCtrlState(uint64(ctrl))
@@ -603,19 +606,19 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 			if dwhtCtrlH2(uint64(ctrl)) != h {
 				continue
 			}
-			entry := atomic.LoadUintptr(&slot[1])
-			if entry == 0 {
+			entry := atomic.LoadPointer(&slot.entry)
+			if entry == nil {
 				continue
 			}
-			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(entry)
 			if e.key != *key {
 				continue
 			}
 			if newEntry == nil {
 				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
-			newCtrl := dwhtCtrlUpdate(uint64(ctrl))
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			newCtrl := dwhtCtrlUpdate(ctrl)
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, unsafe.Pointer(newEntry)) {
 				probe--
 				continue
 			}
@@ -637,27 +640,27 @@ func (m *DWHTMap[K, V]) deleteFrom(
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dwhtFrozen != 0 {
+		ctrl := atomic.LoadUint64(&slot.ctrl)
+		if ctrl&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, *new(V), false
 		}
-		state := dwhtCtrlState(uint64(ctrl))
+		state := dwhtCtrlState(ctrl)
 		if state == dwhtStateFull {
-			if dwhtCtrlH2(uint64(ctrl)) != h {
+			if dwhtCtrlH2(ctrl) != h {
 				continue
 			}
-			entry := atomic.LoadUintptr(&slot[1])
-			if entry == 0 {
+			entry := atomic.LoadPointer(&slot.entry)
+			if entry == nil {
 				continue
 			}
-			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(entry)
 			if e.key != *key {
 				continue
 			}
 
-			newCtrl := dwhtCtrlDelete(uint64(ctrl))
+			newCtrl := dwhtCtrlDelete(ctrl)
 			// We can nil the entry to help GC, or keep it to allow lock-free readers to finish
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, nil) {
 				probe--
 				continue
 			}
@@ -688,20 +691,20 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dwhtFrozen != 0 {
+		ctrl := atomic.LoadUint64(&slot.ctrl)
+		if ctrl&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, false
 		}
-		state := dwhtCtrlState(uint64(ctrl))
+		state := dwhtCtrlState(ctrl)
 		if state == dwhtStateFull {
-			if dwhtCtrlH2(uint64(ctrl)) != h {
+			if dwhtCtrlH2(ctrl) != h {
 				continue
 			}
-			entry := atomic.LoadUintptr(&slot[1])
-			if entry == 0 {
+			entry := atomic.LoadPointer(&slot.entry)
+			if entry == nil {
 				continue
 			}
-			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(entry)
 			if e.key != *key {
 				continue
 			}
@@ -715,8 +718,8 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 			if newEntry == nil {
 				newEntry = &dwhtEntry[K, V]{key: *key, val: *newVal}
 			}
-			newCtrl := dwhtCtrlUpdate(uint64(ctrl))
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(newEntry)) { //nolint:all
+			newCtrl := dwhtCtrlUpdate(ctrl)
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, unsafe.Pointer(newEntry)) {
 				probe--
 				continue
 			}
@@ -738,20 +741,20 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
-		ctrl := atomic.LoadUintptr(&slot[0])
-		if uint64(ctrl)&dwhtFrozen != 0 {
+		ctrl := atomic.LoadUint64(&slot.ctrl)
+		if ctrl&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, false
 		}
-		state := dwhtCtrlState(uint64(ctrl))
+		state := dwhtCtrlState(ctrl)
 		if state == dwhtStateFull {
-			if dwhtCtrlH2(uint64(ctrl)) != h {
+			if dwhtCtrlH2(ctrl) != h {
 				continue
 			}
-			entry := atomic.LoadUintptr(&slot[1])
-			if entry == 0 {
+			entry := atomic.LoadPointer(&slot.entry)
+			if entry == nil {
 				continue
 			}
-			e := (*dwhtEntry[K, V])(unsafe.Pointer(entry)) //nolint:all
+			e := (*dwhtEntry[K, V])(entry)
 			if e.key != *key {
 				continue
 			}
@@ -762,8 +765,8 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 				return dwhtStoreOK, false
 			}
 
-			newCtrl := dwhtCtrlDelete(uint64(ctrl))
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(newCtrl), unsafe.Pointer(nil)) { //nolint:all
+			newCtrl := dwhtCtrlDelete(ctrl)
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, nil) {
 				probe--
 				continue
 			}
@@ -837,27 +840,27 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
 			slot := old.slot(i)
-			var ctrl uintptr
-			var entry uintptr
+			var ctrl uint64
+			var entry unsafe.Pointer
 			for {
-				ctrl = atomic.LoadUintptr(&slot[0])
-				if uint64(ctrl)&dwhtFrozen != 0 {
-					entry = atomic.LoadUintptr(&slot[1])
+				ctrl = atomic.LoadUint64(&slot.ctrl)
+				if ctrl&dwhtFrozen != 0 {
+					entry = atomic.LoadPointer(&slot.entry)
 					break
 				}
-				entry = atomic.LoadUintptr(&slot[1])
-				if !asm.DWCAS(unsafe.Pointer(slot), ctrl, unsafe.Pointer(entry), uintptr(uint64(ctrl)|dwhtFrozen), unsafe.Pointer(entry)) { //nolint:all
+				entry = atomic.LoadPointer(&slot.entry)
+				if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, ctrl|dwhtFrozen, entry) {
 					continue
 				}
-				ctrl = uintptr(uint64(ctrl) | dwhtFrozen)
+				ctrl |= dwhtFrozen
 				break
 			}
 
-			if dwhtCtrlState(uint64(ctrl)) != dwhtStateFull {
+			if dwhtCtrlState(ctrl) != dwhtStateFull {
 				continue
 			}
 			entryPtr := entry
-			if entryPtr == 0 {
+			if entryPtr == nil {
 				continue
 			}
 
@@ -866,13 +869,13 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 			probe := uintptr(0)
 			for ; probe <= probeLimit; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
-				destCtrl := atomic.LoadUintptr(&destSlot[0])
-				if dwhtCtrlState(uint64(destCtrl)) != dwhtStateEmpty {
+				destCtrl := atomic.LoadUint64(&destSlot.ctrl)
+				if dwhtCtrlState(destCtrl) != dwhtStateEmpty {
 					continue
 				}
-				destEntry := atomic.LoadUintptr(&destSlot[1])
-				newCtrl := dwhtCtrlInsert(uint64(destCtrl), h)
-				if !asm.DWCAS(unsafe.Pointer(destSlot), destCtrl, unsafe.Pointer(destEntry), uintptr(newCtrl), unsafe.Pointer(entryPtr)) { //nolint:all
+				destEntry := atomic.LoadPointer(&destSlot.entry)
+				newCtrl := dwhtCtrlInsert(destCtrl, h)
+				if !asm.DWCAS(unsafe.Pointer(destSlot), destCtrl, destEntry, newCtrl, entryPtr) {
 					probe--
 					continue
 				}
