@@ -73,10 +73,12 @@ type ofhtTable[K comparable, V any] struct {
 	mask       uintptr
 	stripeCap  int
 	growCap    int
-	nextTable  atomic.Pointer[ofhtTable[K, V]]
+	chunkSz    uintptr
+	chunks     uint32
 	allocating atomic.Uint32 // 0: no one is allocating, 1: allocating
 	copyIdx    atomic.Uint32 // Next chunk index for cooperative resize
 	copyDone   atomic.Uint32 // Number of resize chunks completed
+	nextTable  atomic.Pointer[ofhtTable[K, V]]
 }
 
 type ofhtSlot[K comparable, V any] struct {
@@ -837,8 +839,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 	}
 
 	slotLen := old.mask + 1
-	chunks := uint32(calcParallelism(slotLen, maxProcs()*resizeOverPartition))
-	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
+	chunks, chunkSz := old.chunks, old.chunkSz
 	probeLimit := min(next.mask, uintptr(ofhtMaxProbeThreshold))
 
 	// Cooperative resize.
@@ -942,15 +943,20 @@ func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] 
 func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
 	growCap := int(float64(slotLen) * ofhtLoadFactor)
-	roundedSizeLen := nextPowOf2(maxProcs())
+	cpus := maxProcs()
+	roundedSizeLen := nextPowOf2(cpus)
+	chunks, chunkSz := ofhtResizeChunks(slotLen, cpus)
 	return &ofhtTable[K, V]{
 		slots:     makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
 		mask:      slotLen - 1,
 		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
 		growCap:   growCap,
+		chunks:    chunks,
+		chunkSz:   chunkSz,
 	}
 }
 
+//go:nosplit
 func ofhtCalcSlotLen(capacity uintptr) uintptr {
 	if capacity == 0 {
 		return ofhtMinSlots
@@ -958,6 +964,18 @@ func ofhtCalcSlotLen(capacity uintptr) uintptr {
 	const invLoadFactor = 1 / ofhtLoadFactor
 	need := uintptr(float64(capacity+1) * invLoadFactor)
 	return nextPowOf2(max(need, ofhtMinSlots))
+}
+
+//go:nosplit
+func ofhtResizeChunks(slotLen, cpus uintptr) (chunks uint32, chunkSz uintptr) {
+	const overCpus = resizeOverPartition
+	const minSlotsPerCpu = 1
+	want := min(cpus*overCpus, slotLen/minSlotsPerCpu) // slotLen is power-of-two
+	if want <= 1 {
+		return 1, slotLen
+	}
+	c := uint32(1) << (bits.Len32(uint32(want)) - 1) // floorPow2(want)
+	return c, slotLen >> bits.TrailingZeros32(c)
 }
 
 //go:nosplit

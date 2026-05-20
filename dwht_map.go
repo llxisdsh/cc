@@ -75,10 +75,12 @@ type dwhtTable[K comparable, V any] struct {
 	mask       uintptr
 	stripeCap  int
 	growCap    int
+	chunkSz    uintptr
+	chunks     uint32
+	allocating atomic.Uint32 // 0: no one is allocating, 1: allocating
+	copyIdx    atomic.Uint32 // Next chunk index for cooperative resize
+	copyDone   atomic.Uint32 // Number of resize chunks completed
 	nextTable  atomic.Pointer[dwhtTable[K, V]]
-	allocating atomic.Uint32  // 0: no one is allocating, 1: allocating
-	copyIdx    atomic.Uint32  // Next chunk index for cooperative resize
-	copyDone   atomic.Uint32  // Number of resize chunks completed
 	slotsRaw   unsafe.Pointer // keeps the typed backing array alive for GC
 }
 
@@ -572,7 +574,7 @@ func (m *DWHTMap[K, V]) claimSlot(
 	h2v uint32,
 	newEntry *dwhtEntry[K, V],
 ) (dwhtStoreStatus, V, bool) {
-	if uint64(ctrl)&dwhtFrozen != 0 {
+	if ctrl&dwhtFrozen != 0 {
 		return dwhtStoreFrozen, *new(V), false
 	}
 	if newEntry == nil {
@@ -601,9 +603,9 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 		if ctrl&dwhtFrozen != 0 {
 			return dwhtStoreFrozen, *new(V), false
 		}
-		state := dwhtCtrlState(uint64(ctrl))
+		state := dwhtCtrlState(ctrl)
 		if state == dwhtStateFull {
-			if dwhtCtrlH2(uint64(ctrl)) != h {
+			if dwhtCtrlH2(ctrl) != h {
 				continue
 			}
 			entry := atomic.LoadPointer(&slot.entry)
@@ -817,9 +819,8 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 		}
 	}
 
-	slotLen := old.mask + 1
-	chunks := uint32(calcParallelism(slotLen, maxProcs()*resizeOverPartition))
-	chunkSz := uintptr(max(1, slotLen>>bits.TrailingZeros32(chunks)))
+	slotLen := old.mask + 1 // power of two
+	chunks, chunkSz := old.chunks, old.chunkSz
 	probeLimit := min(next.mask, uintptr(dwhtMaxProbeThreshold))
 	// Cooperative resize.
 	// Each slot is frozen before it is copied. This removes the old global
@@ -864,7 +865,7 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 				continue
 			}
 
-			h := dwhtCtrlH2(uint64(ctrl))
+			h := dwhtCtrlH2(ctrl)
 			destStart := dwhtStart(h, next.mask)
 			probe := uintptr(0)
 			for ; probe <= probeLimit; probe++ {
@@ -924,13 +925,17 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dwhtMinSlots))
 	base, raw := makeDWHTSlots(slotLen)
 	growCap := int(float64(slotLen) * dwhtLoadFactor)
-	roundedSizeLen := nextPowOf2(maxProcs())
+	cpus := maxProcs()
+	roundedSizeLen := nextPowOf2(cpus)
+	chunks, chunkSz := dwhtResizeChunks(slotLen, cpus)
 	return &dwhtTable[K, V]{
 		slotsBase: base,
 		slotsRaw:  raw,
 		mask:      slotLen - 1,
 		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
 		growCap:   growCap,
+		chunks:    chunks,
+		chunkSz:   chunkSz,
 	}
 }
 
@@ -985,6 +990,7 @@ func makeDWHTRot8Slots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer, bool) {
 	return nil, nil, false
 }
 
+//go:nosplit
 func dwhtCalcSlotLen(capacity uintptr) uintptr {
 	if capacity == 0 {
 		return dwhtMinSlots
@@ -992,6 +998,18 @@ func dwhtCalcSlotLen(capacity uintptr) uintptr {
 	const invLoadFactor = 1 / dwhtLoadFactor
 	need := uintptr(float64(capacity+1) * invLoadFactor)
 	return nextPowOf2(max(need, dwhtMinSlots))
+}
+
+//go:nosplit
+func dwhtResizeChunks(slotLen, cpus uintptr) (chunks uint32, chunkSz uintptr) {
+	const overCpus = resizeOverPartition
+	const minSlotsPerCpu = 1
+	want := min(cpus*overCpus, slotLen/minSlotsPerCpu) // slotLen is power-of-two
+	if want <= 1 {
+		return 1, slotLen
+	}
+	c := uint32(1) << (bits.Len32(uint32(want)) - 1) // floorPow2(want)
+	return c, slotLen >> bits.TrailingZeros32(c)
 }
 
 //go:nosplit
