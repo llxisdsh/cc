@@ -30,8 +30,7 @@ const (
 	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
 	// It MUST be strictly smaller than the initial grow threshold.
-	// Since ofhtMinSlots is 64 and ofhtLoadFactor is 0.75, the first grow
-	// happens at 96 entries. If this mask is too large, the table could fill up
+	// If this mask is too large, the table could fill up
 	// or hit the probe threshold before sampling the global size in highly
 	// concurrent cold starts.
 	ofhtGrowCheckMask = ofhtMinSlots/8 - 1 // Checks every 8th local insert
@@ -432,6 +431,16 @@ func (m *OFHTMap[K, V]) All() func(yield func(K, V) bool) {
 // Size returns the approximate number of entries in the map.
 func (m *OFHTMap[K, V]) Size() int {
 	return int(m.size.Value())
+}
+
+// Clear clears all key-value pairs from the map.
+func (m *OFHTMap[K, V]) Clear() {
+	table := m.table.Load()
+	if table == nil {
+		return
+	}
+	m.table.Store(newOFHTTable[K, V](m.minLen))
+	m.size.Reset()
 }
 
 func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {

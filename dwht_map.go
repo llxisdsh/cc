@@ -32,8 +32,7 @@ const (
 	// dwhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
 	// It MUST be strictly smaller than the initial grow threshold.
-	// Since dwhtMinSlots is 64 and dwhtLoadFactor is 0.75, the first grow
-	// happens at 96 entries. If this mask is too large, the table could fill up
+	// If this mask is too large, the table could fill up
 	// or hit the probe threshold before sampling the global size in highly
 	// concurrent cold starts.
 	dwhtGrowCheckMask = dwhtMinSlots/8 - 1 // Checks every 8th local insert
@@ -106,10 +105,10 @@ type dwhtSlotView struct {
 
 const dwhtSlotBytes = unsafe.Sizeof(dwhtSlotView{})
 
-// var (
-// 	_ [16 - dwhtSlotBytes]byte
-// 	_ [dwhtSlotBytes - 16]byte
-// )
+var (
+	_ [16 - dwhtSlotBytes]byte
+	_ [dwhtSlotBytes - 16]byte
+)
 
 const (
 	dwhtSlotLayoutUnknown uint32 = iota
@@ -450,6 +449,16 @@ func (m *DWHTMap[K, V]) All() func(yield func(K, V) bool) {
 // Size returns the approximate number of entries in the map.
 func (m *DWHTMap[K, V]) Size() int {
 	return int(m.size.Value())
+}
+
+// Clear clears all key-value pairs from the map.
+func (m *DWHTMap[K, V]) Clear() {
+	table := m.table.Load()
+	if table == nil {
+		return
+	}
+	m.table.Store(newDWHTTable[K, V](m.minLen))
+	m.size.Reset()
 }
 
 func (m *DWHTMap[K, V]) ensureTable() *dwhtTable[K, V] {
