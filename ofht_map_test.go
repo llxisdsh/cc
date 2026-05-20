@@ -281,3 +281,87 @@ func TestOFHTMap_ConcurrentMixedOperations(t *testing.T) {
 		t.Errorf("Range yielded %d items, want %d", count, expectedSize)
 	}
 }
+
+func TestOFHTMapConcurrentSharedKeyChurn(t *testing.T) {
+	m := NewOFHTMap[int, int](WithCapacity(1))
+	const (
+		goroutines = 32
+		ops        = 2000
+		keyMask    = 31 // keep key-space tiny to force heavy contention
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := range goroutines {
+		go func(id int) {
+			defer wg.Done()
+			for i := range ops {
+				k := (i + id) & keyMask
+				v := id*ops + i
+				m.Store(k, v)
+				if got, ok := m.Load(k); ok && got == v {
+					_ = got
+				}
+				if i&1 == 0 {
+					m.Delete(k)
+				} else {
+					_, _ = m.LoadOrStore(k, v+1)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Validate that map is still internally consistent and operable.
+	seen := make(map[int]int)
+	m.Range(func(k, v int) bool {
+		seen[k] = v
+		return true
+	})
+	if len(seen) > keyMask+1 {
+		t.Fatalf("unexpected key count: got=%d want<=%d", len(seen), keyMask+1)
+	}
+	for k, v := range seen {
+		got, ok := m.Load(k)
+		if !ok || got != v {
+			t.Fatalf("post-churn mismatch key=%d got=(%d,%v) want=(%d,true)", k, got, ok, v)
+		}
+	}
+}
+
+func TestOFHTMapClearBasic(t *testing.T) {
+	m := NewOFHTMap[int, int](WithCapacity(16))
+	for i := range 256 {
+		m.Store(i, i+1)
+	}
+	if got := m.Size(); got != 256 {
+		t.Fatalf("Size before Clear=%d, want 256", got)
+	}
+
+	m.Clear()
+	if got := m.Size(); got != 0 {
+		t.Fatalf("Size after Clear=%d, want 0", got)
+	}
+	for i := range 256 {
+		if _, ok := m.Load(i); ok {
+			t.Fatalf("Load(%d) should miss after Clear", i)
+		}
+	}
+
+	// Idempotent clear on an already-empty map.
+	m.Clear()
+	if got := m.Size(); got != 0 {
+		t.Fatalf("Size after second Clear=%d, want 0", got)
+	}
+
+	// Map should remain fully usable after clear.
+	for i := range 64 {
+		m.Store(i, i*10)
+	}
+	for i := range 64 {
+		got, ok := m.Load(i)
+		if !ok || got != i*10 {
+			t.Fatalf("Load(%d) after Clear+Store=(%d,%v), want (%d,true)", i, got, ok, i*10)
+		}
+	}
+}

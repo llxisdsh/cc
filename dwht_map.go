@@ -497,11 +497,11 @@ func (m *DWHTMap[K, V]) storeInto(
 	onlyIfAbsent bool,
 ) (dwhtStoreStatus, V, bool) {
 	var (
-		deleted   *dwhtSlotView
-		deletedC  uint64
-		deletedE  unsafe.Pointer
-		deletedOK bool
-		newEntry  *dwhtEntry[K, V]
+		deleted      *dwhtSlotView
+		deletedC     uint64
+		deletedE     unsafe.Pointer
+		deletedProbe uintptr
+		newEntry     *dwhtEntry[K, V]
 	)
 	start := dwhtStart(h, table.mask)
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
@@ -543,16 +543,21 @@ func (m *DWHTMap[K, V]) storeInto(
 			}
 			return dwhtStoreOK, *val, true
 		} else if state == dwhtStateDeleted {
-			if !deletedOK {
+			if deleted == nil {
 				entry := atomic.LoadPointer(&slot.entry)
-				deleted, deletedC, deletedE, deletedOK = slot, ctrl, entry, true
+				deleted, deletedC, deletedE, deletedProbe = slot, ctrl, entry, probe
 			}
 		} else if state == dwhtStateEmpty {
 			entry := atomic.LoadPointer(&slot.entry)
-			if deletedOK {
+			if deleted != nil {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
 				if status == dwhtStoreRetry {
-					return dwhtStoreRetry, *new(V), false
+					// Local retry: re-probe from the deleted slot position.
+					// Slots before deletedProbe were already checked and
+					// confirmed not to contain our key.
+					probe = deletedProbe - 1
+					deleted = nil
+					continue
 				}
 				return status, rVal, loaded
 			}
@@ -568,7 +573,7 @@ func (m *DWHTMap[K, V]) storeInto(
 			return dwhtStoreOK, *val, false
 		}
 	}
-	if deletedOK {
+	if deleted != nil {
 		return m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
 	}
 	return dwhtStoreFull, *new(V), false

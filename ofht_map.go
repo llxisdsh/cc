@@ -480,9 +480,9 @@ func (m *OFHTMap[K, V]) storeInto(
 ) (ofhtStoreStatus, V, bool) {
 	var (
 		// spins     int
-		deleted   *ofhtSlot[K, V]
-		deletedC  uint64
-		deletedOK bool
+		deleted      *ofhtSlot[K, V]
+		deletedC     uint64
+		deletedProbe uintptr
 	)
 	start := ofhtStart(h, table.mask)
 	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
@@ -531,14 +531,19 @@ func (m *OFHTMap[K, V]) storeInto(
 			probe--
 			continue
 		} else if state == ofhtStateDeleted {
-			if !deletedOK {
-				deleted, deletedC, deletedOK = slot, ctrl, true
+			if deleted == nil {
+				deleted, deletedC, deletedProbe = slot, ctrl, probe
 			}
 		} else if state == ofhtStateEmpty {
-			if deletedOK {
+			if deleted != nil {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, key, val, h)
 				if status == ofhtStoreRetry {
-					return ofhtStoreRetry, *new(V), false
+					// Local retry: re-probe from the deleted slot position.
+					// Slots before deletedProbe were already checked and
+					// confirmed not to contain our key.
+					probe = deletedProbe - 1
+					deleted = nil
+					continue
 				}
 				return status, rVal, loaded
 			}
@@ -554,7 +559,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			return ofhtStoreOK, *val, false
 		}
 	}
-	if deletedOK {
+	if deleted != nil {
 		return m.claimSlot(deleted, deletedC, key, val, h)
 	}
 	return ofhtStoreFull, *new(V), false
