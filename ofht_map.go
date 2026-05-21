@@ -480,9 +480,8 @@ func (m *OFHTMap[K, V]) storeInto(
 ) (ofhtStoreStatus, V, bool) {
 	var (
 		// spins     int
-		deleted      *ofhtSlot[K, V]
-		deletedC     uint64
-		deletedProbe uintptr
+		deleted  *ofhtSlot[K, V]
+		deletedC uint64
 	)
 	start := ofhtStart(h, table.mask)
 	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
@@ -532,18 +531,13 @@ func (m *OFHTMap[K, V]) storeInto(
 			continue
 		} else if state == ofhtStateDeleted {
 			if deleted == nil {
-				deleted, deletedC, deletedProbe = slot, ctrl, probe
+				deleted, deletedC = slot, ctrl
 			}
 		} else if state == ofhtStateEmpty {
 			if deleted != nil {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, key, val, h)
 				if status == ofhtStoreRetry {
-					// Local retry: re-probe from the deleted slot position.
-					// Slots before deletedProbe were already checked and
-					// confirmed not to contain our key.
-					probe = deletedProbe - 1
-					deleted = nil
-					continue
+					return ofhtStoreRetry, *new(V), false
 				}
 				return status, rVal, loaded
 			}
@@ -942,6 +936,24 @@ func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {
 	if size > 0 {
 		nextLen = max(nextLen, ofhtCalcSlotLen(size<<1))
 	}
+
+	if ofhtEnableIntKey && m.intKey {
+		// Raw integer hashes preserve sequential-insert locality, but during
+		// concurrent no-pre-size growth, far-apart ordered ranges can alias on
+		// the low bits of a small power-of-two table. That creates one dense
+		// run and can make resize copying exceed ofhtMaxProbeThreshold even
+		// when the destination table has plenty of empty slots elsewhere.
+		//
+		// Use the observed hash span as an address-space hint only for int keys:
+		// dense spans get enough slots to avoid low-bit folding, while sparse
+		// spans are capped in ofhtHashSpanGrowSlotLen so outliers cannot force
+		// an unbounded allocation.
+		if span, count := ofhtObservedHashSpan(old); span > 0 {
+			if target := ofhtHashSpanGrowSlotLen(span, count, slotLen); target > 0 {
+				nextLen = max(nextLen, target)
+			}
+		}
+	}
 	return nextLen
 }
 
@@ -968,6 +980,60 @@ func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 		chunks:    chunks,
 		chunkSz:   chunkSz,
 	}
+}
+
+func ofhtObservedHashSpan[K comparable, V any](table *ofhtTable[K, V]) (uintptr, uintptr) {
+	slotLen := table.mask + 1
+	var minH, maxH uint32
+	seen := false
+	count := uintptr(0)
+	for i := uintptr(0); i < slotLen; i++ {
+		slot := table.slots.At(i)
+		ctrl := slot.ctrl.Load()
+		if ofhtCtrlState(ctrl) != ofhtStateFull {
+			continue
+		}
+		h := ofhtCtrlH2(ctrl)
+		count++
+		if !seen {
+			minH, maxH, seen = h, h, true
+			continue
+		}
+		if h < minH {
+			minH = h
+		}
+		if h > maxH {
+			maxH = h
+		}
+	}
+	if !seen {
+		return 0, 0
+	}
+	return uintptr(maxH) - uintptr(minH) + 1, count
+}
+
+func ofhtHashSpanGrowSlotLen(span, count, slotLen uintptr) uintptr {
+	// Integer-key span growth is a guard for low-bit aliasing during concurrent
+	// ordered inserts. Dense spans use the exact observed range; sparse spans
+	// are capped so a few outliers cannot force an enormous table.
+	const (
+		denseHashSpanRatio  = 8
+		sparseHashSpanRatio = 32
+		tableHashSpanRatio  = 16
+	)
+	if span == 0 || count == 0 {
+		return 0
+	}
+	target := ofhtCalcSlotLen(span)
+	if span <= count*denseHashSpanRatio {
+		return target
+	}
+
+	limit := max(
+		ofhtCalcSlotLen(count*sparseHashSpanRatio),
+		slotLen*tableHashSpanRatio,
+	)
+	return min(target, limit)
 }
 
 //go:nosplit

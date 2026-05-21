@@ -497,11 +497,10 @@ func (m *DWHTMap[K, V]) storeInto(
 	onlyIfAbsent bool,
 ) (dwhtStoreStatus, V, bool) {
 	var (
-		deleted      *dwhtSlotView
-		deletedC     uint64
-		deletedE     unsafe.Pointer
-		deletedProbe uintptr
-		newEntry     *dwhtEntry[K, V]
+		deleted  *dwhtSlotView
+		deletedC uint64
+		deletedE unsafe.Pointer
+		newEntry *dwhtEntry[K, V]
 	)
 	start := dwhtStart(h, table.mask)
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
@@ -545,19 +544,14 @@ func (m *DWHTMap[K, V]) storeInto(
 		} else if state == dwhtStateDeleted {
 			if deleted == nil {
 				entry := atomic.LoadPointer(&slot.entry)
-				deleted, deletedC, deletedE, deletedProbe = slot, ctrl, entry, probe
+				deleted, deletedC, deletedE = slot, ctrl, entry
 			}
 		} else if state == dwhtStateEmpty {
 			entry := atomic.LoadPointer(&slot.entry)
 			if deleted != nil {
 				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
 				if status == dwhtStoreRetry {
-					// Local retry: re-probe from the deleted slot position.
-					// Slots before deletedProbe were already checked and
-					// confirmed not to contain our key.
-					probe = deletedProbe - 1
-					deleted = nil
-					continue
+					return dwhtStoreRetry, *new(V), false
 				}
 				return status, rVal, loaded
 			}
@@ -923,6 +917,24 @@ func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
 	if size > 0 {
 		nextLen = max(nextLen, dwhtCalcSlotLen(size<<1))
 	}
+
+	if dwhtEnableIntKey && m.intKey {
+		// Raw integer hashes preserve sequential-insert locality, but during
+		// concurrent no-pre-size growth, far-apart ordered ranges can alias on
+		// the low bits of a small power-of-two table. That creates one dense
+		// run and can make resize copying exceed dwhtMaxProbeThreshold even
+		// when the destination table has plenty of empty slots elsewhere.
+		//
+		// Use the observed hash span as an address-space hint only for int keys:
+		// dense spans get enough slots to avoid low-bit folding, while sparse
+		// spans are capped in dwhtHashSpanGrowSlotLen so outliers cannot force
+		// an unbounded allocation.
+		if span, count := dwhtObservedHashSpan(old); span > 0 {
+			if target := dwhtHashSpanGrowSlotLen(span, count, slotLen); target > 0 {
+				nextLen = max(nextLen, target)
+			}
+		}
+	}
 	return nextLen
 }
 
@@ -1002,6 +1014,59 @@ func makeDWHTRot8Slots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer, bool) {
 		return base, unsafe.Pointer(unsafe.SliceData(rot)), true
 	}
 	return nil, nil, false
+}
+
+func dwhtObservedHashSpan[K comparable, V any](table *dwhtTable[K, V]) (uintptr, uintptr) {
+	slotLen := table.mask + 1
+	var minH, maxH uint32
+	seen := false
+	count := uintptr(0)
+	for i := uintptr(0); i < slotLen; i++ {
+		ctrl := atomic.LoadUint64(&table.slot(i).ctrl)
+		if dwhtCtrlState(ctrl) != dwhtStateFull {
+			continue
+		}
+		h := dwhtCtrlH2(ctrl)
+		count++
+		if !seen {
+			minH, maxH, seen = h, h, true
+			continue
+		}
+		if h < minH {
+			minH = h
+		}
+		if h > maxH {
+			maxH = h
+		}
+	}
+	if !seen {
+		return 0, 0
+	}
+	return uintptr(maxH) - uintptr(minH) + 1, count
+}
+
+func dwhtHashSpanGrowSlotLen(span, count, slotLen uintptr) uintptr {
+	// Integer-key span growth is a guard for low-bit aliasing during concurrent
+	// ordered inserts. Dense spans use the exact observed range; sparse spans
+	// are capped so a few outliers cannot force an enormous table.
+	const (
+		denseHashSpanRatio  = 8
+		sparseHashSpanRatio = 32
+		tableHashSpanRatio  = 16
+	)
+	if span == 0 || count == 0 {
+		return 0
+	}
+	target := dwhtCalcSlotLen(span)
+	if span <= count*denseHashSpanRatio {
+		return target
+	}
+
+	limit := max(
+		dwhtCalcSlotLen(count*sparseHashSpanRatio),
+		slotLen*tableHashSpanRatio,
+	)
+	return min(target, limit)
 }
 
 //go:nosplit
