@@ -66,7 +66,7 @@ type DWHTMap[K comparable, V any] struct {
 	keyHash   HashFunc
 	valEqual  EqualFunc
 	minLen    uintptr
-	size      PLocalCounter
+	size      PLocalCounterN
 }
 
 type dwhtTable[K comparable, V any] struct {
@@ -145,6 +145,11 @@ const (
 	dwhtStoreFrozen
 	dwhtStoreFull
 	dwhtStoreRetry
+)
+
+const (
+	dwhtSlotOccupied int = iota
+	dwhtSlotTombstones
 )
 
 // NewDWHTMap creates an experimental DWHT-style map.
@@ -236,12 +241,13 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h, false)
 		switch status {
 		case dwhtStoreOK:
-			m.growIfNeeded(table)
+			m.resizeIfNeeded(table)
 			return
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			table = m.tryGrow(table)
+			occupied := m.size.Value(dwhtSlotOccupied)
+			table = m.tryResize(table, occupied)
 		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -266,13 +272,14 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		switch status {
 		case dwhtStoreOK:
 			if !loaded {
-				m.growIfNeeded(table)
+				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			table = m.tryGrow(table)
+			occupied := m.size.Value(dwhtSlotOccupied)
+			table = m.tryResize(table, occupied)
 		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -302,7 +309,8 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			table = m.tryGrow(table)
+			occupied := m.size.Value(dwhtSlotOccupied)
+			table = m.tryResize(table, occupied)
 		case dwhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -448,7 +456,16 @@ func (m *DWHTMap[K, V]) All() func(yield func(K, V) bool) {
 
 // Size returns the approximate number of entries in the map.
 func (m *DWHTMap[K, V]) Size() int {
-	return int(m.size.Value())
+	table := m.table.Load()
+	if table == nil {
+		return 0
+	}
+	occupied := m.size.Value(dwhtSlotOccupied)
+	tombstones := m.size.Value(dwhtSlotTombstones)
+	if occupied <= tombstones {
+		return 0
+	}
+	return int(occupied - tombstones)
 }
 
 // Clear clears all key-value pairs from the map.
@@ -458,7 +475,7 @@ func (m *DWHTMap[K, V]) Clear() {
 		return
 	}
 	m.table.Store(newDWHTTable[K, V](m.minLen))
-	m.size.Reset()
+	m.size.Clear()
 }
 
 func (m *DWHTMap[K, V]) ensureTable() *dwhtTable[K, V] {
@@ -496,12 +513,7 @@ func (m *DWHTMap[K, V]) storeInto(
 	h uint32,
 	onlyIfAbsent bool,
 ) (dwhtStoreStatus, V, bool) {
-	var (
-		deleted  *dwhtSlotView
-		deletedC uint64
-		deletedE unsafe.Pointer
-		newEntry *dwhtEntry[K, V]
-	)
+	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
 	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
@@ -541,20 +553,8 @@ func (m *DWHTMap[K, V]) storeInto(
 				continue
 			}
 			return dwhtStoreOK, *val, true
-		} else if state == dwhtStateDeleted {
-			if deleted == nil {
-				entry := atomic.LoadPointer(&slot.entry)
-				deleted, deletedC, deletedE = slot, ctrl, entry
-			}
 		} else if state == dwhtStateEmpty {
 			entry := atomic.LoadPointer(&slot.entry)
-			if deleted != nil {
-				status, rVal, loaded := m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
-				if status == dwhtStoreRetry {
-					return dwhtStoreRetry, *new(V), false
-				}
-				return status, rVal, loaded
-			}
 			if newEntry == nil {
 				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}
@@ -563,37 +563,11 @@ func (m *DWHTMap[K, V]) storeInto(
 				probe--
 				continue
 			}
-			m.size.Add(1)
+			m.size.Add(dwhtSlotOccupied, 1)
 			return dwhtStoreOK, *val, false
 		}
 	}
-	if deleted != nil {
-		return m.claimSlot(deleted, deletedC, deletedE, key, val, h, newEntry)
-	}
 	return dwhtStoreFull, *new(V), false
-}
-
-func (m *DWHTMap[K, V]) claimSlot(
-	slot *dwhtSlotView,
-	ctrl uint64,
-	entry unsafe.Pointer,
-	key *K,
-	val *V,
-	h2v uint32,
-	newEntry *dwhtEntry[K, V],
-) (dwhtStoreStatus, V, bool) {
-	if ctrl&dwhtFrozen != 0 {
-		return dwhtStoreFrozen, *new(V), false
-	}
-	if newEntry == nil {
-		newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
-	}
-	newCtrl := dwhtCtrlInsert(ctrl, h2v)
-	if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, unsafe.Pointer(newEntry)) {
-		return dwhtStoreRetry, *new(V), false
-	}
-	m.size.Add(1)
-	return dwhtStoreOK, *val, false
 }
 
 func (m *DWHTMap[K, V]) loadAndUpdateIn(
@@ -679,8 +653,7 @@ func (m *DWHTMap[K, V]) deleteFrom(
 			if needValue {
 				prev = e.val
 			}
-
-			m.size.Add(^uintptr(0))
+			m.size.Add(dwhtSlotTombstones, 1)
 			return dwhtStoreOK, prev, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, *new(V), false
@@ -781,7 +754,7 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 				continue
 			}
 
-			m.size.Add(^uintptr(0))
+			m.size.Add(dwhtSlotTombstones, 1)
 			return dwhtStoreOK, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, false
@@ -790,18 +763,33 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 	return dwhtStoreOK, false
 }
 
-func (m *DWHTMap[K, V]) growIfNeeded(table *dwhtTable[K, V]) {
-	localSize := int(m.size.Get().Load())
-	if localSize&dwhtGrowCheckMask == 0 {
-		if localSize >= table.stripeCap {
-			if int(m.size.Value()) >= table.growCap {
-				m.tryGrow(table)
-			}
-		}
+func (m *DWHTMap[K, V]) resizeIfNeeded(table *dwhtTable[K, V]) {
+	localSize := int(m.size.Get(dwhtSlotOccupied))
+	if localSize&dwhtGrowCheckMask != 0 {
+		return
+	}
+	if localSize < table.stripeCap {
+		return
+	}
+	occupied := m.size.Value(dwhtSlotOccupied)
+	if int(occupied) >= table.growCap {
+		m.tryResize(table, occupied)
 	}
 }
 
-func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
+func (m *DWHTMap[K, V]) resizeShouldGrow(occupied uintptr) bool {
+	if occupied < 2 {
+		return true
+	}
+	half := occupied >> 1
+	if m.size.Get(dwhtSlotTombstones) >= half {
+		return false
+	}
+	tombstones := m.size.Value(dwhtSlotTombstones)
+	return tombstones < half
+}
+
+func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied uintptr) *dwhtTable[K, V] {
 	if table := m.table.Load(); table != old {
 		return table
 	}
@@ -809,7 +797,8 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			newTable := newDWHTTable[K, V](m.nextGrowSlotLen(old))
+			isGrow := m.resizeShouldGrow(occupied)
+			newTable := newDWHTTable[K, V](m.nextResizeSlotLen(old, isGrow))
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
@@ -826,7 +815,22 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 			}
 		}
 	}
+	return m.helpResizeInto(old, next)
+}
 
+func (m *DWHTMap[K, V]) helpResize(old *dwhtTable[K, V]) *dwhtTable[K, V] {
+	if table := m.table.Load(); table != old {
+		return table
+	}
+
+	next := old.nextTable.Load()
+	if next == nil {
+		return old
+	}
+	return m.helpResizeInto(old, next)
+}
+
+func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K, V] {
 	slotLen := old.mask + 1 // power of two
 	chunks, chunkSz := old.chunks, old.chunkSz
 	probeLimit := min(next.mask, uintptr(dwhtMaxProbeThreshold))
@@ -895,15 +899,24 @@ func (m *DWHTMap[K, V]) tryGrow(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
+			occupied := m.size.Reset(dwhtSlotOccupied)
+			tombstones := m.size.Reset(dwhtSlotTombstones)
+			if occupied > tombstones {
+				live := occupied - tombstones
+				m.size.Add(dwhtSlotOccupied, live)
+			}
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
 	}
 }
 
-func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
+func (m *DWHTMap[K, V]) nextResizeSlotLen(old *dwhtTable[K, V], isGrow bool) uintptr {
 	slotLen := old.mask + 1
-	nextLen := slotLen << 1
+	nextLen := slotLen
+	if isGrow {
+		nextLen <<= 1
+	}
 	if !dwhtEnableAggressiveGrow {
 		return nextLen
 	}
@@ -913,9 +926,11 @@ func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
 	// When that concurrent window makes old much denser than the normal grow
 	// threshold, grow for roughly another table worth of inserts instead of
 	// forcing a near-immediate second resize.
-	size := m.size.Value()
-	if size > 0 {
-		nextLen = max(nextLen, dwhtCalcSlotLen(size<<1))
+	occupied := m.size.Value(dwhtSlotOccupied)
+	tombstones := m.size.Value(dwhtSlotTombstones)
+	if occupied > tombstones {
+		live := occupied - tombstones
+		nextLen = max(nextLen, dwhtCalcSlotLen(live<<1))
 	}
 
 	if dwhtEnableIntKey && m.intKey {
@@ -940,7 +955,7 @@ func (m *DWHTMap[K, V]) nextGrowSlotLen(old *dwhtTable[K, V]) uintptr {
 
 func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 	for {
-		if table := m.tryGrow(old); table != old {
+		if table := m.helpResize(old); table != old {
 			return table
 		}
 		runtime.Gosched()
@@ -1021,7 +1036,7 @@ func dwhtObservedHashSpan[K comparable, V any](table *dwhtTable[K, V]) (uintptr,
 	var minH, maxH uint32
 	seen := false
 	count := uintptr(0)
-	for i := uintptr(0); i < slotLen; i++ {
+	for i := range slotLen {
 		ctrl := atomic.LoadUint64(&table.slot(i).ctrl)
 		if dwhtCtrlState(ctrl) != dwhtStateFull {
 			continue

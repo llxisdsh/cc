@@ -64,7 +64,7 @@ type OFHTMap[K comparable, V any] struct {
 	keyHash   HashFunc
 	valEqual  EqualFunc
 	minLen    uintptr
-	size      PLocalCounter
+	size      PLocalCounterN
 }
 
 type ofhtTable[K comparable, V any] struct {
@@ -109,6 +109,11 @@ const (
 	ofhtStoreFrozen
 	ofhtStoreFull
 	ofhtStoreRetry
+)
+
+const (
+	ofhtSlotOccupied int = iota
+	ofhtSlotTombstones
 )
 
 // NewOFHTMap creates an experimental OFHT-style map.
@@ -212,12 +217,13 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h, false)
 		switch status {
 		case ofhtStoreOK:
-			m.growIfNeeded(table)
+			m.resizeIfNeeded(table)
 			return
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			table = m.tryGrow(table)
+			occupied := m.size.Value(ofhtSlotOccupied)
+			table = m.tryResize(table, occupied)
 		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -242,13 +248,14 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		switch status {
 		case ofhtStoreOK:
 			if !loaded {
-				m.growIfNeeded(table)
+				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			table = m.tryGrow(table)
+			occupied := m.size.Value(ofhtSlotOccupied)
+			table = m.tryResize(table, occupied)
 		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -278,7 +285,8 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			table = m.tryGrow(table)
+			occupied := m.size.Value(ofhtSlotOccupied)
+			table = m.tryResize(table, occupied)
 		case ofhtStoreRetry:
 			table = m.ensureTable()
 		}
@@ -430,7 +438,16 @@ func (m *OFHTMap[K, V]) All() func(yield func(K, V) bool) {
 
 // Size returns the approximate number of entries in the map.
 func (m *OFHTMap[K, V]) Size() int {
-	return int(m.size.Value())
+	table := m.table.Load()
+	if table == nil {
+		return 0
+	}
+	occupied := m.size.Value(ofhtSlotOccupied)
+	tombstones := m.size.Value(ofhtSlotTombstones)
+	if occupied <= tombstones {
+		return 0
+	}
+	return int(occupied - tombstones)
 }
 
 // Clear clears all key-value pairs from the map.
@@ -440,7 +457,7 @@ func (m *OFHTMap[K, V]) Clear() {
 		return
 	}
 	m.table.Store(newOFHTTable[K, V](m.minLen))
-	m.size.Reset()
+	m.size.Clear()
 }
 
 func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {
@@ -478,11 +495,7 @@ func (m *OFHTMap[K, V]) storeInto(
 	h uint32,
 	onlyIfAbsent bool,
 ) (ofhtStoreStatus, V, bool) {
-	var (
-		// spins     int
-		deleted  *ofhtSlot[K, V]
-		deletedC uint64
-	)
+	// var spins int
 	start := ofhtStart(h, table.mask)
 	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
 	for probe := uintptr(0); probe <= limit; probe++ {
@@ -529,18 +542,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			// delay(&spins)
 			probe--
 			continue
-		} else if state == ofhtStateDeleted {
-			if deleted == nil {
-				deleted, deletedC = slot, ctrl
-			}
 		} else if state == ofhtStateEmpty {
-			if deleted != nil {
-				status, rVal, loaded := m.claimSlot(deleted, deletedC, key, val, h)
-				if status == ofhtStoreRetry {
-					return ofhtStoreRetry, *new(V), false
-				}
-				return status, rVal, loaded
-			}
 			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 				probe--
@@ -549,35 +551,11 @@ func (m *OFHTMap[K, V]) storeInto(
 			slot.key.WriteUnfenced(*key)
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
-			m.size.Add(1)
+			m.size.Add(ofhtSlotOccupied, 1)
 			return ofhtStoreOK, *val, false
 		}
 	}
-	if deleted != nil {
-		return m.claimSlot(deleted, deletedC, key, val, h)
-	}
 	return ofhtStoreFull, *new(V), false
-}
-
-func (m *OFHTMap[K, V]) claimSlot(
-	slot *ofhtSlot[K, V],
-	ctrl uint64,
-	key *K,
-	val *V,
-	h2v uint32,
-) (ofhtStoreStatus, V, bool) {
-	if ctrl&ofhtFrozen != 0 {
-		return ofhtStoreFrozen, *new(V), false
-	}
-	busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
-	if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
-		return ofhtStoreRetry, *new(V), false
-	}
-	slot.key.WriteUnfenced(*key)
-	slot.val.WriteUnfenced(*val)
-	slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h2v))
-	m.size.Add(1)
-	return ofhtStoreOK, *val, false
 }
 
 func (m *OFHTMap[K, V]) loadAndUpdateIn(
@@ -672,7 +650,7 @@ func (m *OFHTMap[K, V]) deleteFrom(
 			slot.key.WriteUnfenced(*new(K)) // Clear key/value for GC
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(^uintptr(0))
+			m.size.Add(ofhtSlotTombstones, 1)
 			return ofhtStoreOK, prev, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, *new(V), false
@@ -789,7 +767,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 			slot.key.WriteUnfenced(*new(K)) // Clear key/value for GC
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(^uintptr(0))
+			m.size.Add(ofhtSlotTombstones, 1)
 			return ofhtStoreOK, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, false
@@ -802,21 +780,33 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 	return ofhtStoreOK, false
 }
 
-func (m *OFHTMap[K, V]) growIfNeeded(table *ofhtTable[K, V]) {
-	// Fast path: Only do the full size check periodically based on local counter.
-	// Since PLocalCounter is heavily sharded, getting the local value is cheap,
-	// but it still involves a function call and runtime logic.
-	localSize := int(m.size.Get().Load())
-	if localSize&ofhtGrowCheckMask == 0 {
-		if localSize >= table.stripeCap {
-			if int(m.size.Value()) >= table.growCap {
-				m.tryGrow(table)
-			}
-		}
+func (m *OFHTMap[K, V]) resizeIfNeeded(table *ofhtTable[K, V]) {
+	localSize := int(m.size.Get(ofhtSlotOccupied))
+	if localSize&ofhtGrowCheckMask != 0 {
+		return
+	}
+	if localSize < table.stripeCap {
+		return
+	}
+	occupied := m.size.Value(ofhtSlotOccupied)
+	if int(occupied) >= table.growCap {
+		m.tryResize(table, occupied)
 	}
 }
 
-func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
+func (m *OFHTMap[K, V]) resizeShouldGrow(occupied uintptr) bool {
+	if occupied < 2 {
+		return true
+	}
+	half := occupied >> 1
+	if m.size.Get(ofhtSlotTombstones) >= half {
+		return false
+	}
+	tombstones := m.size.Value(ofhtSlotTombstones)
+	return tombstones < half
+}
+
+func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied uintptr) *ofhtTable[K, V] {
 	if table := m.table.Load(); table != old {
 		return table
 	}
@@ -824,7 +814,8 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			newTable := newOFHTTable[K, V](m.nextGrowSlotLen(old))
+			isGrow := m.resizeShouldGrow(occupied)
+			newTable := newOFHTTable[K, V](m.nextResizeSlotLen(old, isGrow))
 			old.nextTable.Store(newTable)
 			next = newTable
 		} else {
@@ -832,7 +823,7 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 				// When this switch is on, writers may keep retrying store paths while
 				// resize is still allocating/cooperating. In OFHT, busy-slot handshakes
 				// (ofhtStateBusy) can amplify that contention; turning this switch off
-				// usually makes tryGrow progress more smoothly.
+				// usually makes tryResize progress more smoothly.
 				return old // Fallback to retry in caller
 			}
 			// Wait for leader to allocate
@@ -845,7 +836,22 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 			}
 		}
 	}
+	return m.helpResizeInto(old, next)
+}
 
+func (m *OFHTMap[K, V]) helpResize(old *ofhtTable[K, V]) *ofhtTable[K, V] {
+	if table := m.table.Load(); table != old {
+		return table
+	}
+
+	next := old.nextTable.Load()
+	if next == nil {
+		return old
+	}
+	return m.helpResizeInto(old, next)
+}
+
+func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K, V] {
 	slotLen := old.mask + 1
 	chunks, chunkSz := old.chunks, old.chunkSz
 	probeLimit := min(next.mask, uintptr(ofhtMaxProbeThreshold))
@@ -914,15 +920,24 @@ func (m *OFHTMap[K, V]) tryGrow(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
+			occupied := m.size.Reset(ofhtSlotOccupied)
+			tombstones := m.size.Reset(ofhtSlotTombstones)
+			if occupied > tombstones {
+				live := occupied - tombstones
+				m.size.Add(ofhtSlotOccupied, live)
+			}
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
 	}
 }
 
-func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {
+func (m *OFHTMap[K, V]) nextResizeSlotLen(old *ofhtTable[K, V], isGrow bool) uintptr {
 	slotLen := old.mask + 1
-	nextLen := slotLen << 1
+	nextLen := slotLen
+	if isGrow {
+		nextLen <<= 1
+	}
 	if !ofhtEnableAggressiveGrow {
 		return nextLen
 	}
@@ -932,9 +947,11 @@ func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {
 	// When that concurrent window makes old much denser than the normal grow
 	// threshold, grow for roughly another table worth of inserts instead of
 	// forcing a near-immediate second resize.
-	size := m.size.Value()
-	if size > 0 {
-		nextLen = max(nextLen, ofhtCalcSlotLen(size<<1))
+	occupied := m.size.Value(ofhtSlotOccupied)
+	tombstones := m.size.Value(ofhtSlotTombstones)
+	if occupied > tombstones {
+		live := occupied - tombstones
+		nextLen = max(nextLen, ofhtCalcSlotLen(live<<1))
 	}
 
 	if ofhtEnableIntKey && m.intKey {
@@ -959,7 +976,7 @@ func (m *OFHTMap[K, V]) nextGrowSlotLen(old *ofhtTable[K, V]) uintptr {
 
 func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 	for {
-		if table := m.tryGrow(old); table != old {
+		if table := m.helpResize(old); table != old {
 			return table
 		}
 		runtime.Gosched()
@@ -987,7 +1004,7 @@ func ofhtObservedHashSpan[K comparable, V any](table *ofhtTable[K, V]) (uintptr,
 	var minH, maxH uint32
 	seen := false
 	count := uintptr(0)
-	for i := uintptr(0); i < slotLen; i++ {
+	for i := range slotLen {
 		slot := table.slots.At(i)
 		ctrl := slot.ctrl.Load()
 		if ofhtCtrlState(ctrl) != ofhtStateFull {

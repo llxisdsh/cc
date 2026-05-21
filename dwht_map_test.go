@@ -211,6 +211,35 @@ func TestDWHTMapGrow(t *testing.T) {
 	}
 }
 
+func TestDWHTMapTombstoneCleanup(t *testing.T) {
+	m := NewDWHTMap[int, int](WithCapacity(1))
+
+	for i := range 4096 {
+		m.Store(i, i)
+	}
+	for i := range 4096 {
+		m.Delete(i)
+	}
+	if got := m.Size(); got != 0 {
+		t.Fatalf("Size after deletes=%d, want 0", got)
+	}
+
+	for i := range 4096 {
+		k := i + 4096
+		m.Store(k, i)
+	}
+	for i := range 4096 {
+		k := i + 4096
+		got, ok := m.Load(k)
+		if !ok || got != i {
+			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", k, got, ok, i)
+		}
+	}
+	if got := m.Size(); got != 4096 {
+		t.Fatalf("Size after reinserts=%d, want 4096", got)
+	}
+}
+
 func TestDWHTMapConcurrentLoadOrStoreSingleWinner(t *testing.T) {
 	m := NewDWHTMap[string, int]()
 	const goroutines = 64
