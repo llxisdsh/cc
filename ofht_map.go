@@ -159,7 +159,7 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -208,7 +208,7 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -238,7 +238,7 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -272,7 +272,7 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -303,7 +303,7 @@ func (m *OFHTMap[K, V]) Delete(key K) {
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -327,7 +327,7 @@ func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -351,7 +351,7 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -382,7 +382,7 @@ func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
 		hash := intHash[K](noescape(unsafe.Pointer(&key)))
-		h = uint32(hash ^ (hash >> 32))
+		h = ofhtIntHash(hash)
 	} else {
 		hash := m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 		h = uint32(hash ^ (hash >> 32))
@@ -953,24 +953,6 @@ func (m *OFHTMap[K, V]) nextResizeSlotLen(old *ofhtTable[K, V], isGrow bool) uin
 		live := occupied - tombstones
 		nextLen = max(nextLen, ofhtCalcSlotLen(live<<1))
 	}
-
-	if ofhtEnableIntKey && m.intKey {
-		// Raw integer hashes preserve sequential-insert locality, but during
-		// concurrent no-pre-size growth, far-apart ordered ranges can alias on
-		// the low bits of a small power-of-two table. That creates one dense
-		// run and can make resize copying exceed ofhtMaxProbeThreshold even
-		// when the destination table has plenty of empty slots elsewhere.
-		//
-		// Use the observed hash span as an address-space hint only for int keys:
-		// dense spans get enough slots to avoid low-bit folding, while sparse
-		// spans are capped in ofhtHashSpanGrowSlotLen so outliers cannot force
-		// an unbounded allocation.
-		if span, count := ofhtObservedHashSpan(old); span > 0 {
-			if target := ofhtHashSpanGrowSlotLen(span, count, slotLen); target > 0 {
-				nextLen = max(nextLen, target)
-			}
-		}
-	}
 	return nextLen
 }
 
@@ -997,60 +979,6 @@ func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 		chunks:    chunks,
 		chunkSz:   chunkSz,
 	}
-}
-
-func ofhtObservedHashSpan[K comparable, V any](table *ofhtTable[K, V]) (uintptr, uintptr) {
-	slotLen := table.mask + 1
-	var minH, maxH uint32
-	seen := false
-	count := uintptr(0)
-	for i := range slotLen {
-		slot := table.slots.At(i)
-		ctrl := slot.ctrl.Load()
-		if ofhtCtrlState(ctrl) != ofhtStateFull {
-			continue
-		}
-		h := ofhtCtrlH2(ctrl)
-		count++
-		if !seen {
-			minH, maxH, seen = h, h, true
-			continue
-		}
-		if h < minH {
-			minH = h
-		}
-		if h > maxH {
-			maxH = h
-		}
-	}
-	if !seen {
-		return 0, 0
-	}
-	return uintptr(maxH) - uintptr(minH) + 1, count
-}
-
-func ofhtHashSpanGrowSlotLen(span, count, slotLen uintptr) uintptr {
-	// Integer-key span growth is a guard for low-bit aliasing during concurrent
-	// ordered inserts. Dense spans use the exact observed range; sparse spans
-	// are capped so a few outliers cannot force an enormous table.
-	const (
-		denseHashSpanRatio  = 8
-		sparseHashSpanRatio = 32
-		tableHashSpanRatio  = 16
-	)
-	if span == 0 || count == 0 {
-		return 0
-	}
-	target := ofhtCalcSlotLen(span)
-	if span <= count*denseHashSpanRatio {
-		return target
-	}
-
-	limit := max(
-		ofhtCalcSlotLen(count*sparseHashSpanRatio),
-		slotLen*tableHashSpanRatio,
-	)
-	return min(target, limit)
 }
 
 //go:nosplit
@@ -1106,3 +1034,18 @@ func ofhtCtrlUpdate(busyCtrl uint64) uint64 {
 func ofhtCtrlDelete(busyCtrl uint64) uint64 {
 	return (busyCtrl+ofhtSeqInc)&^ofhtStateMask | ofhtStateDeleted
 }
+
+//go:nosplit
+func ofhtIntHash(x uintptr) uint32 {
+	// Use the high half of the 64-bit multiplicative hash. The high half of
+	// the 128-bit product stays zero for long small-integer ranges, which turns
+	// sequential inserts into one linear-probe cluster.
+	return uint32((x * 0x9e3779b97f4a7c15) >> 32)
+}
+
+// //go:nosplit
+// func ofhtIntHash(x uintptr) uint32 {
+// 	h := uint64(x) * 0x9e3779b97f4a7c15
+// 	h ^= bits.RotateLeft64(h, 25)
+// 	return uint32(h >> 32)
+// }
