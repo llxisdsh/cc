@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
-	_ "unsafe"
+	"unsafe"
 
 	"github.com/llxisdsh/cc/internal/opt"
 )
@@ -319,6 +319,182 @@ func (p *PLocalCounter) Reset() uintptr {
 		sum += s.val.Swap(0)
 	}
 	return sum
+}
+
+// =============================================================================
+// PLocalCounterN
+// =============================================================================
+
+// PLocalCounterNLen is the number of uintptr counters packed into each
+// PLocalCounterN P-local cache-line slot.
+const PLocalCounterNLen = int(opt.CacheLineSize_ / unsafe.Sizeof(atomic.Uintptr{}))
+
+// PLocalCounterN is a P-local group of uintptr counters.
+//
+// Each P owns one cache-line-aligned slot containing PLocalCounterNLen counters.
+// This is useful when a hot path needs several related counters but should still
+// pay for only one cache line per P.
+//
+// The zero value of PLocalCounterN is ready to use.
+type PLocalCounterN struct {
+	shards atomic.Pointer[pLocalCounterNShards]
+	mu     sync.Mutex // protects grow
+}
+
+type pLocalCounterNShards struct {
+	slice    unsafeSlice[*pLocalCounterNSlot]
+	len      int
+	backings [][]byte
+}
+
+type pLocalCounterNSlot struct {
+	counters [PLocalCounterNLen]atomic.Uintptr
+}
+
+func (p *pLocalCounterNSlot) slot(i int) *atomic.Uintptr {
+	return (*atomic.Uintptr)(unsafe.Add(unsafe.Pointer(&p.counters), uintptr(i)*unsafe.Sizeof(atomic.Uintptr{})))
+}
+
+// NewPLocalCounterN creates a new PLocalCounterN instance.
+//
+// The zero value of PLocalCounterN is also usable.
+func NewPLocalCounterN() *PLocalCounterN {
+	p := &PLocalCounterN{}
+	p.grow(runtime.GOMAXPROCS(0))
+	return p
+}
+
+// Add adds delta to counter i in the current P-local cache-line slot.
+func (p *PLocalCounterN) Add(i int, delta uintptr) {
+	shards := p.shards.Load()
+	if shards != nil {
+		pid := runtime_procPin()
+		if pid < shards.len {
+			s := *shards.slice.At(uintptr(pid))
+			s.slot(i).Add(delta)
+			runtime_procUnpin()
+			return
+		}
+		runtime_procUnpin()
+	}
+	p.slowGet().slot(i).Add(delta)
+}
+
+// Get returns counter i from the current P-local cache-line slot.
+func (p *PLocalCounterN) Get(i int) uintptr {
+	shards := p.shards.Load()
+	// Fast path: if shards exist
+	if shards != nil {
+		pid := runtime_procPin()
+		if pid < shards.len {
+			s := *shards.slice.At(uintptr(pid))
+			runtime_procUnpin()
+			return s.slot(i).Load()
+		}
+		runtime_procUnpin()
+	}
+
+	// Slow path: grow
+	return p.slowGet().slot(i).Load()
+}
+
+func (p *PLocalCounterN) slowGet() *pLocalCounterNSlot {
+	for {
+		pid := runtime_procPin()
+		shards := p.shards.Load()
+		if shards == nil {
+			runtime_procUnpin()
+			p.grow(pid + 1)
+			continue
+		}
+		if pid < shards.len {
+			s := *shards.slice.At(uintptr(pid))
+			runtime_procUnpin()
+			return s
+		}
+		runtime_procUnpin()
+		p.grow(pid + 1)
+	}
+}
+
+func (p *PLocalCounterN) grow(needed int) {
+	p.mu.Lock()
+
+	current := p.shards.Load()
+	var currentLen uintptr
+	if current != nil {
+		currentLen = uintptr(current.len)
+	}
+	if uintptr(needed) <= currentLen {
+		p.mu.Unlock()
+		return
+	}
+
+	newSize := max(uintptr(needed), uintptr(runtime.GOMAXPROCS(0)))
+	newShards := makeUnsafeSlice[*pLocalCounterNSlot](newSize)
+	var backings [][]byte
+	if current != nil {
+		for i := range currentLen {
+			*newShards.At(i) = *current.slice.At(i)
+		}
+		backings = make([][]byte, len(current.backings), len(current.backings)+1)
+		copy(backings, current.backings)
+	}
+
+	addedCount := newSize - currentLen
+	newBacking := make([]byte, addedCount*opt.CacheLineSize_+opt.CacheLineSize_-1)
+	base := uintptr(unsafe.Pointer(unsafe.SliceData(newBacking)))
+	aligned := (base + opt.CacheLineSize_ - 1) &^ (opt.CacheLineSize_ - 1)
+	for i := range addedCount {
+		idx := currentLen + i
+		*newShards.At(idx) = (*pLocalCounterNSlot)(unsafe.Pointer(aligned + i*opt.CacheLineSize_)) //nolint:all
+	}
+	backings = append(backings, newBacking)
+
+	p.shards.Store(&pLocalCounterNShards{
+		slice:    newShards,
+		len:      int(newSize),
+		backings: backings,
+	})
+	p.mu.Unlock()
+}
+
+// Value returns the aggregated value of counter i across all P-local slots.
+//
+// Note: The result is an approximation if concurrent Adds are happening.
+func (p *PLocalCounterN) Value(i int) uintptr {
+	shards := p.shards.Load()
+	if shards == nil {
+		return 0
+	}
+	var sum uintptr
+	for j := range uintptr(shards.len) {
+		s := *shards.slice.At(j)
+		sum += s.slot(i).Load()
+	}
+	return sum
+}
+
+// Reset atomically reads counter i and resets it to zero in all P-local slots.
+func (p *PLocalCounterN) Reset(i int) uintptr {
+	shards := p.shards.Load()
+	if shards == nil {
+		return 0
+	}
+	var sum uintptr
+	for j := range uintptr(shards.len) {
+		s := *shards.slice.At(j)
+		sum += s.slot(i).Swap(0)
+	}
+	return sum
+}
+
+// Clear discards all P-local counter slots.
+// Subsequent accesses lazily allocate fresh zeroed slots.
+func (p *PLocalCounterN) Clear() {
+	p.mu.Lock()
+	p.shards.Store(nil)
+	p.mu.Unlock()
 }
 
 // =============================================================================

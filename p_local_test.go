@@ -5,7 +5,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	_ "unsafe"
+	"unsafe"
+
+	"github.com/llxisdsh/cc/internal/opt"
 )
 
 //go:noescape
@@ -520,6 +522,81 @@ func TestPLocalCounter_Reset(t *testing.T) {
 	c.Add(50)
 	if c.Value() != 50 {
 		t.Errorf("Expected 50, got %d", c.Value())
+	}
+}
+
+func TestPLocalCounterN_Basic(t *testing.T) {
+	c := NewPLocalCounterN()
+	c.Add(0, 10)
+	c.Add(0, 20)
+	c.Add(PLocalCounterNLen-1, 7)
+
+	if val := c.Value(0); val != 30 {
+		t.Errorf("Expected counter 0 to be 30, got %d", val)
+	}
+	if val := c.Value(PLocalCounterNLen - 1); val != 7 {
+		t.Errorf("Expected last counter to be 7, got %d", val)
+	}
+}
+
+func TestPLocalCounterN_Reset(t *testing.T) {
+	var c PLocalCounterN
+	c.Add(1, 100)
+	c.Add(1, 200)
+	c.Add(2, 50)
+
+	if val := c.Reset(1); val != 300 {
+		t.Errorf("Expected reset to return 300, got %d", val)
+	}
+	if val := c.Value(1); val != 0 {
+		t.Errorf("Expected counter 1 to be 0 after reset, got %d", val)
+	}
+	if val := c.Value(2); val != 50 {
+		t.Errorf("Expected counter 2 to remain 50, got %d", val)
+	}
+}
+
+func TestPLocalCounterN_Alignment(t *testing.T) {
+	c := NewPLocalCounterN()
+	shards := c.shards.Load()
+	if shards == nil {
+		t.Fatal("Expected initialized shards")
+	}
+	if size := unsafe.Sizeof(pLocalCounterNSlot{}); size != opt.CacheLineSize_ {
+		t.Fatalf("Expected slot size %d, got %d", opt.CacheLineSize_, size)
+	}
+	for i := range uintptr(shards.len) {
+		s := *shards.slice.At(i)
+		if addr := uintptr(unsafe.Pointer(s)); addr%opt.CacheLineSize_ != 0 {
+			t.Fatalf("Slot %d is not cache-line aligned: addr=%#x cacheLine=%d", i, addr, opt.CacheLineSize_)
+		}
+	}
+}
+
+func TestPLocalCounterN_Race(t *testing.T) {
+	c := NewPLocalCounterN()
+	var wg sync.WaitGroup
+	workers := 32
+	loops := 1000
+
+	wg.Add(workers)
+	for w := range workers {
+		go func(w int) {
+			defer wg.Done()
+			idx := w % PLocalCounterNLen
+			for range loops {
+				c.Add(idx, 1)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	var total uintptr
+	for i := range PLocalCounterNLen {
+		total += c.Value(i)
+	}
+	if want := uintptr(workers * loops); total != want {
+		t.Errorf("Expected total %d, got %d", want, total)
 	}
 }
 
