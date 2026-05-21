@@ -168,6 +168,25 @@ func (c *PerfPLocalUintptrCounter) Value() uintptr {
 	return c.p.Value()
 }
 
+// 5. PLocalCounter Counter (Specialized)
+type PerfPLocalUintptrCounterN struct {
+	p *cc.PLocalCounterN
+}
+
+func NewPerfPLocalUintptrCounterN() *PerfPLocalUintptrCounterN {
+	return &PerfPLocalUintptrCounterN{
+		p: cc.NewPLocalCounterN(),
+	}
+}
+
+func (c *PerfPLocalUintptrCounterN) Add(delta uintptr) {
+	c.p.Add(0, delta)
+}
+
+func (c *PerfPLocalUintptrCounterN) Value() uintptr {
+	return c.p.Value(0)
+}
+
 // --- Benchmarks ---
 
 func BenchmarkMutexCounter_Add(b *testing.B) {
@@ -236,6 +255,16 @@ func BenchmarkPLocal_Add(b *testing.B) {
 
 func BenchmarkPLocalCounter_Add(b *testing.B) {
 	c := NewPerfPLocalUintptrCounter()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			c.Add(1)
+		}
+	})
+}
+
+func BenchmarkPLocalCounterN_Add(b *testing.B) {
+	c := NewPerfPLocalUintptrCounterN()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -317,6 +346,16 @@ func BenchmarkPLocalCounter_Value(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			_ = l.Value()
+		}
+	})
+}
+
+func BenchmarkPLocalCounterN_Value(b *testing.B) {
+	l := cc.NewPLocalCounterN()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = l.Value(0)
 		}
 	})
 }
