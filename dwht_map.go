@@ -1195,5 +1195,5 @@ func dwhtIntHash(x uintptr) uint32 {
 	if dwhtUseRawIntHash {
 		return uint32(x ^ (x >> 32))
 	}
-	return uint32((x * opt.HashPrime) >> 32)
+	return uint32((uint64(x) * opt.HashPrime) >> 32)
 }
