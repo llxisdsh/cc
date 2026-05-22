@@ -621,6 +621,81 @@ func TestPLocalCounter64_Reset(t *testing.T) {
 	}
 }
 
+func TestPLocalCounter64N_Basic(t *testing.T) {
+	c := NewPLocalCounter64N()
+	c.Add(0, 10)
+	c.Add(0, 20)
+	c.Add(PLocalCounter64NLen-1, 7)
+
+	if val := c.Value(0); val != 30 {
+		t.Errorf("Expected counter 0 to be 30, got %d", val)
+	}
+	if val := c.Value(PLocalCounter64NLen - 1); val != 7 {
+		t.Errorf("Expected last counter to be 7, got %d", val)
+	}
+}
+
+func TestPLocalCounter64N_Reset(t *testing.T) {
+	var c PLocalCounter64N
+	c.Add(1, 100)
+	c.Add(1, 200)
+	c.Add(2, 50)
+
+	if val := c.Reset(1); val != 300 {
+		t.Errorf("Expected reset to return 300, got %d", val)
+	}
+	if val := c.Value(1); val != 0 {
+		t.Errorf("Expected counter 1 to be 0 after reset, got %d", val)
+	}
+	if val := c.Value(2); val != 50 {
+		t.Errorf("Expected counter 2 to remain 50, got %d", val)
+	}
+}
+
+func TestPLocalCounter64N_Alignment(t *testing.T) {
+	c := NewPLocalCounter64N()
+	shards := c.shards.Load()
+	if shards == nil {
+		t.Fatal("Expected initialized shards")
+	}
+	if size := unsafe.Sizeof(pLocalCounter64NSlot{}); size != opt.CacheLineSize_ {
+		t.Fatalf("Expected slot size %d, got %d", opt.CacheLineSize_, size)
+	}
+	for i := range uintptr(shards.len) {
+		s := *shards.slice.At(i)
+		if addr := uintptr(unsafe.Pointer(s)); addr%opt.CacheLineSize_ != 0 {
+			t.Fatalf("Slot %d is not cache-line aligned: addr=%#x cacheLine=%d", i, addr, opt.CacheLineSize_)
+		}
+	}
+}
+
+func TestPLocalCounter64N_Race(t *testing.T) {
+	c := NewPLocalCounter64N()
+	var wg sync.WaitGroup
+	workers := 32
+	loops := 1000
+
+	wg.Add(workers)
+	for w := range workers {
+		go func(w int) {
+			defer wg.Done()
+			idx := w % PLocalCounter64NLen
+			for range loops {
+				c.Add(idx, 1)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	var total uint64
+	for i := range PLocalCounter64NLen {
+		total += c.Value(i)
+	}
+	if want := uint64(workers * loops); total != want {
+		t.Errorf("Expected total %d, got %d", want, total)
+	}
+}
+
 // =============================================================================
 // Benchmark
 // =============================================================================
