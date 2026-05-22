@@ -22,6 +22,8 @@ State-of-the-art concurrent map implementations, delivering extreme performance 
 | **`FlatMap`**   | **Seqlock-based**, inline open-addressing. Heavily optimized for cold starts.    | Cache-sensitive, extremely low tail latency.                            |
 | **`SkipMap`**   | **Ordered map**, providing lock-free concurrent lookups, reads, and iteration.   | Highly concurrent ordered data access.                                  |
 | **`FunnelMap`** | **Highly robust**, utilizes SkipMap for collisions and PLocal for size tracking. | Extreme resilience against poor hash distributions without degradation. |
+| **`OFHTMap`**   | **Experimental**, optimistic open-addressing with inline key/value storage.      | Lowest GC overhead for allocation-sensitive workloads.                  |
+| **`DWHTMap`**   | **Experimental**, fully lock-free open-addressing with DWCAS slot publication.   | Low-latency reads and writes under high concurrency.                    |
 
 > **Note**: `Map` and `FlatMap` are streamlined versions of the high-performance [**llxisdsh/pb**](https://github.com/llxisdsh/pb) project. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [`benchmark`](./benchmark) directory or the upstream repository.
 
@@ -127,7 +129,15 @@ var c cc.PLocalCounter
 c.Add(1)         // Scalable: No global lock
 sum := c.Value() // Aggregates across all Ps
 
-// 2. Generic PLocal
+// 2. Multi-counter P-local slots (PLocalCounterN)
+var cn cc.PLocalCounterN
+// Each P-local shard packs multiple counters into one cache line,
+// so tracking several counters does not use more cache-line slots than PLocalCounter.
+cn.Add(0, 1)
+cn.Add(1, 2)
+total0 := cn.Value(0)
+
+// 3. Generic PLocal
 var p cc.PLocal[*bytes.Buffer]
 // Run fn pinned to current P with local shard
 p.With(func(buf **bytes.Buffer) {

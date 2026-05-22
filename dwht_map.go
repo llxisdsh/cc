@@ -44,7 +44,7 @@ const (
 //
 // It uses open addressing with linear probing. Each table slot is two machine
 // words: a control word and an entry pointer. The control word contains the
-// slot state, a short hash fingerprint, a version counter, and a frozen bit
+// slot state, a 32-bit hash fragment, a version counter, and a frozen bit
 // used during resize.
 //
 // Concurrency model:
@@ -59,6 +59,9 @@ const (
 //
 // Compared with OFHTMap, DWHTMap pays one heap object per live entry, but slot
 // publication is atomic and readers never observe a busy inline-update state.
+//
+// DWHTMap is zero-value ready, but is intentionally excluded from race builds
+// and currently requires amd64 or arm64 DWCAS support.
 type DWHTMap[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[dwhtTable[K, V]]

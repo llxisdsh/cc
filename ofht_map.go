@@ -42,8 +42,8 @@ const (
 // OFHTMap is an experimental optimistic flat hash table.
 //
 // It uses open addressing with linear probing. Each table slot stores the key
-// and value inline, plus a control word containing the slot state, a short hash
-// fingerprint, a version counter, and a frozen bit used during resize.
+// and value inline, plus a control word containing the slot state, a 32-bit
+// hash fragment, a version counter, and a frozen bit used during resize.
 //
 // Concurrency model:
 //   - Loads read a slot optimistically: control word, key/value, then control
@@ -58,6 +58,8 @@ const (
 // OFHTMap avoids root-bucket locks and per-entry heap allocation, but updates
 // to a slot are not single-instruction atomic because generic K/V values are
 // stored inline.
+//
+// OFHTMap is zero-value ready, but is intentionally excluded from race builds.
 type OFHTMap[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[ofhtTable[K, V]]
