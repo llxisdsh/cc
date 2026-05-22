@@ -635,6 +635,11 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 			if e.key != *key {
 				continue
 			}
+			if dwhtEnableDedupVal {
+				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
+					return dwhtStoreOK, e.val, true
+				}
+			}
 			if newEntry == nil {
 				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
 			}

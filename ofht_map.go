@@ -622,6 +622,11 @@ func (m *OFHTMap[K, V]) loadAndUpdateIn(
 			if k != *key {
 				continue
 			}
+			if ofhtEnableDedupVal {
+				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&prev)), noescape(unsafe.Pointer(val))) {
+					return ofhtStoreOK, prev, true
+				}
+			}
 			busyCtrl := (ctrl &^ ofhtStateMask) | ofhtStateBusy
 			if !slot.ctrl.CompareAndSwap(ctrl, busyCtrl) {
 				probe--
