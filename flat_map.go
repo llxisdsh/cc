@@ -1327,6 +1327,7 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 			m.endRebuild(rs)
 			return true
 		}
+		newLen = max(newLen, calcTableLen(table.SumSize()<<1))
 	} else {
 		if newLen >= tableLen || newLen < m.minLen {
 			m.endRebuild(rs)
