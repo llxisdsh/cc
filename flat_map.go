@@ -1,3 +1,5 @@
+//go:build !race
+
 package cc
 
 import (
@@ -6,8 +8,6 @@ import (
 	"runtime"
 	"sync/atomic"
 	"unsafe"
-
-	"github.com/llxisdsh/cc/internal/opt"
 )
 
 // FlatMap implements a flat hash map using seqlock.
@@ -52,18 +52,69 @@ type flatRebuildState[K comparable, V any] struct {
 }
 
 type flatTable[K comparable, V any] struct {
-	buckets  unsafeSlice[flatBucket[K, V]]
+	buckets  unsafe.Pointer
 	mask     uintptr
 	size     unsafeSlice[counterStripe]
 	sizeMask uintptr
 }
 
-type flatBucket[K comparable, V any] struct {
-	_       [0]atomic.Uint64
-	meta    uint64         // op byte + h2 bytes
-	seq     SeqLock        // seqlock of bucket
-	next    unsafe.Pointer // [*flatBucket]
-	entries [entriesPerBucket]SeqLockSlot[entry_[K, V]]
+type flatBucketHeader struct {
+	_    [0]atomic.Uint64
+	meta uint64         // op byte + h2 bytes
+	seq  SeqLock        // seqlock of bucket
+	next unsafe.Pointer // [*flatBucketHeader]
+}
+
+type flatBucketNoHash[K comparable, V any] struct {
+	flatBucketHeader
+	entries [entriesPerBucket]SeqLockSlot[entryNoHash[K, V]]
+}
+
+type flatBucketWithHash[K comparable, V any] struct {
+	flatBucketHeader
+	entries [entriesPerBucket]SeqLockSlot[entryWithHash[K, V]]
+}
+
+//go:nosplit
+func (m *FlatMap[K, V]) bucketAt(buckets unsafe.Pointer, i uintptr) *flatBucketHeader {
+	if omitEntryHash[K]() {
+		return (*flatBucketHeader)(unsafe.Add(buckets, i*unsafe.Sizeof(flatBucketNoHash[K, V]{})))
+	}
+	return (*flatBucketHeader)(unsafe.Add(buckets, i*unsafe.Sizeof(flatBucketWithHash[K, V]{})))
+}
+
+//go:nosplit
+func (m *FlatMap[K, V]) entryAt(b *flatBucketHeader, j uintptr) unsafe.Pointer {
+	headerSize := unsafe.Sizeof(flatBucketHeader{})
+	if omitEntryHash[K]() {
+		slotSize := unsafe.Sizeof(SeqLockSlot[entryNoHash[K, V]]{})
+		return unsafe.Add(unsafe.Pointer(b), headerSize+j*slotSize)
+	}
+	slotSize := unsafe.Sizeof(SeqLockSlot[entryWithHash[K, V]]{})
+	return unsafe.Add(unsafe.Pointer(b), headerSize+j*slotSize)
+}
+
+//go:nosplit
+func (m *FlatMap[K, V]) newFlatBucket(meta uint64, key K, value V, hash uintptr) unsafe.Pointer {
+	if omitEntryHash[K]() {
+		b := &flatBucketNoHash[K, V]{
+			flatBucketHeader: flatBucketHeader{
+				meta: meta,
+			},
+		}
+		b.entries[0].buf.key = key
+		b.entries[0].buf.value = value
+		return unsafe.Pointer(b)
+	}
+	b := &flatBucketWithHash[K, V]{
+		flatBucketHeader: flatBucketHeader{
+			meta: meta,
+		},
+	}
+	b.entries[0].buf.hash = hash
+	b.entries[0].buf.key = key
+	b.entries[0].buf.value = value
+	return unsafe.Pointer(b)
 }
 
 // NewFlatMap creates a new seqlock-based flat hash map.
@@ -136,7 +187,7 @@ func (m *FlatMap[K, V]) init(
 //   - Provides stable latency under high concurrency.
 func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return *new(V), false
 	}
 
@@ -154,66 +205,54 @@ func (m *FlatMap[K, V]) Load(key K) (value V, ok bool) {
 	}
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
-	b := table.buckets.At(idx)
+	b := m.bucketAt(table.buckets, idx)
 retry:
 	for {
-		// var spins int
 		s1, ok := b.seq.BeginRead()
 		if !ok {
-			// delay(&spins)
 			continue retry
 		}
 		meta := loadUint64Fast(&b.meta)
-		//goland:noinspection GoBoolExpressions
-		if !opt.Race_ {
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				e := b.At(j).ReadUnfenced()
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j := firstMarkedByteIndex(marked)
+			if omitEntryHash[K]() {
+				var eKey K
+				var eVal V
+				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+				e := slot.ReadUnfenced()
+				eKey, eVal = e.key, e.value
 				if !b.seq.EndRead(s1) {
 					continue retry
 				}
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == key {
-						return e.value, true
-					}
+				if eKey == key {
+					return eVal, true
 				}
-			}
-		} else {
-			// -race:
-			// To use a Buffer & Scan approach for strict locking compatibility.
-			// This prevents Double-Free / Use-After-Free bugs in strict mode
-			// that occurred with the previous iterative loop.
-			var cache [entriesPerBucket]entry_[K, V]
-			var cacheCount uintptr
-			unsafeCache := toUnsafeSlice(&cache[0])
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
-				cacheCount++
-			}
-			if !b.seq.EndRead(s1) {
-				continue retry
-			}
-			for j := range cacheCount {
-				e := unsafeCache.At(j)
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == key {
-						return e.value, true
-					}
+			} else {
+				var eKey K
+				var eVal V
+				var eHash uintptr
+				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
+				e := slot.ReadUnfenced()
+				eHash, eKey, eVal = e.hash, e.key, e.value
+				if !b.seq.EndRead(s1) {
+					continue retry
+				}
+				if eHash == hash && eKey == key {
+					return eVal, true
 				}
 			}
 		}
 		if meta&opNextMask == 0 {
 			return *new(V), false
 		}
-		b = (*flatBucket[K, V])(loadPtr(&b.next))
+		b = (*flatBucketHeader)(loadPtr(&b.next))
 	}
 }
 
 // Store sets the value for a key.
 func (m *FlatMap[K, V]) Store(key K, value V) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		m.slowInit()
 		table = SeqLockRead32(&m.tableSeq, &m.table)
 	}
@@ -232,63 +271,41 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 	}
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
-	root := table.buckets.At(idx)
+	root := m.bucketAt(table.buckets, idx)
 	// Fast path: lock-free read
 
-	for b := root; ; b = (*flatBucket[K, V])(loadPtr(&b.next)) {
+	for b := root; ; b = (*flatBucketHeader)(loadPtr(&b.next)) {
 		s1, ok := b.seq.BeginRead()
 		if !ok {
 			goto slowPath
 		}
 		meta := loadUint64Fast(&b.meta)
-
-		//goland:noinspection GoBoolExpressions
-		if !opt.Race_ {
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				e := b.At(j).ReadUnfenced()
-				if !b.seq.EndRead(s1) {
-					goto slowPath
-				}
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == key {
-						// valEqual: skip write if value unchanged
-						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&e.value)),
-							noescape(unsafe.Pointer(&value)),
-						) {
-							return
-						}
-						goto slowPath
-					}
-				}
-			}
-		} else {
-			var cache [entriesPerBucket]entry_[K, V]
-			var cacheCount uintptr
-			unsafeCache := toUnsafeSlice(&cache[0])
-			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
-				cacheCount++
+		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+			j := firstMarkedByteIndex(marked)
+			var eKey K
+			var eVal V
+			var eHash uintptr
+			if omitEntryHash[K]() {
+				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+				e := slot.ReadUnfenced()
+				eKey, eVal = e.key, e.value
+			} else {
+				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
+				e := slot.ReadUnfenced()
+				eHash, eKey, eVal = e.hash, e.key, e.value
 			}
 			if !b.seq.EndRead(s1) {
 				goto slowPath
 			}
-			for j := range cacheCount {
-				e := unsafeCache.At(j)
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == key {
-						// valEqual: skip write if value unchanged
-						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&e.value)),
-							noescape(unsafe.Pointer(&value)),
-						) {
-							return
-						}
-						goto slowPath
-					}
+			if (omitEntryHash[K]() || eHash == hash) && eKey == key {
+				// valEqual: skip write if value unchanged
+				if m.valEqual != nil && m.valEqual(
+					noescape(unsafe.Pointer(&eVal)),
+					noescape(unsafe.Pointer(&value)),
+				) {
+					return
 				}
+				goto slowPath
 			}
 		}
 		if meta&opNextMask == 0 {
@@ -307,7 +324,7 @@ slowPath:
 				m.helpCopyAndWait(rs)
 				table = SeqLockRead32(&m.tableSeq, &m.table)
 				idx = table.mask & h1v
-				root = table.buckets.At(idx)
+				root = m.bucketAt(table.buckets, idx)
 				goto slowPath
 			}
 		case mapRebuildBlockWritersHint:
@@ -315,45 +332,55 @@ slowPath:
 			rs.latch.Wait()
 			table = SeqLockRead32(&m.tableSeq, &m.table)
 			idx = table.mask & h1v
-			root = table.buckets.At(idx)
+			root = m.bucketAt(table.buckets, idx)
 			goto slowPath
 		default:
 			// mapRebuildAllowWritersHint: allow concurrent writers
 		}
 	}
 
-	if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+	if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets != table.buckets {
 		root.Unlock()
 		table = newTable
 		idx = table.mask & h1v
-		root = table.buckets.At(idx)
+		root = m.bucketAt(table.buckets, idx)
 		goto slowPath
 	}
 
 	var (
 		emptyM uint64
-		emptyB *flatBucket[K, V]
+		emptyB *flatBucketHeader
 		emptyI uintptr
 	)
-	newEnt := entry_[K, V]{key: key, value: value}
-	if opt.EmbeddedHash_ {
-		newEnt.SetHash(hash)
-	}
 	lastB := root
 	for {
 		meta := loadUint64Fast(&lastB.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			//goland:noinspection GoBoolExpressions
-			if !opt.EmbeddedHash_ || lastB.At(j).Ptr().GetHash() == hash {
-				if lastB.At(j).Ptr().key == key {
-					// Update
-					lastB.seq.BeginWriteLocked()
-					lastB.At(j).WriteUnfenced(newEnt)
-					lastB.seq.EndWriteLocked()
-					root.Unlock()
-					return
+			var eKey K
+			if omitEntryHash[K]() {
+				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
+				eKey = slot.Ptr().key
+			} else {
+				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
+				if slot.Ptr().hash != hash {
+					continue
 				}
+				eKey = slot.Ptr().key
+			}
+			if eKey == key {
+				// Update
+				lastB.seq.BeginWriteLocked()
+				if omitEntryHash[K]() {
+					slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
+					slot.WriteUnfenced(entryNoHash[K, V]{key: key, value: value})
+				} else {
+					slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
+					slot.WriteUnfenced(entryWithHash[K, V]{hash: hash, key: key, value: value})
+				}
+				lastB.seq.EndWriteLocked()
+				root.Unlock()
+				return
 			}
 		}
 		if emptyB == nil {
@@ -364,17 +391,13 @@ slowPath:
 		if meta&opNextMask == 0 {
 			break
 		}
-		lastB = (*flatBucket[K, V])(lastB.next)
+		lastB = (*flatBucketHeader)(lastB.next)
 	}
 
 	if emptyB == nil {
 		// append new bucket
-		storePtr(&lastB.next, unsafe.Pointer(&flatBucket[K, V]{
-			meta: setByte(emptyM, h2v, 0),
-			entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
-				{buf: newEnt},
-			},
-		}))
+		newB := m.newFlatBucket(setByte(emptyM, h2v, 0), key, value, hash)
+		storePtr(&lastB.next, newB)
 		newMeta := loadUint64Fast(&lastB.meta) | opNextMask
 		if lastB == root {
 			root.UnlockWithMeta(newMeta)
@@ -399,9 +422,13 @@ slowPath:
 		return
 	}
 	// Insert into empty slot
-	// insert new: no seqlock window needed since slot was empty.
-	// Reader won't access slot until meta is published with valid h2.
-	emptyB.At(emptyI).WriteUnfenced(newEnt)
+	if omitEntryHash[K]() {
+		slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(emptyB, emptyI))
+		slot.WriteUnfenced(entryNoHash[K, V]{key: key, value: value})
+	} else {
+		slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(emptyB, emptyI))
+		slot.WriteUnfenced(entryWithHash[K, V]{hash: hash, key: key, value: value})
+	}
 	newMeta := setByte(emptyM, h2v, emptyI)
 	if emptyB == root {
 		root.UnlockWithMeta(newMeta)
@@ -487,7 +514,7 @@ func (m *FlatMap[K, V]) Delete(key K) {
 // If the existing value matches the expected value.
 func (m *FlatMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return false
 	}
 	if m.valEqual == nil {
@@ -511,7 +538,7 @@ func (m *FlatMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 // If its value matches the expected value.
 func (m *FlatMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return false
 	}
 	if m.valEqual == nil {
@@ -566,7 +593,7 @@ func (m *FlatMap[K, V]) compute(
 	flags uint8,
 ) (actual V, loaded bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		if flags&computeInit == 0 {
 			return *new(V), false
 		}
@@ -588,7 +615,7 @@ func (m *FlatMap[K, V]) compute(
 	}
 	h2w := broadcast(h2v)
 	idx := table.mask & h1v
-	root := table.buckets.At(idx)
+	root := m.bucketAt(table.buckets, idx)
 	// Fast path: lock-free read
 	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
 		b := root
@@ -598,52 +625,34 @@ func (m *FlatMap[K, V]) compute(
 				goto slowPath
 			}
 			meta := loadUint64Fast(&b.meta)
-
-			//goland:noinspection GoBoolExpressions
-			if !opt.Race_ {
-				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
-					e := b.At(j).ReadUnfenced()
-					if !b.seq.EndRead(s1) {
-						goto slowPath
-					}
-					if !opt.EmbeddedHash_ || e.GetHash() == hash {
-						if e.key == *key {
-							if flags&computeSkipIfFound != 0 {
-								return e.value, true
-							}
-							goto slowPath
-						}
-					}
-				}
-			} else {
-				var cache [entriesPerBucket]entry_[K, V]
-				var cacheCount uintptr
-				unsafeCache := toUnsafeSlice(&cache[0])
-				for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
-					j := firstMarkedByteIndex(marked)
-					*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
-					cacheCount++
+			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
+				j := firstMarkedByteIndex(marked)
+				var eKey K
+				var eVal V
+				var eHash uintptr
+				if omitEntryHash[K]() {
+					slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+					e := slot.ReadUnfenced()
+					eKey, eVal = e.key, e.value
+				} else {
+					slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
+					e := slot.ReadUnfenced()
+					eHash, eKey, eVal = e.hash, e.key, e.value
 				}
 				if !b.seq.EndRead(s1) {
 					goto slowPath
 				}
-				for j := range cacheCount {
-					e := unsafeCache.At(j)
-					if !opt.EmbeddedHash_ || e.GetHash() == hash {
-						if e.key == *key {
-							if flags&computeSkipIfFound != 0 {
-								return e.value, true
-							}
-							goto slowPath
-						}
+				if (omitEntryHash[K]() || eHash == hash) && eKey == *key {
+					if flags&computeSkipIfFound != 0 {
+						return eVal, true
 					}
+					goto slowPath
 				}
 			}
 			if meta&opNextMask == 0 {
 				break
 			}
-			b = (*flatBucket[K, V])(loadPtr(&b.next))
+			b = (*flatBucketHeader)(loadPtr(&b.next))
 		}
 		// Key not found in fast path
 		if flags&computeSkipIfNotFound != 0 {
@@ -664,7 +673,7 @@ slowPath:
 					m.helpCopyAndWait(rs)
 					table = SeqLockRead32(&m.tableSeq, &m.table)
 					idx = table.mask & h1v
-					root = table.buckets.At(idx)
+					root = m.bucketAt(table.buckets, idx)
 					goto slowPath
 				}
 			case mapRebuildBlockWritersHint:
@@ -672,18 +681,18 @@ slowPath:
 				rs.latch.Wait()
 				table = SeqLockRead32(&m.tableSeq, &m.table)
 				idx = table.mask & h1v
-				root = table.buckets.At(idx)
+				root = m.bucketAt(table.buckets, idx)
 				goto slowPath
 			default:
 				// mapRebuildAllowWritersHint: allow concurrent writers
 			}
 		}
 	}
-	if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+	if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets != table.buckets {
 		root.Unlock()
 		table = newTable
 		idx = table.mask & h1v
-		root = table.buckets.At(idx)
+		root = m.bucketAt(table.buckets, idx)
 		goto slowPath
 	}
 
@@ -691,12 +700,12 @@ slowPath:
 		meta   uint64
 		j      uintptr
 		emptyM uint64
-		emptyB *flatBucket[K, V]
+		emptyB *flatBucketHeader
 		emptyI uintptr
 	)
 	it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
-	if opt.EmbeddedHash_ {
-		it.entry.SetHash(hash)
+	if !omitEntryHash[K]() {
+		it.entry.hash = hash
 	}
 
 	lastB := root
@@ -705,13 +714,24 @@ findLoop:
 		meta = loadUint64Fast(&lastB.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j = firstMarkedByteIndex(marked)
-			e := lastB.At(j).Ptr()
-			//goland:noinspection GoBoolExpressions
-			if !opt.EmbeddedHash_ || e.GetHash() == hash {
-				if e.key == *key {
-					it.entry.value, it.loaded = e.value, true
-					break findLoop
+			var eKey K
+			var eVal V
+			if omitEntryHash[K]() {
+				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
+				e := slot.Ptr()
+				eKey, eVal = e.key, e.value
+			} else {
+				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
+				e := slot.Ptr()
+				if e.hash != hash {
+					continue
 				}
+				eKey, eVal = e.key, e.value
+			}
+
+			if eKey == *key {
+				it.entry.value, it.loaded = eVal, true
+				break findLoop
 			}
 		}
 		if emptyB == nil {
@@ -722,7 +742,7 @@ findLoop:
 		if meta&opNextMask == 0 {
 			break
 		}
-		lastB = (*flatBucket[K, V])(lastB.next)
+		lastB = (*flatBucketHeader)(lastB.next)
 	}
 
 	// --- Compute Logic ---
@@ -731,8 +751,16 @@ findLoop:
 	case updateOp:
 		if it.loaded {
 			// valEqual: skip write if value unchanged
+			var oldValPtr unsafe.Pointer
+			if omitEntryHash[K]() {
+				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
+				oldValPtr = unsafe.Pointer(&slot.Ptr().value)
+			} else {
+				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
+				oldValPtr = unsafe.Pointer(&slot.Ptr().value)
+			}
 			if m.valEqual != nil && m.valEqual(
-				noescape(unsafe.Pointer(&lastB.At(j).Ptr().value)),
+				noescape(oldValPtr),
 				noescape(unsafe.Pointer(&it.entry.value)),
 			) {
 				root.Unlock()
@@ -741,19 +769,21 @@ findLoop:
 
 			// Update
 			lastB.seq.BeginWriteLocked()
-			lastB.At(j).WriteUnfenced(it.entry)
+			if omitEntryHash[K]() {
+				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
+				slot.WriteUnfenced(entryNoHash[K, V]{key: *key, value: it.entry.value})
+			} else {
+				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
+				slot.WriteUnfenced(entryWithHash[K, V]{hash: hash, key: *key, value: it.entry.value})
+			}
 			lastB.seq.EndWriteLocked()
 			root.Unlock()
 			return it.entry.value, it.loaded
 		}
 		if emptyB == nil {
 			// append new bucket
-			storePtr(&lastB.next, unsafe.Pointer(&flatBucket[K, V]{
-				meta: setByte(emptyM, h2v, 0),
-				entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
-					{buf: it.entry},
-				},
-			}))
+			newB := m.newFlatBucket(setByte(emptyM, h2v, 0), *key, it.entry.value, hash)
+			storePtr(&lastB.next, newB)
 			newMeta := loadUint64Fast(&lastB.meta) | opNextMask
 			if lastB == root {
 				root.UnlockWithMeta(newMeta)
@@ -778,11 +808,13 @@ findLoop:
 			return it.entry.value, it.loaded
 		}
 		// Insert into empty slot
-		// insert new: no seqlock window needed since slot was empty.
-		// Reader won't access slot until meta is published with valid h2.
-		// StoreBarrier ensures Entry is visible before meta update on ARM.
-		emptyB.At(emptyI).WriteUnfenced(it.entry)
-		// emptyB.seq.WriteBarrier()
+		if omitEntryHash[K]() {
+			slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(emptyB, emptyI))
+			slot.WriteUnfenced(entryNoHash[K, V]{key: *key, value: it.entry.value})
+		} else {
+			slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(emptyB, emptyI))
+			slot.WriteUnfenced(entryWithHash[K, V]{hash: hash, key: *key, value: it.entry.value})
+		}
 		newMeta := setByte(emptyM, h2v, emptyI)
 		if emptyB == root {
 			root.UnlockWithMeta(newMeta)
@@ -797,12 +829,16 @@ findLoop:
 			root.Unlock()
 			return it.entry.value, it.loaded
 		}
-		// Delete: update meta first so new Readers skip this slot immediately.
-		// Active Readers will see seq change and retry, then see h2=0.
 		newMeta := setByte(meta, h2Empty, j)
 		storeUint64(&lastB.meta, newMeta)
 		lastB.seq.BeginWriteLocked()
-		lastB.At(j).WriteUnfenced(entry_[K, V]{})
+		if omitEntryHash[K]() {
+			slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
+			slot.WriteUnfenced(entryNoHash[K, V]{})
+		} else {
+			slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
+			slot.WriteUnfenced(entryWithHash[K, V]{})
+		}
 		lastB.seq.EndWriteLocked()
 
 		root.Unlock()
@@ -837,45 +873,64 @@ findLoop:
 //   - Returning false from the callback stops iteration early.
 func (m *FlatMap[K, V]) Range(yield func(K, V) bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return
 	}
 
 	var meta uint64
-	var cache [entriesPerBucket]entry_[K, V]
-	var cacheCount uintptr
 	for i := uintptr(0); i <= table.mask; i++ {
-		b := table.buckets.At(i)
+		b := m.bucketAt(table.buckets, i)
 	retry:
 		for {
-			// var spins int
 			s1, ok := b.seq.BeginRead()
-
 			if !ok {
-				// delay(&spins)
 				continue retry
 			}
 			meta = loadUint64Fast(&b.meta)
-			cacheCount = 0
-			unsafeCache := toUnsafeSlice(&cache[0])
-			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
-				j := firstMarkedByteIndex(marked)
-				*unsafeCache.At(cacheCount) = b.At(j).ReadUnfenced()
-				cacheCount++
-			}
-			if !b.seq.EndRead(s1) {
-				continue retry
-			}
-			for j := range cacheCount {
-				kv := unsafeCache.At(j)
-				if !yield(kv.key, kv.value) {
-					return
+
+			if omitEntryHash[K]() {
+				var cache [entriesPerBucket]entryNoHash[K, V]
+				var cacheCount uintptr
+				unsafeCache := toUnsafeSlice(&cache[0])
+				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+					j := firstMarkedByteIndex(marked)
+					slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+					*unsafeCache.At(cacheCount) = slot.ReadUnfenced()
+					cacheCount++
+				}
+				if !b.seq.EndRead(s1) {
+					continue retry
+				}
+				for j := range cacheCount {
+					kv := unsafeCache.At(j)
+					if !yield(kv.key, kv.value) {
+						return
+					}
+				}
+			} else {
+				var cache [entriesPerBucket]entryWithHash[K, V]
+				var cacheCount uintptr
+				unsafeCache := toUnsafeSlice(&cache[0])
+				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
+					j := firstMarkedByteIndex(marked)
+					slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
+					*unsafeCache.At(cacheCount) = slot.ReadUnfenced()
+					cacheCount++
+				}
+				if !b.seq.EndRead(s1) {
+					continue retry
+				}
+				for j := range cacheCount {
+					kv := unsafeCache.At(j)
+					if !yield(kv.key, kv.value) {
+						return
+					}
 				}
 			}
 			if meta&opNextMask == 0 {
 				break
 			}
-			b = (*flatBucket[K, V])(loadPtr(&b.next))
+			b = (*flatBucketHeader)(loadPtr(&b.next))
 		}
 	}
 }
@@ -893,7 +948,7 @@ func (m *FlatMap[K, V]) All() func(yield func(K, V) bool) {
 // count.
 func (m *FlatMap[K, V]) Size() int {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return 0
 	}
 
@@ -959,7 +1014,7 @@ func (m *FlatMap[K, V]) ComputeRange(yield func(e *MapEntry[K, V]) bool) {
 func (m *FlatMap[K, V]) computeRange(yield func(e *MapEntry[K, V]) bool, ignoreRebuildState bool) {
 restart:
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return
 	}
 	it := MapEntry[K, V]{
@@ -967,7 +1022,7 @@ restart:
 	}
 
 	for i := uintptr(0); i <= table.mask; i++ {
-		root := table.buckets.At(i)
+		root := m.bucketAt(table.buckets, i)
 		root.Lock()
 
 		if !ignoreRebuildState {
@@ -988,7 +1043,7 @@ restart:
 				}
 			}
 
-			if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets.ptr != table.buckets.ptr {
+			if newTable := SeqLockRead32(&m.tableSeq, &m.table); newTable.buckets != table.buckets {
 				root.Unlock()
 				goto restart
 			}
@@ -999,20 +1054,41 @@ restart:
 			meta := loadUint64Fast(&b.meta)
 			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				e := b.At(j)
-				it.entry = *e.Ptr()
+
+				if omitEntryHash[K]() {
+					slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+					e := slot.Ptr()
+					it.entry.key, it.entry.value = e.key, e.value
+				} else {
+					slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
+					e := slot.Ptr()
+					it.entry.hash = e.hash
+					it.entry.key, it.entry.value = e.key, e.value
+				}
 				it.op = cancelOp
 				shouldContinue := yield(noEscape(&it))
 				switch it.op {
 				case updateOp:
 					b.seq.BeginWriteLocked()
-					e.WriteUnfenced(it.entry)
+					if omitEntryHash[K]() {
+						slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+						slot.WriteUnfenced(entryNoHash[K, V]{key: it.entry.key, value: it.entry.value})
+					} else {
+						slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
+						slot.WriteUnfenced(entryWithHash[K, V]{hash: it.entry.hash, key: it.entry.key, value: it.entry.value})
+					}
 					b.seq.EndWriteLocked()
 				case deleteOp:
 					meta = setByte(meta, h2Empty, j)
 					storeUint64(&b.meta, meta)
 					b.seq.BeginWriteLocked()
-					e.WriteUnfenced(entry_[K, V]{})
+					if omitEntryHash[K]() {
+						slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+						slot.WriteUnfenced(entryNoHash[K, V]{})
+					} else {
+						slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
+						slot.WriteUnfenced(entryWithHash[K, V]{})
+					}
 					b.seq.EndWriteLocked()
 					table.AddSize(i, ^uintptr(0))
 				default:
@@ -1026,7 +1102,7 @@ restart:
 			if meta&opNextMask == 0 {
 				break
 			}
-			b = (*flatBucket[K, V])(b.next)
+			b = (*flatBucketHeader)(b.next)
 		}
 		root.Unlock()
 	}
@@ -1035,7 +1111,7 @@ restart:
 // Clear clears all key-value pairs from the map.
 func (m *FlatMap[K, V]) Clear() {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return
 	}
 
@@ -1061,7 +1137,7 @@ func (m *FlatMap[K, V]) Grow(sizeAdd int) {
 		return
 	}
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		m.slowInit()
 	}
 	m.doResize(mapGrowHint, uintptr(sizeAdd))
@@ -1071,7 +1147,7 @@ func (m *FlatMap[K, V]) Grow(sizeAdd int) {
 // always executes regardless of WithAutoShrink.
 func (m *FlatMap[K, V]) Shrink() {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return
 	}
 	m.doResize(mapShrinkHint, 0)
@@ -1135,7 +1211,7 @@ func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd uintptr) {
 func (m *FlatMap[K, V]) CloneTo(clone *FlatMap[K, V]) {
 	clone.Clear()
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr == nil {
+	if table.buckets == nil {
 		return
 	}
 	clone.intKey = m.intKey
@@ -1210,7 +1286,7 @@ func (m *FlatMap[K, V]) slowInit() {
 	}
 	// The table may have been altered prior to our changes.
 	table := SeqLockRead32(&m.tableSeq, &m.table)
-	if table.buckets.ptr != nil {
+	if table.buckets != nil {
 		m.endRebuild(rs)
 		return
 	}
@@ -1318,27 +1394,19 @@ func (m *FlatMap[K, V]) copyBucket(
 		// Visit all source buckets that map to this destination bucket.
 		// In Grow, runs once. In Shrink, runs twice (usually).
 		for srcIdx := i; srcIdx < oldLen; srcIdx += baseLen {
-			srcB := table.buckets.At(srcIdx)
+			srcB := m.bucketAt(table.buckets, srcIdx)
 			srcB.Lock()
 			b := srcB
 			for {
 				meta := loadUint64Fast(&b.meta)
 				for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 					j := firstMarkedByteIndex(marked)
-					e := b.At(j).Ptr()
-					var hash uintptr
-					var h1v uintptr
-					var h2v uint8
-					if opt.EmbeddedHash_ {
-						hash = e.GetHash()
-						if m.intKey {
-							h1v = hash / entriesPerBucket
-							h2v = h2(hash ^ (hash >> 16))
-						} else {
-							h1v = h1(hash)
-							h2v = h2(hash)
-						}
-					} else {
+					if omitEntryHash[K]() {
+						var hash uintptr
+						var h1v uintptr
+						var h2v uint8
+						slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
+						e := slot.Ptr()
 						if m.intKey {
 							hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
 							h1v = hash / entriesPerBucket
@@ -1348,36 +1416,63 @@ func (m *FlatMap[K, V]) copyBucket(
 							h1v = h1(hash)
 							h2v = h2(hash)
 						}
-					}
-					idx := mask & h1v
-					destB := newTable.buckets.At(idx)
-					// Append entry to the destination bucket
-					for {
-						meta := destB.meta
-						if empty := (^meta) & metaMask; empty != 0 {
-							emptyIdx := firstMarkedByteIndex(empty)
-							destB.meta = setByte(meta, h2v, emptyIdx)
-							*destB.At(emptyIdx).Ptr() = *e
-							break
+						idx := mask & h1v
+						destB := m.bucketAt(newTable.buckets, idx)
+						for {
+							destMeta := destB.meta
+							if empty := (^destMeta) & metaMask; empty != 0 {
+								emptyIdx := firstMarkedByteIndex(empty)
+								destB.meta = setByte(destMeta, h2v, emptyIdx)
+								destSlot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(destB, emptyIdx))
+								destSlot.WriteUnfenced(entryNoHash[K, V]{key: e.key, value: e.value})
+								break
+							}
+							if destMeta&opNextMask == 0 {
+								newB := m.newFlatBucket(setByte(metaEmpty, h2v, 0), e.key, e.value, hash)
+								storePtr(&destB.next, newB)
+								destB.meta = destMeta | opNextMask
+								break
+							}
+							destB = (*flatBucketHeader)(loadPtr(&destB.next))
 						}
-						if meta&opNextMask == 0 {
-							destB.next = unsafe.Pointer(&flatBucket[K, V]{
-								meta: setByte(metaEmpty, h2v, 0),
-								entries: [entriesPerBucket]SeqLockSlot[entry_[K, V]]{
-									{buf: *e},
-								},
-							})
-							destB.meta = meta | opNextMask
-							break
+					} else {
+						e := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j)).Ptr()
+						hash := e.hash
+						var h1v uintptr
+						var h2v uint8
+						if m.intKey {
+							h1v = hash / entriesPerBucket
+							h2v = h2(hash ^ (hash >> 16))
+						} else {
+							h1v = h1(hash)
+							h2v = h2(hash)
 						}
-						destB = (*flatBucket[K, V])(destB.next)
+						idx := mask & h1v
+						destB := m.bucketAt(newTable.buckets, idx)
+						for {
+							destMeta := destB.meta
+							if empty := (^destMeta) & metaMask; empty != 0 {
+								emptyIdx := firstMarkedByteIndex(empty)
+								destB.meta = setByte(destMeta, h2v, emptyIdx)
+								destSlot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(destB, emptyIdx))
+								destSlot.WriteUnfenced(entryWithHash[K, V]{hash: hash, key: e.key, value: e.value})
+								break
+							}
+							if destMeta&opNextMask == 0 {
+								newB := m.newFlatBucket(setByte(metaEmpty, h2v, 0), e.key, e.value, hash)
+								storePtr(&destB.next, newB)
+								destB.meta = destMeta | opNextMask
+								break
+							}
+							destB = (*flatBucketHeader)(loadPtr(&destB.next))
+						}
 					}
 					copied++
 				}
 				if meta&opNextMask == 0 {
 					break
 				}
-				b = (*flatBucket[K, V])(b.next)
+				b = (*flatBucketHeader)(loadPtr(&b.next))
 			}
 			srcB.Unlock()
 		}
@@ -1391,8 +1486,14 @@ func newFlatTable[K comparable, V any](
 	tableLen, cpus uintptr,
 ) flatTable[K, V] {
 	sizeLen := calcSizeLen(tableLen, cpus)
+	var buckets unsafe.Pointer
+	if omitEntryHash[K]() {
+		buckets = unsafe.Pointer(unsafe.SliceData(make([]flatBucketNoHash[K, V], tableLen)))
+	} else {
+		buckets = unsafe.Pointer(unsafe.SliceData(make([]flatBucketWithHash[K, V], tableLen)))
+	}
 	return flatTable[K, V]{
-		buckets:  makeUnsafeSlice[flatBucket[K, V]](tableLen),
+		buckets:  buckets,
 		mask:     tableLen - 1,
 		size:     makeUnsafeSlice[counterStripe](sizeLen),
 		sizeMask: sizeLen - 1,
@@ -1413,15 +1514,7 @@ func (t *flatTable[K, V]) SumSize() uintptr {
 	return sum
 }
 
-//go:nosplit
-func (b *flatBucket[K, V]) At(i uintptr) *SeqLockSlot[entry_[K, V]] {
-	return (*SeqLockSlot[entry_[K, V]])(unsafe.Add(
-		unsafe.Pointer(&b.entries),
-		i*unsafe.Sizeof(SeqLockSlot[entry_[K, V]]{}),
-	))
-}
-
-func (b *flatBucket[K, V]) Lock() {
+func (b *flatBucketHeader) Lock() {
 	// Inline BitLockUint64(&b.meta, opLockMask)
 	cur := atomic.LoadUint64(&b.meta)
 	if !atomic.CompareAndSwapUint64(&b.meta, cur&^opLockMask, cur|opLockMask) {
@@ -1430,11 +1523,11 @@ func (b *flatBucket[K, V]) Lock() {
 }
 
 //go:nosplit
-func (b *flatBucket[K, V]) Unlock() {
+func (b *flatBucketHeader) Unlock() {
 	BitUnlockUint64(&b.meta, opLockMask)
 }
 
 //go:nosplit
-func (b *flatBucket[K, V]) UnlockWithMeta(meta uint64) {
+func (b *flatBucketHeader) UnlockWithMeta(meta uint64) {
 	BitUnlockWithStoreUint64(&b.meta, opLockMask, meta)
 }

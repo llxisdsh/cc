@@ -7,8 +7,6 @@ import (
 	"runtime"
 	"sync/atomic"
 	"unsafe"
-
-	"github.com/llxisdsh/cc/internal/opt"
 )
 
 // FunnelMap is a high-throughput, concurrent-safe hash map that leverages a
@@ -156,10 +154,14 @@ func (m *FunnelMap[K, V]) Load(key K) (value V, ok bool) {
 	meta := loadUint64(&b.meta)
 	for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 		j := firstMarkedByteIndex(marked)
-		if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-			//goland:noinspection GoBoolExpressions
-			if !opt.EmbeddedHash_ || e.GetHash() == hash {
-				if e.key == key {
+		if ePtr := loadPtr(b.At(j)); ePtr != nil {
+			if omitEntryHash[K]() {
+				if (*entryNoHash[K, V])(ePtr).key == key {
+					return (*entryNoHash[K, V])(ePtr).value, true
+				}
+			} else {
+				e := (*entryWithHash[K, V])(ePtr)
+				if e.hash == hash && e.key == key {
 					return e.value, true
 				}
 			}
@@ -199,11 +201,20 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 		meta := loadUint64(&root.meta)
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(root.At(j))); e != nil {
-				//goland:noinspection GoBoolExpressions
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == key {
-						// valEqual: skip write if value unchanged
+			if ePtr := loadPtr(root.At(j)); ePtr != nil {
+				if omitEntryHash[K]() {
+					if (*entryNoHash[K, V])(ePtr).key == key {
+						if m.valEqual != nil && m.valEqual(
+							noescape(unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).value)),
+							noescape(unsafe.Pointer(&value)),
+						) {
+							return
+						}
+						goto slowPath
+					}
+				} else {
+					e := (*entryWithHash[K, V])(ePtr)
+					if e.hash == hash && e.key == key {
 						if m.valEqual != nil && m.valEqual(
 							noescape(unsafe.Pointer(&e.value)),
 							noescape(unsafe.Pointer(&value)),
@@ -270,18 +281,28 @@ slowPath:
 	meta := loadUint64Fast(&root.meta)
 	for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 		j := firstMarkedByteIndex(marked)
-		e := (*entry_[K, V])(*root.At(j))
-		//goland:noinspection GoBoolExpressions
-		if !opt.EmbeddedHash_ || e.GetHash() == hash {
-			if e.key == key {
-				// Update
-				newEntry := &entry_[K, V]{key: key, value: value}
-				if opt.EmbeddedHash_ {
-					newEntry.SetHash(hash)
+		if ePtr := *root.At(j); ePtr != nil {
+			if omitEntryHash[K]() {
+				if (*entryNoHash[K, V])(ePtr).key == key {
+					// Update
+					newEntry := unsafe.Pointer(&entryNoHash[K, V]{key: key, value: value})
+					storePtr(root.At(j), newEntry)
+					root.Unlock()
+					return
 				}
-				storePtr(root.At(j), unsafe.Pointer(newEntry))
-				root.Unlock()
-				return
+			} else {
+				e := (*entryWithHash[K, V])(ePtr)
+				if e.hash == hash && e.key == key {
+					// Update
+					newEntry := unsafe.Pointer(&entryWithHash[K, V]{
+						hash:  hash,
+						key:   key,
+						value: value,
+					})
+					storePtr(root.At(j), newEntry)
+					root.Unlock()
+					return
+				}
 			}
 		}
 	}
@@ -299,11 +320,13 @@ slowPath:
 			// and this reduces the window where meta is visible but pointer is
 			// still nil
 			emptyIdx := firstMarkedByteIndex(empty)
-			newEntry := &entry_[K, V]{key: key, value: value}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
+			var newEntry unsafe.Pointer
+			if omitEntryHash[K]() {
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: key, value: value})
+			} else {
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: key, value: value})
 			}
-			storePtr(root.At(emptyIdx), unsafe.Pointer(newEntry))
+			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
 			m.size.Add(1)
@@ -498,10 +521,17 @@ func (m *FunnelMap[K, V]) compute(
 		meta := loadUint64(&root.meta)
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(root.At(j))); e != nil {
-				//goland:noinspection GoBoolExpressions
-				if !opt.EmbeddedHash_ || e.GetHash() == hash {
-					if e.key == *key {
+			if ePtr := loadPtr(root.At(j)); ePtr != nil {
+				if omitEntryHash[K]() {
+					if (*entryNoHash[K, V])(ePtr).key == *key {
+						if flags&computeSkipIfFound != 0 {
+							return (*entryNoHash[K, V])(ePtr).value, true
+						}
+						goto slowPath
+					}
+				} else {
+					e := (*entryWithHash[K, V])(ePtr)
+					if e.hash == hash && e.key == *key {
 						if flags&computeSkipIfFound != 0 {
 							return e.value, true
 						}
@@ -570,12 +600,18 @@ slowPath:
 	meta := loadUint64Fast(&root.meta)
 	for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 		j = firstMarkedByteIndex(marked)
-		e := (*entry_[K, V])(*root.At(j))
-		//goland:noinspection GoBoolExpressions
-		if !opt.EmbeddedHash_ || e.GetHash() == hash {
-			if e.key == *key {
-				it.entry.value, it.loaded = e.value, true
-				break
+		if ePtr := *root.At(j); ePtr != nil {
+			if omitEntryHash[K]() {
+				if (*entryNoHash[K, V])(ePtr).key == *key {
+					it.entry.value, it.loaded = (*entryNoHash[K, V])(ePtr).value, true
+					break
+				}
+			} else {
+				e := (*entryWithHash[K, V])(ePtr)
+				if e.hash == hash && e.key == *key {
+					it.entry.value, it.loaded = e.value, true
+					break
+				}
 			}
 		}
 	}
@@ -628,8 +664,15 @@ slowPath:
 			}
 
 			// valEqual: skip write if value unchanged
+			var oldValPtr unsafe.Pointer
+			ePtr := *root.At(j)
+			if omitEntryHash[K]() {
+				oldValPtr = unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).value)
+			} else {
+				oldValPtr = unsafe.Pointer(&(*entryWithHash[K, V])(ePtr).value)
+			}
 			if m.valEqual != nil && m.valEqual(
-				noescape(unsafe.Pointer(&(*entry_[K, V])(*root.At(j)).value)),
+				noescape(oldValPtr),
 				noescape(unsafe.Pointer(&it.entry.value)),
 			) {
 				root.Unlock()
@@ -637,11 +680,13 @@ slowPath:
 			}
 
 			// Update
-			newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
+			var newEntry unsafe.Pointer
+			if omitEntryHash[K]() {
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, value: it.entry.value})
+			} else {
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: *key, value: it.entry.value})
 			}
-			storePtr(root.At(j), unsafe.Pointer(newEntry))
+			storePtr(root.At(j), newEntry)
 			root.Unlock()
 			return retV, it.loaded
 		}
@@ -653,11 +698,13 @@ slowPath:
 			// pointer so they won't observe a partially-initialized entry,
 			// and this reduces the window where meta is visible but pointer is
 			// still nil
-			newEntry := &entry_[K, V]{key: *key, value: it.entry.value}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
+			var newEntry unsafe.Pointer
+			if omitEntryHash[K]() {
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, value: it.entry.value})
+			} else {
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: *key, value: it.entry.value})
 			}
-			storePtr(root.At(emptyIdx), unsafe.Pointer(newEntry))
+			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
 			m.size.Add(1)
@@ -730,9 +777,17 @@ func (m *FunnelMap[K, V]) Range(yield func(key K, value V) bool) {
 		meta := loadUint64(&b.meta)
 		for marked := meta & fMetaMask; marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
-				if !yield(e.key, e.value) {
-					return
+			if ePtr := loadPtr(b.At(j)); ePtr != nil {
+				if omitEntryHash[K]() {
+					e := (*entryNoHash[K, V])(ePtr)
+					if !yield(e.key, e.value) {
+						return
+					}
+				} else {
+					e := (*entryWithHash[K, V])(ePtr)
+					if !yield(e.key, e.value) {
+						return
+					}
 				}
 			}
 		}
@@ -858,18 +913,27 @@ restart:
 		meta := loadUint64Fast(&b.meta)
 		for marked := meta & fMetaMask; marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			e := (*entry_[K, V])(*b.At(j))
-			it.entry = *e
+			ePtr := *b.At(j)
+			if omitEntryHash[K]() {
+				e := (*entryNoHash[K, V])(ePtr)
+				it.entry.key, it.entry.value = e.key, e.value
+			} else {
+				e := (*entryWithHash[K, V])(ePtr)
+				it.entry.hash, it.entry.key, it.entry.value = e.hash, e.key, e.value
+			}
+
 			it.op = cancelOp
 			shouldContinue := yield(noEscape(&it))
 
 			switch it.op {
 			case updateOp:
-				newEntry := &entry_[K, V]{key: e.key, value: it.entry.value}
-				if opt.EmbeddedHash_ {
-					newEntry.SetHash(e.GetHash())
+				var newEntry unsafe.Pointer
+				if omitEntryHash[K]() {
+					newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: it.entry.key, value: it.entry.value})
+				} else {
+					newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: it.entry.hash, key: it.entry.key, value: it.entry.value})
 				}
-				storePtr(b.At(j), unsafe.Pointer(newEntry))
+				storePtr(b.At(j), newEntry)
 			case deleteOp:
 				storePtr(b.At(j), nil)
 				meta = setByte(meta, h2Empty, j)
@@ -1217,26 +1281,20 @@ func (m *FunnelMap[K, V]) copyBucket(
 			meta := loadUint64Fast(&b.meta)
 			for marked := meta & fMetaMask; marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				e := (*entry_[K, V])(*b.At(j))
-				var hash uintptr
+				ePtr := *b.At(j)
 				var h1v uintptr
 				var h2v uint8
-				if opt.EmbeddedHash_ {
-					hash = e.GetHash()
-					if m.intKey {
-						h1v = hash / fEntriesPerBucket
-						h2v = h2(hash ^ (hash >> 16))
-					} else {
+				if m.intKey {
+					hash := intHash[K](noescape(unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).key)))
+					h1v = hash / fEntriesPerBucket
+					h2v = h2(hash ^ (hash >> 16))
+				} else {
+					if omitEntryHash[K]() {
+						hash := m.keyHash(noescape(unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).key)), m.seed)
 						h1v = h1(hash)
 						h2v = h2(hash)
-					}
-				} else {
-					if m.intKey {
-						hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
-						h1v = hash / fEntriesPerBucket
-						h2v = h2(hash ^ (hash >> 16))
 					} else {
-						hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+						hash := (*entryWithHash[K, V])(ePtr).hash
 						h1v = h1(hash)
 						h2v = h2(hash)
 					}
@@ -1248,10 +1306,16 @@ func (m *FunnelMap[K, V]) copyBucket(
 				if empty := (^destMeta) & fMetaMask; empty != 0 {
 					emptyIdx := firstMarkedByteIndex(empty)
 					destB.meta = setByte(destMeta, h2v, emptyIdx)
-					*destB.At(emptyIdx) = unsafe.Pointer(e)
+					*destB.At(emptyIdx) = ePtr
 				} else {
 					destB.meta = destMeta | opNextMask
-					newTable.overflow.Store(e.key, e.value)
+					if omitEntryHash[K]() {
+						e := (*entryNoHash[K, V])(ePtr)
+						newTable.overflow.Store(e.key, e.value)
+					} else {
+						e := (*entryWithHash[K, V])(ePtr)
+						newTable.overflow.Store(e.key, e.value)
+					}
 				}
 			}
 			srcB.Unlock()
@@ -1280,11 +1344,13 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 		if empty := (^destMeta) & fMetaMask; empty != 0 {
 			emptyIdx := firstMarkedByteIndex(empty)
 			destB.meta = setByte(destMeta, h2v, emptyIdx)
-			newEntry := &entry_[K, V]{key: k, value: v}
-			if opt.EmbeddedHash_ {
-				newEntry.SetHash(hash)
+			var newEntry unsafe.Pointer
+			if omitEntryHash[K]() {
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: k, value: v})
+			} else {
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: k, value: v})
 			}
-			*destB.At(emptyIdx) = unsafe.Pointer(newEntry)
+			*destB.At(emptyIdx) = newEntry
 		} else {
 			destB.meta = destMeta | opNextMask
 			newTable.overflow.Store(k, v)

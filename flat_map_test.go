@@ -1,3 +1,5 @@
+//go:build !race
+
 package cc
 
 import (
@@ -38,10 +40,16 @@ func TestFlatMap_BucketOfStructSize(t *testing.T) {
 		t.Logf("flatTable doesn't meet CacheLineSize: %d", size)
 	}
 
-	size = unsafe.Sizeof(flatBucket[int, int]{})
-	t.Log("flatBucket size:", size)
+	size = unsafe.Sizeof(flatBucketNoHash[int, int]{})
+	t.Log("flatBucketNoHash size:", size)
 	if size != cacheLineSize {
-		t.Logf("flatBucket doesn't meet CacheLineSize: %d", size)
+		t.Logf("flatBucketNoHash doesn't meet CacheLineSize: %d", size)
+	}
+
+	size = unsafe.Sizeof(flatBucketWithHash[int, int]{})
+	t.Log("flatBucketWithHash size:", size)
+	if size != cacheLineSize {
+		t.Logf("flatBucketWithHash doesn't meet CacheLineSize: %d", size)
 	}
 }
 

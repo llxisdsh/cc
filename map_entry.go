@@ -1,7 +1,5 @@
 package cc
 
-import "github.com/llxisdsh/cc/internal/opt"
-
 // MapEntry is a temporary view of a map entry
 // It can be updated or deleted during the callback.
 //
@@ -53,8 +51,15 @@ func (e *MapEntry[K, V]) Delete() {
 }
 
 // entry_ is the internal representation of a map entry.
-type entry_[K comparable, V any] struct {
-	opt.EmbeddedHash
+type entry_[K comparable, V any] = entryWithHash[K, V]
+
+type entryNoHash[K comparable, V any] struct {
+	key   K
+	value V
+}
+
+type entryWithHash[K comparable, V any] struct {
+	hash  uintptr
 	key   K
 	value V
 }

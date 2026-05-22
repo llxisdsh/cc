@@ -144,6 +144,11 @@ type counterStripe struct {
 // Utility Functions
 // ============================================================================
 
+//go:nosplit
+func omitEntryHash[K comparable]() bool {
+	return unsafe.Sizeof(*new(K)) < 2*unsafe.Sizeof(uintptr(0))
+}
+
 // calcParallelism calculates the number of goroutines for parallel processing.
 // return value must be a power of 2
 //

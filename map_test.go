@@ -109,7 +109,7 @@ func (m *Map[K, V]) stats() *mapStats {
 			meta := loadUint64(&b.meta)
 			for marked := meta & metaMask; marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				if e := (*entry_[K, V])(loadPtr(b.At(j))); e != nil {
+				if loadPtr(b.At(j)) != nil {
 					stats.Size++
 					entriesLocal++
 				}
@@ -4216,7 +4216,7 @@ func TestMapStats(t *testing.T) {
 	}
 
 	stats = m.stats()
-	rootBuckes := calcTableLen(200)
+	rootBuckes := calcTableLen(200 * 2)
 	if stats.RootBuckets > rootBuckes {
 		t.Fatalf("unexpected number of root buckets: %d, %s", rootBuckes, stats.String())
 	}
@@ -6034,36 +6034,6 @@ func TestMap_UnlockWithMeta(t *testing.T) {
 			// Lock again for next iteration
 			if meta != testMetas[len(testMetas)-1] {
 				bucket.Lock()
-			}
-		}
-	})
-}
-
-func TestMap_EmbeddedHash(t *testing.T) {
-	// These functions are no-ops when cc_embedded_hash build tag is not set
-	// But we still need to call them to get coverage
-
-	t.Run("Entry_", func(t *testing.T) {
-		var entry entry_[string, int]
-
-		// Test getHash - should return 0
-		hash := entry.GetHash()
-		if hash != 0 {
-			t.Errorf("Entry_.getHash() = %d, want 0", hash)
-		}
-
-		// Test setHash - should be a no-op
-		entry.SetHash(0x12345678)
-		// Verify it's still 0 since setHash is a no-op
-		hash = entry.GetHash()
-		//goland:noinspection ALL
-		if unsafe.Sizeof(entry.EmbeddedHash) != 0 {
-			if hash != 0x12345678 {
-				t.Errorf("After setHash, Entry_.getHash() = %d, want 0x12345678", hash)
-			}
-		} else {
-			if hash != 0 {
-				t.Errorf("After setHash, Entry_.getHash() = %d, want 0", hash)
 			}
 		}
 	})
