@@ -394,3 +394,30 @@ func TestOFHTMapClearBasic(t *testing.T) {
 		}
 	}
 }
+
+func TestOFHTMapSameKeyTombstoneReuse(t *testing.T) {
+	m := NewOFHTMap[int, int](WithCapacity(1))
+	for i := range 10000 {
+		actual, loaded := m.LoadOrStore(7, i)
+		if loaded {
+			t.Fatalf("LoadOrStore iteration %d loaded existing value %d", i, actual)
+		}
+		if got, ok := m.Load(7); !ok || got != i {
+			t.Fatalf("Load iteration %d=(%d,%v), want (%d,true)", i, got, ok, i)
+		}
+		if prev, loaded := m.LoadAndDelete(7); !loaded || prev != i {
+			t.Fatalf("LoadAndDelete iteration %d=(%d,%v), want (%d,true)", i, prev, loaded, i)
+		}
+		if got := m.Size(); got != 0 {
+			t.Fatalf("Size iteration %d=%d, want 0", i, got)
+		}
+	}
+
+	table := m.table.Load()
+	if table == nil {
+		t.Fatal("table is nil")
+	}
+	if slotLen := table.mask + 1; slotLen != ofhtMinSlots {
+		t.Fatalf("same-key tombstone churn grew table to %d slots, want %d", slotLen, ofhtMinSlots)
+	}
+}

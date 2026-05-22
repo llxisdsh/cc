@@ -10,10 +10,12 @@ import (
 	"unsafe"
 
 	"github.com/llxisdsh/cc/internal/asm"
+	"github.com/llxisdsh/cc/internal/opt"
 )
 
 const (
 	dwhtEnableIntKey         = true
+	dwhtUseRawIntHash        = true
 	dwhtEnableDedupVal       = true
 	dwhtEnableAggressiveGrow = true
 	dwhtEnableStoreInGrow    = true
@@ -93,6 +95,9 @@ type dwhtSlotRaw struct {
 	entry unsafe.Pointer
 }
 
+// DWCAS requires the two-word slot view to be 16-byte aligned. Go only
+// guarantees pointer alignment for slice elements, so allocation tries both
+// field orders and caches the one that is aligned for each power-of-two size.
 type dwhtSlotRawRot8 struct {
 	entry unsafe.Pointer
 	ctrl  uint64
@@ -132,6 +137,13 @@ const (
 	dwhtH2Shift = 2
 	dwhtH2Mask  = uint64(0xFFFFFFFF)
 
+	// ctrl layout:
+	//   bits 0..1:   slot state
+	//   bits 2..33:  32-bit hash fragment
+	//   bits 34..62: sequence, bumped on every slot transition
+	//   bit 63:      frozen during resize
+	// The sequence is part of the DWCAS expected ctrl word, so stale CAS
+	// attempts cannot succeed after a delete/revive/update cycle.
 	dwhtSeqShift = 34
 	dwhtSeqInc   = uint64(1) << dwhtSeqShift
 
@@ -144,12 +156,16 @@ const (
 	dwhtStoreOK dwhtStoreStatus = iota
 	dwhtStoreFrozen
 	dwhtStoreFull
-	dwhtStoreRetry
 )
 
 const (
+	// occupied tracks physical slots that are no longer Empty.
 	dwhtSlotOccupied int = iota
-	dwhtSlotTombstones
+	// inserted/deleted are logical event counters; Size is inserted - deleted.
+	// These P-local counters are not a transactional snapshot. Resize may use
+	// them as pressure hints, but slot DWCAS state is the source of correctness.
+	dwhtSlotInserted
+	dwhtSlotDeleted
 )
 
 // NewDWHTMap creates an experimental DWHT-style map.
@@ -246,10 +262,8 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			occupied := m.size.Value(dwhtSlotOccupied)
+			occupied := int(m.size.Value(dwhtSlotOccupied))
 			table = m.tryResize(table, occupied)
-		case dwhtStoreRetry:
-			table = m.ensureTable()
 		}
 	}
 }
@@ -278,10 +292,8 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			occupied := m.size.Value(dwhtSlotOccupied)
+			occupied := int(m.size.Value(dwhtSlotOccupied))
 			table = m.tryResize(table, occupied)
-		case dwhtStoreRetry:
-			table = m.ensureTable()
 		}
 	}
 }
@@ -309,10 +321,8 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			occupied := m.size.Value(dwhtSlotOccupied)
+			occupied := int(m.size.Value(dwhtSlotOccupied))
 			table = m.tryResize(table, occupied)
-		case dwhtStoreRetry:
-			table = m.ensureTable()
 		}
 	}
 }
@@ -424,7 +434,9 @@ func (m *DWHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	}
 }
 
-// Range iterates over a weakly consistent snapshot of the table.
+// Range iterates weakly over the table pointer observed at entry.
+// It does not help an in-flight resize and may miss entries inserted into a
+// next table after this call starts.
 func (m *DWHTMap[K, V]) Range(yield func(K, V) bool) {
 	table := m.table.Load()
 	if table == nil {
@@ -460,12 +472,12 @@ func (m *DWHTMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	occupied := m.size.Value(dwhtSlotOccupied)
-	tombstones := m.size.Value(dwhtSlotTombstones)
-	if occupied <= tombstones {
+	inserted := int(m.size.Value(dwhtSlotInserted))
+	deleted := int(m.size.Value(dwhtSlotDeleted))
+	if inserted <= deleted {
 		return 0
 	}
-	return int(occupied - tombstones)
+	return inserted - deleted
 }
 
 // Clear clears all key-value pairs from the map.
@@ -553,6 +565,31 @@ func (m *DWHTMap[K, V]) storeInto(
 				continue
 			}
 			return dwhtStoreOK, *val, true
+		} else if state == dwhtStateDeleted {
+			// Only the same key may revive its own tombstone. Reusing an
+			// arbitrary Deleted slot is unsafe: another goroutine may have
+			// inserted the same key earlier in the probe sequence meanwhile.
+			if dwhtCtrlH2(ctrl) != h {
+				continue
+			}
+			entry := atomic.LoadPointer(&slot.entry)
+			if entry == nil {
+				continue
+			}
+			e := (*dwhtEntry[K, V])(entry)
+			if e.key != *key {
+				continue
+			}
+			if newEntry == nil {
+				newEntry = &dwhtEntry[K, V]{key: *key, val: *val}
+			}
+			newCtrl := dwhtCtrlInsert(ctrl, h)
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, unsafe.Pointer(newEntry)) {
+				probe--
+				continue
+			}
+			m.size.Add(dwhtSlotInserted, 1)
+			return dwhtStoreOK, *val, false
 		} else if state == dwhtStateEmpty {
 			entry := atomic.LoadPointer(&slot.entry)
 			if newEntry == nil {
@@ -563,7 +600,7 @@ func (m *DWHTMap[K, V]) storeInto(
 				probe--
 				continue
 			}
-			m.size.Add(dwhtSlotOccupied, 1)
+			m.size.Add2(dwhtSlotOccupied, uintptr(1), dwhtSlotInserted, uintptr(1))
 			return dwhtStoreOK, *val, false
 		}
 	}
@@ -643,8 +680,9 @@ func (m *DWHTMap[K, V]) deleteFrom(
 			}
 
 			newCtrl := dwhtCtrlDelete(ctrl)
-			// We can nil the entry to help GC, or keep it to allow lock-free readers to finish
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, nil) {
+			// Keep entry attached to the tombstone. The key is needed to allow
+			// same-key revival without permitting arbitrary tombstone reuse.
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, entry) {
 				probe--
 				continue
 			}
@@ -653,7 +691,7 @@ func (m *DWHTMap[K, V]) deleteFrom(
 			if needValue {
 				prev = e.val
 			}
-			m.size.Add(dwhtSlotTombstones, 1)
+			m.size.Add(dwhtSlotDeleted, 1)
 			return dwhtStoreOK, prev, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, *new(V), false
@@ -749,12 +787,14 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 			}
 
 			newCtrl := dwhtCtrlDelete(ctrl)
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, nil) {
+			// Keep entry attached to the tombstone for the same reason as
+			// deleteFrom: only the original key may revive this slot.
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, entry) {
 				probe--
 				continue
 			}
 
-			m.size.Add(dwhtSlotTombstones, 1)
+			m.size.Add(dwhtSlotDeleted, 1)
 			return dwhtStoreOK, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, false
@@ -771,25 +811,21 @@ func (m *DWHTMap[K, V]) resizeIfNeeded(table *dwhtTable[K, V]) {
 	if localSize < table.stripeCap {
 		return
 	}
-	occupied := m.size.Value(dwhtSlotOccupied)
-	if int(occupied) >= table.growCap {
+	occupied := int(m.size.Value(dwhtSlotOccupied))
+	if occupied >= table.growCap {
 		m.tryResize(table, occupied)
 	}
 }
 
-func (m *DWHTMap[K, V]) resizeShouldGrow(occupied uintptr) bool {
+func (m *DWHTMap[K, V]) resizeShouldGrow(occupied, tombstones int) bool {
 	if occupied < 2 {
 		return true
 	}
 	half := occupied >> 1
-	if m.size.Get(dwhtSlotTombstones) >= half {
-		return false
-	}
-	tombstones := m.size.Value(dwhtSlotTombstones)
 	return tombstones < half
 }
 
-func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied uintptr) *dwhtTable[K, V] {
+func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int) *dwhtTable[K, V] {
 	if table := m.table.Load(); table != old {
 		return table
 	}
@@ -797,13 +833,23 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied uintptr) *dwhtT
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			isGrow := m.resizeShouldGrow(occupied)
-			newTable := newDWHTTable[K, V](m.nextResizeSlotLen(old, isGrow))
+			inserted := int(m.size.Value(dwhtSlotInserted))
+			deleted := int(m.size.Value(dwhtSlotDeleted))
+			live := max(inserted-deleted, 0)
+			// occupied/inserted/deleted are read independently, so occupied can
+			// briefly lag behind live. Treat that as zero tombstone pressure
+			// rather than clamping live and corrupting Size after resize.
+			effectiveOccupied := max(live, occupied)
+			tombstones := effectiveOccupied - live
+			isGrow := m.resizeShouldGrow(effectiveOccupied, tombstones)
+			newTable := newDWHTTable[K, V](m.nextResizeSlotLen(old, isGrow, live))
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
 			if dwhtEnableStoreInGrow {
-				return old // Fallback to retry in caller
+				// Let the caller retry the write against old while the resize
+				// leader allocates nextTable. Frozen slots will force helping.
+				return old
 			}
 			// Wait for leader to allocate
 			for {
@@ -899,11 +945,15 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
-			occupied := m.size.Reset(dwhtSlotOccupied)
-			tombstones := m.size.Reset(dwhtSlotTombstones)
-			if occupied > tombstones {
-				live := occupied - tombstones
-				m.size.Add(dwhtSlotOccupied, live)
+			// Reset counters to describe the compacted next table. The three
+			// counters are not reset atomically; preserve logical live count
+			// from inserted-deleted and do not constrain it by occupied.
+			m.size.Reset(dwhtSlotOccupied)
+			inserted := int(m.size.Reset(dwhtSlotInserted))
+			deleted := int(m.size.Reset(dwhtSlotDeleted))
+			live := max(inserted-deleted, 0)
+			if live > 0 {
+				m.size.Add2(dwhtSlotOccupied, uintptr(live), dwhtSlotInserted, uintptr(live))
 			}
 			m.table.CompareAndSwap(old, next)
 			return next
@@ -911,7 +961,7 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 	}
 }
 
-func (m *DWHTMap[K, V]) nextResizeSlotLen(old *dwhtTable[K, V], isGrow bool) uintptr {
+func (m *DWHTMap[K, V]) nextResizeSlotLen(old *dwhtTable[K, V], isGrow bool, live int) uintptr {
 	slotLen := old.mask + 1
 	nextLen := slotLen
 	if isGrow {
@@ -926,13 +976,81 @@ func (m *DWHTMap[K, V]) nextResizeSlotLen(old *dwhtTable[K, V], isGrow bool) uin
 	// When that concurrent window makes old much denser than the normal grow
 	// threshold, grow for roughly another table worth of inserts instead of
 	// forcing a near-immediate second resize.
-	occupied := m.size.Value(dwhtSlotOccupied)
-	tombstones := m.size.Value(dwhtSlotTombstones)
-	if occupied > tombstones {
-		live := occupied - tombstones
-		nextLen = max(nextLen, dwhtCalcSlotLen(live<<1))
+	if live > 0 {
+		liveSlots := min(uintptr(live), slotLen)
+		nextLen = max(nextLen, dwhtCalcSlotLen(liveSlots<<1))
+	}
+	if dwhtEnableIntKey && dwhtUseRawIntHash && m.intKey {
+		// Raw integer hashes preserve sequential-insert locality, but during
+		// concurrent no-pre-size growth, far-apart ordered ranges can alias on
+		// the low bits of a small power-of-two table. That creates one dense
+		// run and can make resize copying exceed dwhtMaxProbeThreshold even
+		// when the destination table has plenty of empty slots elsewhere.
+		//
+		// Use the observed hash span as an address-space hint only for int keys:
+		// dense spans get enough slots to avoid low-bit folding, while sparse
+		// spans are capped in dwhtHashSpanGrowSlotLen so outliers cannot force
+		// an unbounded allocation.
+		if span, count := dwhtObservedHashSpan(old); span > 0 {
+			if target := dwhtHashSpanGrowSlotLen(span, count, slotLen); target > 0 {
+				nextLen = max(nextLen, target)
+			}
+		}
 	}
 	return nextLen
+}
+
+func dwhtObservedHashSpan[K comparable, V any](table *dwhtTable[K, V]) (uintptr, uintptr) {
+	slotLen := table.mask + 1
+	var minH, maxH uint32
+	seen := false
+	count := uintptr(0)
+	for i := range slotLen {
+		ctrl := atomic.LoadUint64(&table.slot(i).ctrl)
+		if dwhtCtrlState(ctrl) != dwhtStateFull {
+			continue
+		}
+		h := dwhtCtrlH2(ctrl)
+		count++
+		if !seen {
+			minH, maxH, seen = h, h, true
+			continue
+		}
+		if h < minH {
+			minH = h
+		}
+		if h > maxH {
+			maxH = h
+		}
+	}
+	if !seen {
+		return 0, 0
+	}
+	return uintptr(maxH) - uintptr(minH) + 1, count
+}
+
+func dwhtHashSpanGrowSlotLen(span, count, slotLen uintptr) uintptr {
+	// Integer-key span growth is a guard for low-bit aliasing during concurrent
+	// ordered inserts. Dense spans use the exact observed range; sparse spans
+	// are capped so a few outliers cannot force an enormous table.
+	const (
+		denseHashSpanRatio  = 8
+		sparseHashSpanRatio = 32
+		tableHashSpanRatio  = 16
+	)
+	if span == 0 || count == 0 {
+		return 0
+	}
+	target := dwhtCalcSlotLen(span)
+	if span <= count*denseHashSpanRatio {
+		return target
+	}
+
+	limit := max(
+		dwhtCalcSlotLen(count*sparseHashSpanRatio),
+		slotLen*tableHashSpanRatio,
+	)
+	return min(target, limit)
 }
 
 func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] {
@@ -1069,15 +1187,8 @@ func dwhtCtrlDelete(ctrl uint64) uint64 {
 
 //go:nosplit
 func dwhtIntHash(x uintptr) uint32 {
-	// Use the high half of the 64-bit multiplicative hash. The high half of
-	// the 128-bit product stays zero for long small-integer ranges, which turns
-	// sequential inserts into one linear-probe cluster.
-	return uint32((x * 0x9e3779b97f4a7c15) >> 32)
+	if dwhtUseRawIntHash {
+		return uint32(x ^ (x >> 32))
+	}
+	return uint32((x * opt.HashPrime) >> 32)
 }
-
-// //go:nosplit
-// func dwhtIntHash(x uintptr) uint32 {
-// 	h := uint64(x) * 0x9e3779b97f4a7c15
-// 	h ^= bits.RotateLeft64(h, 25)
-// 	return uint32(h >> 32)
-// }
