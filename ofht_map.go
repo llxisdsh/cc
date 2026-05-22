@@ -980,8 +980,8 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
-		old.frozenDone.Add(end - start)
 	}
+}
 
 func (m *OFHTMap[K, V]) nextResizeSlotLen(old *ofhtTable[K, V], isGrow bool, live int) uintptr {
 	slotLen := old.mask + 1
