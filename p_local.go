@@ -461,11 +461,13 @@ func (p *PLocalCounterN) grow(needed int) {
 
 	addedCount := newSize - currentLen
 	newBacking := make([]byte, addedCount*opt.CacheLineSize_+opt.CacheLineSize_-1)
-	base := uintptr(unsafe.Pointer(unsafe.SliceData(newBacking)))
+	basePtr := unsafe.Pointer(unsafe.SliceData(newBacking))
+	base := uintptr(basePtr)
 	aligned := (base + opt.CacheLineSize_ - 1) &^ (opt.CacheLineSize_ - 1)
+	offset := aligned - base
 	for i := range addedCount {
 		idx := currentLen + i
-		*newShards.At(idx) = (*pLocalCounterNSlot)(unsafe.Pointer(aligned + i*opt.CacheLineSize_)) //nolint:all
+		*newShards.At(idx) = (*pLocalCounterNSlot)(unsafe.Add(basePtr, offset+i*opt.CacheLineSize_))
 	}
 	backings = append(backings, newBacking)
 
@@ -721,11 +723,13 @@ func (p *PLocalCounter64N) grow(needed int) {
 
 	addedCount := newSize - currentLen
 	newBacking := make([]byte, addedCount*opt.CacheLineSize_+opt.CacheLineSize_-1)
-	base := uintptr(unsafe.Pointer(unsafe.SliceData(newBacking)))
+	basePtr := unsafe.Pointer(unsafe.SliceData(newBacking))
+	base := uintptr(basePtr)
 	aligned := (base + opt.CacheLineSize_ - 1) &^ (opt.CacheLineSize_ - 1)
+	offset := aligned - base
 	for i := range addedCount {
 		idx := currentLen + i
-		*newShards.At(idx) = (*pLocalCounter64NSlot)(unsafe.Pointer(aligned + i*opt.CacheLineSize_)) //nolint:all
+		*newShards.At(idx) = (*pLocalCounter64NSlot)(unsafe.Add(basePtr, offset+i*opt.CacheLineSize_))
 	}
 	backings = append(backings, newBacking)
 
