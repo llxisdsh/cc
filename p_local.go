@@ -41,7 +41,7 @@ type pLocalShards[T any] struct {
 }
 
 type pLocalSlot[T any] struct {
-	opt.PLocalSlotLock
+	opt.RaceMutex
 	val T
 	// Padding to prevent false sharing.
 	_ [opt.CacheLineSize_]byte

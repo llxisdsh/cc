@@ -26,8 +26,8 @@ func runtime_semacquire(s *uint32)
 //go:linkname runtime_semrelease sync.runtime_Semrelease
 func runtime_semrelease(s *uint32, handoff bool, skipframes int)
 
-// PLocalSlotLock is a no-op lock that does nothing.
-type PLocalSlotLock struct{}
+// RaceMutex is a no-op lock that does nothing.
+type RaceMutex struct{}
 
-func (s *PLocalSlotLock) Lock()   {}
-func (s *PLocalSlotLock) Unlock() {}
+func (s *RaceMutex) Lock()   {}
+func (s *RaceMutex) Unlock() {}
