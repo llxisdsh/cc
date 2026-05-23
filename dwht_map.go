@@ -10,7 +10,6 @@ import (
 	"unsafe"
 
 	"github.com/llxisdsh/cc/internal/asm"
-	"github.com/llxisdsh/cc/internal/opt"
 )
 
 const (
@@ -124,7 +123,7 @@ const (
 	dwhtSlotLayoutRot8
 )
 
-var dwhtSlotLayoutHints [bits.UintSize]atomic.Uint32
+var dwhtSlotLayoutHints [bitSize]atomic.Uint32
 
 //go:nosplit
 func (t *dwhtTable[K, V]) slot(i uintptr) *dwhtSlotView {
@@ -1198,5 +1197,8 @@ func dwhtIntHash(x uintptr) uint32 {
 	if dwhtUseRawIntHash {
 		return uint32(x ^ (x >> 32))
 	}
-	return uint32((uint64(x) * opt.HashPrime) >> 32)
+	if bitSize == 32 {
+		return uint32(x) * uint32(0x9e3779b9)
+	}
+	return uint32((uint64(x) * uint64(0x9e3779b97f4a7c15)) >> 32)
 }

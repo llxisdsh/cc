@@ -8,8 +8,6 @@ import (
 	"runtime"
 	"sync/atomic"
 	"unsafe"
-
-	"github.com/llxisdsh/cc/internal/opt"
 )
 
 const (
@@ -1161,5 +1159,8 @@ func ofhtIntHash(x uintptr) uint32 {
 	if ofhtUseRawIntHash {
 		return uint32(x ^ (x >> 32))
 	}
-	return uint32((uint64(x) * opt.HashPrime) >> 32)
+	if bitSize == 32 {
+		return uint32(x) * uint32(0x9e3779b9)
+	}
+	return uint32((uint64(x) * uint64(0x9e3779b97f4a7c15)) >> 32)
 }

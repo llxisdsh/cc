@@ -1,7 +1,6 @@
 package cc
 
 import (
-	"math/bits"
 	"sync"
 	"testing"
 )
@@ -56,7 +55,7 @@ func TestBitLockUint32(t *testing.T) {
 
 func TestBitLockUintptr(t *testing.T) {
 	var val uintptr
-	const mask = 1 << (bits.UintSize - 1)
+	const mask = 1 << (bitSize - 1)
 
 	var count int
 	var wg sync.WaitGroup
@@ -114,7 +113,7 @@ func TestTryBitLockUint32(t *testing.T) {
 
 func TestTryBitLockUintptr(t *testing.T) {
 	var val uintptr
-	const mask uintptr = 1 << (bits.UintSize - 1)
+	const mask uintptr = 1 << (bitSize - 1)
 
 	// TryBitLock should succeed on free lock
 	if !BitTryLockUintptr(&val, mask) {
