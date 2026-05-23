@@ -65,11 +65,14 @@ const (
 //     frozen full slots by reusing their entry pointers, waits for all resize
 //     chunks to finish, then publishes the new table.
 //
-// Compared with OFHTMap, DWHTMap pays one heap object per live entry, but slot
+// Compared with [OFHTMap], DWHTMap pays one heap object per live entry, but slot
 // publication is atomic and readers never observe a busy inline-update state.
 //
 // DWHTMap is zero-value ready, but is intentionally excluded from race builds
 // and currently requires amd64 or arm64 DWCAS support.
+//
+// WARNING on ARM64: The asm implementation relies on the ARMv8.1-A LSE CASPAL instruction.
+// Running on older ARMv8.0 hardware without LSE will trigger a SIGILL (Illegal Instruction) crash.
 type DWHTMap[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[dwhtTable[K, V]]
