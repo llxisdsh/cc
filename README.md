@@ -25,7 +25,7 @@ State-of-the-art concurrent map implementations, delivering extreme performance 
 | [**`OFHTMap`**](./ofht_map.go)   | **Experimental**, optimistic open-addressing with inline key/value storage.      | Lowest GC overhead for allocation-sensitive workloads.                  |
 | [**`DWHTMap`**](./dwht_map.go)   | **Experimental**, fully lock-free open-addressing with DWCAS slot publication.   | Low-latency reads and writes under high concurrency.                    |
 
-> **Note**: `Map` and `FlatMap` are streamlined versions of the high-performance [**llxisdsh/pb**](https://github.com/llxisdsh/pb) project. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [`benchmark`](./benchmark) directory or the upstream repository.
+> **Note**: `Map` and `FlatMap` are streamlined versions of the high-performance [`llxisdsh/pb`](https://github.com/llxisdsh/pb) project. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [`benchmark`](./benchmark) directory or the upstream repository.
 
 ### ⚡ Processor Local
 
