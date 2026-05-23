@@ -452,6 +452,7 @@ func (m *OFHTMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
+	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
 	inserted := int(m.size.Value(ofhtSlotInserted))
 	deleted := int(m.size.Value(ofhtSlotDeleted))
 	if inserted <= deleted {

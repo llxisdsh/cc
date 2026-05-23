@@ -812,6 +812,7 @@ func (m *FunnelMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
+	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
 	return int(m.size.Value()) + table.overflow.Size()
 }
 

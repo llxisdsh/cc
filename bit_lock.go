@@ -38,6 +38,16 @@ func BitTryLockUint64(addr *uint64, mask uint64) bool {
 // BitUnlockUint64 releases the bit-lock by clearing the specified bit mask.
 // It preserves other bits in the value.
 //
+// Performance & Safety Note:
+// This function uses a fast non-atomic read followed by an atomic store instead
+// of a CAS loop or atomic bitwise instruction (e.g. atomic.And) to avoid expensive
+// read-modify-write (RMW) instruction overhead, which is significantly faster.
+//
+// This is 100% safe in the internal Map implementation because only the lock holder
+// has permission to write to other metadata bits under the lock. However, if used
+// as a general-purpose lock, you must ensure that no other threads are concurrently
+// writing to the non-lock bits of addr, otherwise concurrent updates will be lost.
+//
 //go:nosplit
 func BitUnlockUint64(addr *uint64, mask uint64) {
 	atomic.StoreUint64(addr, loadUint64Fast(addr)&^mask)
@@ -82,6 +92,10 @@ func BitTryLockUint32(addr *uint32, mask uint32) bool {
 
 // BitUnlockUint32 releases the bit-lock by clearing the specified bit mask.
 //
+// Performance & Safety Note:
+// Uses a fast non-atomic read followed by an atomic store to bypass RMW overhead.
+// Only safe when no other threads concurrently modify non-lock bits in addr.
+//
 //go:nosplit
 func BitUnlockUint32(addr *uint32, mask uint32) {
 	atomic.StoreUint32(addr, loadUint32Fast(addr)&^mask)
@@ -123,6 +137,10 @@ func BitTryLockUintptr(addr *uintptr, mask uintptr) bool {
 }
 
 // BitUnlockUintptr releases the bit-lock by clearing the specified bit mask.
+//
+// Performance & Safety Note:
+// Uses a fast non-atomic read followed by an atomic store to bypass RMW overhead.
+// Only safe when no other threads concurrently modify non-lock bits in addr.
 //
 //go:nosplit
 func BitUnlockUintptr(addr *uintptr, mask uintptr) {

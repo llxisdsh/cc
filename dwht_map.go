@@ -474,6 +474,7 @@ func (m *DWHTMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
+	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
 	inserted := int(m.size.Value(dwhtSlotInserted))
 	deleted := int(m.size.Value(dwhtSlotDeleted))
 	if inserted <= deleted {
