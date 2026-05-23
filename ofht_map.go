@@ -14,7 +14,7 @@ import (
 
 const (
 	ofhtEnableIntKey         = true
-	ofhtUseRawIntHash        = true
+	ofhtUseRawIntHash        = false
 	ofhtEnableDedupVal       = true
 	ofhtEnableAggressiveGrow = true
 	ofhtEnableStoreInGrow    = false

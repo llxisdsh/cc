@@ -15,7 +15,7 @@ import (
 
 const (
 	dwhtEnableIntKey         = true
-	dwhtUseRawIntHash        = true
+	dwhtUseRawIntHash        = false
 	dwhtEnableDedupVal       = true
 	dwhtEnableAggressiveGrow = true
 	dwhtEnableStoreInGrow    = true
