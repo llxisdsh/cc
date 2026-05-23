@@ -245,10 +245,6 @@ func noEscape[T any](p *T) *T {
 	return (*T)(noescape(unsafe.Pointer(p)))
 }
 
-//go:nosplit
-//go:linkname runtime_cheaprand runtime.cheaprand
-func runtime_cheaprand() uint32
-
 // ============================================================================
 // SWAR Utilities
 // ============================================================================

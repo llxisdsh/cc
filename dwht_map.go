@@ -13,14 +13,23 @@ import (
 )
 
 const (
-	dwhtEnableIntKey         = true
-	dwhtUseRawIntHash        = false
-	dwhtEnableDedupVal       = true
+	// dwhtEnableIntKey enables specialized fast path optimizations for integer keys.
+	dwhtEnableIntKey = true
+	// dwhtUseRawIntHash directly uses the integer value as the hash.
+	// WARNING: Setting this to true disables hash distribution mixing.
+	// Under highly clustered or non-uniform integer keys, severe hash collisions
+	// can occur, which might trigger panics like "grow produced a full table".
+	dwhtUseRawIntHash = false
+	// dwhtEnableDedupVal enables deduplication checks for identical values.
+	dwhtEnableDedupVal = true
+	// dwhtEnableAggressiveGrow eagerly resizes the map when linear probing depth is high.
 	dwhtEnableAggressiveGrow = true
-	dwhtEnableStoreInGrow    = true
+	// dwhtEnableStoreInGrow permits store operations to directly populate the new table during resizing.
+	dwhtEnableStoreInGrow = true
 )
 
 const (
+	// dwhtMinSlots is the minimum number of slots in a table.
 	dwhtMinSlots = 128
 	// dwhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
 	dwhtLoadFactor = 0.625
@@ -162,12 +171,12 @@ const (
 
 const (
 	// occupied tracks physical slots that are no longer Empty.
-	dwhtSlotOccupied int = iota
+	dwhtCntOccupied int = iota
 	// inserted/deleted are logical event counters; Size is inserted - deleted.
 	// These P-local counters are not a transactional snapshot. Resize may use
 	// them as pressure hints, but slot DWCAS state is the source of correctness.
-	dwhtSlotInserted
-	dwhtSlotDeleted
+	dwhtCntInserted
+	dwhtCntDeleted
 )
 
 // NewDWHTMap creates an experimental DWHT-style map.
@@ -264,7 +273,7 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			occupied := int(m.size.Value(dwhtSlotOccupied))
+			occupied := int(m.size.Value(dwhtCntOccupied))
 			table = m.tryResize(table, occupied)
 		}
 	}
@@ -294,7 +303,7 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			occupied := int(m.size.Value(dwhtSlotOccupied))
+			occupied := int(m.size.Value(dwhtCntOccupied))
 			table = m.tryResize(table, occupied)
 		}
 	}
@@ -323,7 +332,7 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case dwhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case dwhtStoreFull:
-			occupied := int(m.size.Value(dwhtSlotOccupied))
+			occupied := int(m.size.Value(dwhtCntOccupied))
 			table = m.tryResize(table, occupied)
 		}
 	}
@@ -475,8 +484,8 @@ func (m *DWHTMap[K, V]) Size() int {
 		return 0
 	}
 	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
-	inserted := int(m.size.Value(dwhtSlotInserted))
-	deleted := int(m.size.Value(dwhtSlotDeleted))
+	inserted := int(m.size.Value(dwhtCntInserted))
+	deleted := int(m.size.Value(dwhtCntDeleted))
 	if inserted <= deleted {
 		return 0
 	}
@@ -591,7 +600,7 @@ func (m *DWHTMap[K, V]) storeInto(
 				probe--
 				continue
 			}
-			m.size.Add(dwhtSlotInserted, 1)
+			m.size.Add(dwhtCntInserted, 1)
 			return dwhtStoreOK, *val, false
 		} else if state == dwhtStateEmpty {
 			entry := atomic.LoadPointer(&slot.entry)
@@ -603,7 +612,7 @@ func (m *DWHTMap[K, V]) storeInto(
 				probe--
 				continue
 			}
-			m.size.Add2(dwhtSlotOccupied, uintptr(1), dwhtSlotInserted, uintptr(1))
+			m.size.Add2(dwhtCntOccupied, uintptr(1), dwhtCntInserted, uintptr(1))
 			return dwhtStoreOK, *val, false
 		}
 	}
@@ -699,7 +708,7 @@ func (m *DWHTMap[K, V]) deleteFrom(
 			if needValue {
 				prev = e.val
 			}
-			m.size.Add(dwhtSlotDeleted, 1)
+			m.size.Add(dwhtCntDeleted, 1)
 			return dwhtStoreOK, prev, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, *new(V), false
@@ -802,7 +811,7 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 				continue
 			}
 
-			m.size.Add(dwhtSlotDeleted, 1)
+			m.size.Add(dwhtCntDeleted, 1)
 			return dwhtStoreOK, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, false
@@ -812,14 +821,14 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 }
 
 func (m *DWHTMap[K, V]) resizeIfNeeded(table *dwhtTable[K, V]) {
-	localSize := int(m.size.Get(dwhtSlotOccupied))
+	localSize := int(m.size.Get(dwhtCntOccupied))
 	if localSize&dwhtGrowCheckMask != 0 {
 		return
 	}
 	if localSize < table.stripeCap {
 		return
 	}
-	occupied := int(m.size.Value(dwhtSlotOccupied))
+	occupied := int(m.size.Value(dwhtCntOccupied))
 	if occupied >= table.growCap {
 		m.tryResize(table, occupied)
 	}
@@ -841,8 +850,8 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int) *dwhtTable
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			inserted := int(m.size.Value(dwhtSlotInserted))
-			deleted := int(m.size.Value(dwhtSlotDeleted))
+			inserted := int(m.size.Value(dwhtCntInserted))
+			deleted := int(m.size.Value(dwhtCntDeleted))
 			live := max(inserted-deleted, 0)
 			// occupied/inserted/deleted are read independently, so occupied can
 			// briefly lag behind live. Treat that as zero tombstone pressure
@@ -956,12 +965,12 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 			// Reset counters to describe the compacted next table. The three
 			// counters are not reset atomically; preserve logical live count
 			// from inserted-deleted and do not constrain it by occupied.
-			m.size.Reset(dwhtSlotOccupied)
-			inserted := int(m.size.Reset(dwhtSlotInserted))
-			deleted := int(m.size.Reset(dwhtSlotDeleted))
+			m.size.Reset(dwhtCntOccupied)
+			inserted := int(m.size.Reset(dwhtCntInserted))
+			deleted := int(m.size.Reset(dwhtCntDeleted))
 			live := max(inserted-deleted, 0)
 			if live > 0 {
-				m.size.Add2(dwhtSlotOccupied, uintptr(live), dwhtSlotInserted, uintptr(live))
+				m.size.Add2(dwhtCntOccupied, uintptr(live), dwhtCntInserted, uintptr(live))
 			}
 			m.table.CompareAndSwap(old, next)
 			return next

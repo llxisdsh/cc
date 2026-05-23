@@ -11,14 +11,24 @@ import (
 )
 
 const (
-	ofhtEnableIntKey         = true
-	ofhtUseRawIntHash        = false
-	ofhtEnableDedupVal       = true
+	// ofhtEnableIntKey enables specialized fast path optimizations for integer keys.
+	ofhtEnableIntKey = true
+	// ofhtUseRawIntHash directly uses the integer value as the hash.
+	// WARNING: Setting this to true disables hash distribution mixing.
+	// Under highly clustered or non-uniform integer keys, severe hash collisions
+	// can occur, which might trigger panics like "grow produced a full table".
+	ofhtUseRawIntHash = false
+	// ofhtEnableDedupVal enables deduplication checks for identical values.
+	ofhtEnableDedupVal = true
+	// ofhtEnableAggressiveGrow eagerly resizes the map when linear probing depth is high.
 	ofhtEnableAggressiveGrow = true
-	ofhtEnableStoreInGrow    = false
+	// ofhtEnableStoreInGrow permits store operations to directly populate the new table during resizing.
+	// NOTE: Benchmark results show that keeping this disabled (false) yields better performance for OFHTMap.
+	ofhtEnableStoreInGrow = false
 )
 
 const (
+	// ofhtMinSlots is the minimum number of slots in a table.
 	ofhtMinSlots = 128
 	// ofhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
 	ofhtLoadFactor = 0.625
@@ -122,12 +132,12 @@ const (
 
 const (
 	// occupied tracks physical slots that are no longer Empty.
-	ofhtSlotOccupied int = iota
+	ofhtCntOccupied int = iota
 	// inserted/deleted are logical event counters; Size is inserted - deleted.
 	// These P-local counters are not a transactional snapshot. Resize may use
 	// them as pressure hints, but slot CAS state is the source of correctness.
-	ofhtSlotInserted
-	ofhtSlotDeleted
+	ofhtCntInserted
+	ofhtCntDeleted
 )
 
 // NewOFHTMap creates an experimental OFHT-style map.
@@ -236,7 +246,7 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			occupied := int(m.size.Value(ofhtSlotOccupied))
+			occupied := int(m.size.Value(ofhtCntOccupied))
 			table = m.tryResize(table, occupied)
 		}
 	}
@@ -266,7 +276,7 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			occupied := int(m.size.Value(ofhtSlotOccupied))
+			occupied := int(m.size.Value(ofhtCntOccupied))
 			table = m.tryResize(table, occupied)
 		}
 	}
@@ -295,7 +305,7 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case ofhtStoreFrozen:
 			table = m.afterFrozenTable(table)
 		case ofhtStoreFull:
-			occupied := int(m.size.Value(ofhtSlotOccupied))
+			occupied := int(m.size.Value(ofhtCntOccupied))
 			table = m.tryResize(table, occupied)
 		}
 	}
@@ -453,8 +463,8 @@ func (m *OFHTMap[K, V]) Size() int {
 		return 0
 	}
 	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
-	inserted := int(m.size.Value(ofhtSlotInserted))
-	deleted := int(m.size.Value(ofhtSlotDeleted))
+	inserted := int(m.size.Value(ofhtCntInserted))
+	deleted := int(m.size.Value(ofhtCntDeleted))
 	if inserted <= deleted {
 		return 0
 	}
@@ -572,7 +582,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			}
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
-			m.size.Add(ofhtSlotInserted, 1)
+			m.size.Add(ofhtCntInserted, 1)
 			return ofhtStoreOK, *val, false
 		} else if state == ofhtStateBusy {
 			// delay(&spins)
@@ -587,7 +597,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			slot.key.WriteUnfenced(*key)
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
-			m.size.Add2(ofhtSlotOccupied, 1, ofhtSlotInserted, 1)
+			m.size.Add2(ofhtCntOccupied, 1, ofhtCntInserted, 1)
 			return ofhtStoreOK, *val, false
 		}
 	}
@@ -692,7 +702,7 @@ func (m *OFHTMap[K, V]) deleteFrom(
 			// same-key revival without permitting arbitrary tombstone reuse.
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(ofhtSlotDeleted, 1)
+			m.size.Add(ofhtCntDeleted, 1)
 			return ofhtStoreOK, prev, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, *new(V), false
@@ -810,7 +820,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 			// deleteFrom: only the original key may revive this slot.
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(ofhtSlotDeleted, 1)
+			m.size.Add(ofhtCntDeleted, 1)
 			return ofhtStoreOK, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, false
@@ -824,14 +834,14 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 }
 
 func (m *OFHTMap[K, V]) resizeIfNeeded(table *ofhtTable[K, V]) {
-	localSize := int(m.size.Get(ofhtSlotOccupied))
+	localSize := int(m.size.Get(ofhtCntOccupied))
 	if localSize&ofhtGrowCheckMask != 0 {
 		return
 	}
 	if localSize < table.stripeCap {
 		return
 	}
-	occupied := m.size.Value(ofhtSlotOccupied)
+	occupied := m.size.Value(ofhtCntOccupied)
 	if int(occupied) >= table.growCap {
 		m.tryResize(table, int(occupied))
 	}
@@ -853,8 +863,8 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int) *ofhtTable
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			inserted := int(m.size.Value(ofhtSlotInserted))
-			deleted := int(m.size.Value(ofhtSlotDeleted))
+			inserted := int(m.size.Value(ofhtCntInserted))
+			deleted := int(m.size.Value(ofhtCntDeleted))
 			live := max(inserted-deleted, 0)
 			// occupied/inserted/deleted are read independently, so occupied can
 			// briefly lag behind live. Treat that as zero tombstone pressure
@@ -971,12 +981,12 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 			// Reset counters to describe the compacted next table. The three
 			// counters are not reset atomically; preserve logical live count
 			// from inserted-deleted and do not constrain it by occupied.
-			m.size.Reset(ofhtSlotOccupied)
-			inserted := int(m.size.Reset(ofhtSlotInserted))
-			deleted := int(m.size.Reset(ofhtSlotDeleted))
+			m.size.Reset(ofhtCntOccupied)
+			inserted := int(m.size.Reset(ofhtCntInserted))
+			deleted := int(m.size.Reset(ofhtCntDeleted))
 			live := max(inserted-deleted, 0)
 			if live > 0 {
-				m.size.Add2(ofhtSlotOccupied, uintptr(live), ofhtSlotInserted, uintptr(live))
+				m.size.Add2(ofhtCntOccupied, uintptr(live), ofhtCntInserted, uintptr(live))
 			}
 			m.table.CompareAndSwap(old, next)
 			return next

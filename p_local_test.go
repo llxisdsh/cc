@@ -10,6 +10,10 @@ import (
 	"github.com/llxisdsh/cc/internal/opt"
 )
 
+//go:nosplit
+//go:linkname runtime_cheaprand runtime.cheaprand
+func runtime_cheaprand() uint32
+
 func TestPLocal_Basic(t *testing.T) {
 	p := NewPLocal(func() int {
 		return 0
