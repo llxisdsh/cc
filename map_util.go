@@ -144,9 +144,28 @@ type counterStripe struct {
 // Utility Functions
 // ============================================================================
 
+// cacheHash determines whether the hash value of key type K should be cached
+// inside the map's internal container (buckets/entries) to optimize lookups.
+//
+// Heuristics:
+//   - Small Keys (< 2 words, e.g., integers, floats, pointers): Caching is disabled.
+//     Recalculating hash or comparing keys directly is extremely cheap. Omitting
+//     the cached hash saves 8 bytes per slot, packing entries tighter to maximize
+//     cache-line utilization and SWAR efficiency.
+//   - Large Keys (>= 2 words, e.g., strings, interfaces, structs): Caching is enabled.
+//     Comparing large keys directly or re-hashing them is expensive. Storing the
+//     precomputed hash allows cheap early-filtering (hash comparison) before executing
+//     the full key equality check.
+//
+// Compilation & Performance:
+// This function is a zero-cost abstraction. Since `unsafe.Sizeof(*new(K))` is a
+// compile-time constant, the Go compiler completely inlines this check and performs
+// Dead Code Elimination (DCE) at compile-time. As a result, there are no runtime
+// branches or function call overheads.
+//
 //go:nosplit
-func omitEntryHash[K comparable]() bool {
-	return unsafe.Sizeof(*new(K)) < 2*unsafe.Sizeof(uintptr(0))
+func cacheHash[K comparable]() bool {
+	return unsafe.Sizeof(*new(K)) >= 2*unsafe.Sizeof(uintptr(0))
 }
 
 // calcParallelism calculates the number of goroutines for parallel processing.

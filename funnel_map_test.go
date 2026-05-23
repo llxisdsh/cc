@@ -193,6 +193,21 @@ func TestFunnelMap_GrowShrink(t *testing.T) {
 	}
 }
 
+func TestFunnelMap_GrowInt64Key(t *testing.T) {
+	const total = 2048
+	m := NewFunnelMap[int64, int](WithCapacity(1))
+	for i := range total {
+		k := int64(i) << 33
+		m.Store(k, i)
+	}
+	for i := range total {
+		k := int64(i) << 33
+		if got, ok := m.Load(k); !ok || got != i {
+			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", k, got, ok, i)
+		}
+	}
+}
+
 // TestFunnelMap_BulkStoreLoad verifies correctness of storing and loading many entries
 // (exercises overflow and resize paths).
 func TestFunnelMap_BulkStoreLoad(t *testing.T) {

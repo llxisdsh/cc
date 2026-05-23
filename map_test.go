@@ -3699,6 +3699,21 @@ func TestNewMapGrowOnly_OnlyShrinksOnClear(t *testing.T) {
 	}
 }
 
+func TestMapGrow_Int64Key(t *testing.T) {
+	const total = 2048
+	m := NewMap[int64, int](WithCapacity(1))
+	for i := range total {
+		k := int64(i) << 33
+		m.Store(k, i)
+	}
+	for i := range total {
+		k := int64(i) << 33
+		if got, ok := m.Load(k); !ok || got != i {
+			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", k, got, ok, i)
+		}
+	}
+}
+
 func TestMapResize(t *testing.T) {
 	const numEntries = 100_000
 	m := NewMap[string, int](WithAutoShrink())
