@@ -351,13 +351,13 @@ slowPath:
 
 // Delete removes a key-value pair.
 func (m *FunnelMap[K, V]) Delete(key K) {
-	m.compute(&key, nil, computeSkipIfNotFound)
+	m.compute(&key, nil, computeSkipIfNotFound|computeUsesValue)
 }
 
 // LoadOrStore retrieves an existing value or stores a new one if the key
 // doesn't exist.
 func (m *FunnelMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	return m.compute(&key, unsafe.Pointer(&value), computeInit|computeSkipIfFound)
+	return m.compute(&key, unsafe.Pointer(&value), computeInit|computeSkipIfFound|computeUsesValue)
 }
 
 // LoadOrStoreFn returns the existing value for the key if
@@ -380,7 +380,7 @@ func (m *FunnelMap[K, V]) LoadOrStoreFn(
 		}
 		e.Update(newValueFn())
 	}
-	return m.compute(&key, unsafe.Pointer(&fn), computeInit|computeSkipIfFound|computeUsesFunc)
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit|computeSkipIfFound)
 }
 
 // LoadAndUpdate retrieves the value associated with the given key and updates
@@ -396,17 +396,17 @@ func (m *FunnelMap[K, V]) LoadOrStoreFn(
 //   - loaded: True if the key existed and the value was updated,
 //     false otherwise.
 func (m *FunnelMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	return m.compute(&key, unsafe.Pointer(&value), computeSkipIfNotFound)
+	return m.compute(&key, unsafe.Pointer(&value), computeSkipIfNotFound|computeUsesValue)
 }
 
 // LoadAndDelete retrieves the value for a key and deletes it from the map.
 func (m *FunnelMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
-	return m.compute(&key, nil, computeSkipIfNotFound)
+	return m.compute(&key, nil, computeSkipIfNotFound|computeUsesValue)
 }
 
 // Swap stores a key-value pair and returns the previous value if any.
 func (m *FunnelMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	return m.compute(&key, unsafe.Pointer(&value), computeInit)
+	return m.compute(&key, unsafe.Pointer(&value), computeInit|computeUsesValue)
 }
 
 // CompareAndSwap atomically replaces an existing value with a new value.
@@ -430,7 +430,7 @@ func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 			}
 		}
 	}
-	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound|computeUsesFunc)
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
 	return swapped
 }
 
@@ -455,7 +455,7 @@ func (m *FunnelMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 			}
 		}
 	}
-	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound|computeUsesFunc)
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
 	return deleted
 }
 
@@ -485,7 +485,7 @@ func (m *FunnelMap[K, V]) Compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
-	return m.compute(&key, unsafe.Pointer(&fn), computeInit|computeUsesFunc)
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit)
 }
 
 func (m *FunnelMap[K, V]) compute(
@@ -627,29 +627,30 @@ slowPath:
 
 	// --- Compute Logic ---
 	retV := it.entry.value
-	if flags&(computeUsesFunc|computeSkipIfFound|computeSkipIfNotFound) == 0 {
-		// Store, Swap
-		it.entry.value = *(*V)(val)
-		it.op = updateOp
-	} else if flags&(computeUsesFunc|computeSkipIfFound) == 0 {
-		// Delete, LoadAnd.., CompareAnd..
-		if it.loaded {
-			if val != nil {
-				it.entry.value = *(*V)(val)
-				it.op = updateOp
-			} else {
-				it.op = deleteOp
-			}
-		}
-	} else if flags&computeUsesFunc == 0 {
-		// LoadOr..
+	if flags == computeInit|computeSkipIfFound|computeUsesValue { //nolint:staticcheck
+		// LoadOrStore
 		if !it.loaded {
 			it.entry.value = *(*V)(val)
 			it.op = updateOp
 			retV = it.entry.value
 		}
+	} else if flags == computeSkipIfNotFound|computeUsesValue {
+		if it.loaded {
+			if val != nil {
+				// LoadAndUpdate
+				it.entry.value = *(*V)(val)
+				it.op = updateOp
+			} else {
+				// LoadAndDelete, Delete
+				it.op = deleteOp
+			}
+		}
+	} else if flags == computeInit|computeUsesValue {
+		// Swap, Store
+		it.entry.value = *(*V)(val)
+		it.op = updateOp
 	} else {
-		// Compute, LoadOrStoreFn
+		// Compute, LoadOrStoreFn, CompareAnd...
 		(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
 		retV = it.entry.value
 	}

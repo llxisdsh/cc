@@ -446,12 +446,7 @@ func (m *FlatMap[K, V]) LoadOrStore(
 	key K,
 	value V,
 ) (actual V, loaded bool) {
-	return m.compute(&key, func(e *MapEntry[K, V]) {
-		if e.Loaded() {
-			return
-		}
-		e.Update(value)
-	}, computeInit|computeSkipIfFound)
+	return m.compute(&key, unsafe.Pointer(&value), computeInit|computeSkipIfFound|computeUsesValue)
 }
 
 // LoadOrStoreFn loads the value for a key if present.
@@ -461,53 +456,36 @@ func (m *FlatMap[K, V]) LoadOrStoreFn(
 	key K,
 	valueFn func() V,
 ) (actual V, loaded bool) {
-	return m.compute(&key, func(e *MapEntry[K, V]) {
+	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			return
 		}
 		e.Update(valueFn())
-	}, computeInit|computeSkipIfFound)
+	}
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit|computeSkipIfFound)
 }
 
 // LoadAndUpdate updates the value for key if it exists, returning the previous
 // value. The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	_, loaded = m.compute(&key, func(e *MapEntry[K, V]) {
-		if e.Loaded() {
-			previous = e.Value()
-			e.Update(value)
-		}
-	}, computeSkipIfNotFound)
-	return previous, loaded
+	return m.compute(&key, unsafe.Pointer(&value), computeSkipIfNotFound|computeUsesValue)
 }
 
 // LoadAndDelete deletes the value for a key, returning the previous value.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
-	_, loaded = m.compute(&key, func(e *MapEntry[K, V]) {
-		if e.Loaded() {
-			previous = e.Value()
-			e.Delete()
-		}
-	}, computeSkipIfNotFound)
-	return previous, loaded
+	return m.compute(&key, nil, computeSkipIfNotFound|computeUsesValue)
 }
 
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *FlatMap[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	_, loaded = m.compute(&key, func(e *MapEntry[K, V]) {
-		previous = e.Value()
-		e.Update(value)
-	}, computeInit)
-	return previous, loaded
+	return m.compute(&key, unsafe.Pointer(&value), computeInit|computeUsesValue)
 }
 
 // Delete deletes the value for a key.
 func (m *FlatMap[K, V]) Delete(key K) {
-	m.compute(&key, func(e *MapEntry[K, V]) {
-		e.Delete()
-	}, computeSkipIfNotFound)
+	m.compute(&key, nil, computeSkipIfNotFound|computeUsesValue)
 }
 
 // CompareAndSwap atomically replaces an existing value with a new value.
@@ -520,7 +498,7 @@ func (m *FlatMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	if m.valEqual == nil {
 		panic("called CompareAndSwap when value is not of comparable type")
 	}
-	m.compute(&key, func(e *MapEntry[K, V]) {
+	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
 				noescape(unsafe.Pointer(&e.entry.value)),
@@ -530,7 +508,8 @@ func (m *FlatMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 				swapped = true
 			}
 		}
-	}, computeSkipIfNotFound)
+	}
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
 	return swapped
 }
 
@@ -544,7 +523,7 @@ func (m *FlatMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	if m.valEqual == nil {
 		panic("called CompareAndDelete when value is not of comparable type")
 	}
-	m.compute(&key, func(e *MapEntry[K, V]) {
+	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
 				noescape(unsafe.Pointer(&e.entry.value)),
@@ -554,7 +533,8 @@ func (m *FlatMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 				deleted = true
 			}
 		}
-	}, computeSkipIfNotFound)
+	}
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
 	return deleted
 }
 
@@ -584,12 +564,12 @@ func (m *FlatMap[K, V]) Compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
-	return m.compute(&key, fn, computeInit)
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit)
 }
 
 func (m *FlatMap[K, V]) compute(
 	key *K,
-	fn func(e *MapEntry[K, V]),
+	val unsafe.Pointer, // *V or func(e *MapEntry[K, V])
 	flags uint8,
 ) (actual V, loaded bool) {
 	table := SeqLockRead32(&m.tableSeq, &m.table)
@@ -746,7 +726,35 @@ findLoop:
 	}
 
 	// --- Compute Logic ---
-	fn(noEscape(&it))
+	retV := it.entry.value
+	if flags == computeInit|computeSkipIfFound|computeUsesValue { //nolint:staticcheck
+		// LoadOrStore
+		if !it.loaded {
+			it.entry.value = *(*V)(val)
+			it.op = updateOp
+			retV = it.entry.value
+		}
+	} else if flags == computeSkipIfNotFound|computeUsesValue {
+		if it.loaded {
+			if val != nil {
+				// LoadAndUpdate
+				it.entry.value = *(*V)(val)
+				it.op = updateOp
+			} else {
+				// LoadAndDelete, Delete
+				it.op = deleteOp
+			}
+		}
+	} else if flags == computeInit|computeUsesValue {
+		// Swap, Store
+		it.entry.value = *(*V)(val)
+		it.op = updateOp
+	} else {
+		// Compute, LoadOrStoreFn, CompareAnd...
+		(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
+		retV = it.entry.value
+	}
+
 	switch it.op {
 	case updateOp:
 		if it.loaded {
@@ -764,7 +772,7 @@ findLoop:
 				noescape(unsafe.Pointer(&it.entry.value)),
 			) {
 				root.Unlock()
-				return it.entry.value, it.loaded
+				return retV, it.loaded
 			}
 
 			// Update
@@ -778,7 +786,7 @@ findLoop:
 			}
 			lastB.seq.EndWriteLocked()
 			root.Unlock()
-			return it.entry.value, it.loaded
+			return retV, it.loaded
 		}
 		if emptyB == nil {
 			// append new bucket
@@ -805,7 +813,7 @@ findLoop:
 					}
 				}
 			}
-			return it.entry.value, it.loaded
+			return retV, it.loaded
 		}
 		// Insert into empty slot
 		if cacheHash[K]() {
@@ -823,11 +831,11 @@ findLoop:
 			root.Unlock()
 		}
 		table.AddSize(idx, 1)
-		return it.entry.value, it.loaded
+		return retV, it.loaded
 	case deleteOp:
 		if !it.loaded {
 			root.Unlock()
-			return it.entry.value, it.loaded
+			return retV, it.loaded
 		}
 		newMeta := setByte(meta, h2Empty, j)
 		storeUint64(&lastB.meta, newMeta)
@@ -857,11 +865,11 @@ findLoop:
 				}
 			}
 		}
-		return it.entry.value, it.loaded
+		return retV, it.loaded
 	default:
 		// cancelOp: No-op
 		root.Unlock()
-		return it.entry.value, it.loaded
+		return retV, it.loaded
 	}
 }
 

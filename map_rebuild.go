@@ -1,5 +1,9 @@
 package cc
 
+import (
+	"unsafe"
+)
+
 // MapRebuild provides access to map operations during a rebuild.
 // It wraps either a Map or a FlatMap, delegating operations to the underlying map.
 // All operations on this struct ignore the rebuild hint (assuming the caller holds the rebuild lock).
@@ -102,9 +106,9 @@ func (m *MapRebuild[K, V]) Compute(
 	fn func(e *MapEntry[K, V]),
 ) (actual V, loaded bool) {
 	if m.m != nil {
-		return m.m.compute(&key, fn, computeInit|computeIgnoreHint)
+		return m.m.compute(&key, unsafe.Pointer(&fn), computeInit|computeIgnoreHint)
 	}
-	return m.f.compute(&key, fn, computeInit|computeIgnoreHint)
+	return m.f.compute(&key, unsafe.Pointer(&fn), computeInit|computeIgnoreHint)
 }
 
 // Range calls f sequentially for each key and value present in the map.
