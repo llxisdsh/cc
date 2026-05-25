@@ -13,15 +13,10 @@ import (
 const (
 	// ofhtEnableIntKey enables specialized fast path optimizations for integer keys.
 	ofhtEnableIntKey = true
-	// ofhtUseRawIntHash directly uses the integer value as the hash.
-	// WARNING: Setting this to true disables hash distribution mixing.
-	// Under highly clustered or non-uniform integer keys, severe hash collisions
-	// can occur, which might trigger panics like "grow produced a full table".
-	ofhtUseRawIntHash = false
 	// ofhtEnableDedupVal enables deduplication checks for identical values.
 	ofhtEnableDedupVal = true
 	// ofhtEnableAggressiveGrow eagerly resizes the map when linear probing depth is high.
-	ofhtEnableAggressiveGrow = true
+	ofhtEnableAggressiveGrow = false
 	// ofhtEnableStoreInGrow permits store operations to directly populate the new table during resizing.
 	// NOTE: Benchmark results show that keeping this disabled (false) yields better performance for OFHTMap.
 	ofhtEnableStoreInGrow = false
@@ -1010,80 +1005,10 @@ func (m *OFHTMap[K, V]) nextResizeSlotLen(old *ofhtTable[K, V], isGrow bool, liv
 	// threshold, grow for roughly another table worth of inserts instead of
 	// forcing a near-immediate second resize.
 	if live > 0 {
-		liveSlots := min(uintptr(live), slotLen)
+		liveSlots := min(live, int(slotLen))
 		nextLen = max(nextLen, ofhtCalcSlotLen(liveSlots<<1))
 	}
-	if ofhtEnableIntKey && ofhtUseRawIntHash && m.intKey {
-		// Raw integer hashes preserve sequential-insert locality, but during
-		// concurrent no-pre-size growth, far-apart ordered ranges can alias on
-		// the low bits of a small power-of-two table. That creates one dense
-		// run and can make resize copying exceed ofhtMaxProbeThreshold even
-		// when the destination table has plenty of empty slots elsewhere.
-		//
-		// Use the observed hash span as an address-space hint only for int keys:
-		// dense spans get enough slots to avoid low-bit folding, while sparse
-		// spans are capped in ofhtHashSpanGrowSlotLen so outliers cannot force
-		// an unbounded allocation.
-		if span, count := ofhtObservedHashSpan(old); span > 0 {
-			if target := ofhtHashSpanGrowSlotLen(span, count, slotLen); target > 0 {
-				nextLen = max(nextLen, target)
-			}
-		}
-	}
 	return nextLen
-}
-
-func ofhtObservedHashSpan[K comparable, V any](table *ofhtTable[K, V]) (uintptr, uintptr) {
-	slotLen := table.mask + 1
-	var minH, maxH uint32
-	seen := false
-	count := uintptr(0)
-	for i := range slotLen {
-		ctrl := table.slots.At(i).ctrl.Load()
-		if ofhtCtrlState(ctrl) != ofhtStateFull {
-			continue
-		}
-		h := ofhtCtrlH2(ctrl)
-		count++
-		if !seen {
-			minH, maxH, seen = h, h, true
-			continue
-		}
-		if h < minH {
-			minH = h
-		}
-		if h > maxH {
-			maxH = h
-		}
-	}
-	if !seen {
-		return 0, 0
-	}
-	return uintptr(maxH) - uintptr(minH) + 1, count
-}
-
-func ofhtHashSpanGrowSlotLen(span, count, slotLen uintptr) uintptr {
-	// Integer-key span growth is a guard for low-bit aliasing during concurrent
-	// ordered inserts. Dense spans use the exact observed range; sparse spans
-	// are capped so a few outliers cannot force an enormous table.
-	const (
-		denseHashSpanRatio  = 8
-		sparseHashSpanRatio = 32
-		tableHashSpanRatio  = 16
-	)
-	if span == 0 || count == 0 {
-		return 0
-	}
-	target := ofhtCalcSlotLen(span)
-	if span <= count*denseHashSpanRatio {
-		return target
-	}
-
-	limit := max(
-		ofhtCalcSlotLen(count*sparseHashSpanRatio),
-		slotLen*tableHashSpanRatio,
-	)
-	return min(target, limit)
 }
 
 func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] {
@@ -1112,8 +1037,8 @@ func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 }
 
 //go:nosplit
-func ofhtCalcSlotLen(capacity uintptr) uintptr {
-	if capacity == 0 {
+func ofhtCalcSlotLen(capacity int) uintptr {
+	if capacity <= 0 {
 		return ofhtMinSlots
 	}
 	const invLoadFactor = 1 / ofhtLoadFactor
@@ -1167,9 +1092,6 @@ func ofhtCtrlDelete(busyCtrl uint64) uint64 {
 
 //go:nosplit
 func ofhtIntHash(x uintptr) uint32 {
-	if ofhtUseRawIntHash {
-		return uint32(x ^ (x >> 32))
-	}
 	if bitSize == 32 {
 		return uint32(x) * uint32(0x9e3779b9)
 	}

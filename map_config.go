@@ -31,7 +31,7 @@ type MapConfig struct {
 	// capacity, reducing the need for resizing during initial population.
 	// If zero or negative, the default minimum capacity will be used.
 	// The actual capacity will be rounded up to the next power of 2.
-	capacity uintptr
+	capacity int
 
 	// autoShrink controls whether the map can automatically shrink
 	// when the load factor falls below the shrink threshold.
@@ -49,7 +49,7 @@ type MapConfig struct {
 func WithCapacity(cap int) func(*MapConfig) {
 	return func(c *MapConfig) {
 		if cap > 0 {
-			c.capacity = uintptr(cap)
+			c.capacity = cap
 		}
 	}
 }

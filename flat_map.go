@@ -410,7 +410,7 @@ slowPath:
 		// Check if the table needs to grow
 		const capFactor = float64(entriesPerBucket) * loadFactor
 		tableLen := table.mask + 1
-		growCap := uintptr(float64(tableLen) * capFactor)
+		growCap := int(float64(tableLen) * capFactor)
 		stripeCap := int(growCap >> bits.TrailingZeros32(uint32(table.sizeMask+1)))
 		if localSize >= stripeCap {
 			if loadPtr(&m.rs) == nil {
@@ -796,7 +796,7 @@ findLoop:
 			// Check if the table needs to grow
 			const capFactor = float64(entriesPerBucket) * loadFactor
 			tableLen := table.mask + 1
-			growCap := uintptr(float64(tableLen) * capFactor)
+			growCap := int(float64(tableLen) * capFactor)
 			stripeCap := int(growCap >> bits.TrailingZeros32(uint32(table.sizeMask+1)))
 			if localSize >= stripeCap {
 				if loadPtr(&m.rs) == nil {
@@ -850,7 +850,7 @@ findLoop:
 					tableLen := table.mask + 1
 					if m.minLen < tableLen {
 						size := table.SumSize()
-						if size < tableLen*entriesPerBucket/shrinkFraction {
+						if size < int(tableLen*entriesPerBucket/shrinkFraction) {
 							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
 					}
@@ -952,7 +952,7 @@ func (m *FlatMap[K, V]) Size() int {
 		return 0
 	}
 
-	return int(table.SumSize())
+	return max(table.SumSize(), 0)
 }
 
 // ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
@@ -1140,7 +1140,7 @@ func (m *FlatMap[K, V]) Grow(sizeAdd int) {
 	if table.buckets == nil {
 		m.slowInit()
 	}
-	m.doResize(mapGrowHint, uintptr(sizeAdd))
+	m.doResize(mapGrowHint, sizeAdd)
 }
 
 // Shrink reduces the capacity to fit the current size,
@@ -1153,7 +1153,7 @@ func (m *FlatMap[K, V]) Shrink() {
 	m.doResize(mapShrinkHint, 0)
 }
 
-func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd uintptr) {
+func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
 	for {
 		// Resize check
 		table := SeqLockRead32(&m.tableSeq, &m.table)
@@ -1327,7 +1327,6 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 			m.endRebuild(rs)
 			return true
 		}
-		newLen = max(newLen, calcTableLen(table.SumSize()<<1))
 	} else {
 		if newLen >= tableLen || newLen < m.minLen {
 			m.endRebuild(rs)
@@ -1507,12 +1506,12 @@ func (t *flatTable[K, V]) AddSize(idx, delta uintptr) uintptr {
 }
 
 //go:nosplit
-func (t *flatTable[K, V]) SumSize() uintptr {
+func (t *flatTable[K, V]) SumSize() int {
 	var sum uintptr
 	for i := uintptr(0); i <= t.sizeMask; i++ {
 		sum += loadUintptr(&t.size.At(i).c)
 	}
-	return sum
+	return int(sum)
 }
 
 func (b *flatBucketHeader) Lock() {

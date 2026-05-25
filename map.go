@@ -57,7 +57,7 @@ type mapTable struct {
 	size      unsafeSlice[counterStripe]
 	sizeMask  uintptr
 	stripeCap int
-	growCap   uintptr
+	growCap   int
 }
 
 // bucket represents a hash table bucket with cache-line alignment.
@@ -148,7 +148,7 @@ func (m *Map[K, V]) init(
 func newMapTable(tableLen, cpus uintptr) *mapTable {
 	sizeLen := calcSizeLen(tableLen, cpus)
 	const capFactor = float64(entriesPerBucket) * loadFactor
-	growCap := uintptr(float64(tableLen) * capFactor)
+	growCap := int(float64(tableLen) * capFactor)
 	return &mapTable{
 		buckets:   makeUnsafeSlice[bucket](tableLen),
 		mask:      tableLen - 1,
@@ -801,7 +801,7 @@ findLoop:
 					tableLen := table.mask + 1
 					if m.minLen < tableLen {
 						size := table.SumSize()
-						if size < tableLen*entriesPerBucket/shrinkFraction {
+						if size < int(tableLen*entriesPerBucket/shrinkFraction) {
 							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
 					}
@@ -871,7 +871,7 @@ func (m *Map[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	return int(table.SumSize())
+	return max(table.SumSize(), 0)
 }
 
 // ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
@@ -1047,7 +1047,7 @@ func (m *Map[K, V]) Grow(sizeAdd int) {
 	if loadPtr(&m.table) == nil {
 		m.slowInit()
 	}
-	m.doResize(mapGrowHint, uintptr(sizeAdd))
+	m.doResize(mapGrowHint, sizeAdd)
 }
 
 // Shrink reduces the capacity to fit the current size,
@@ -1062,7 +1062,7 @@ func (m *Map[K, V]) Shrink() {
 
 func (m *Map[K, V]) doResize(
 	hint mapRebuildHint,
-	sizeAdd uintptr,
+	sizeAdd int,
 ) {
 	for {
 		// Resize check
@@ -1246,7 +1246,6 @@ func (m *Map[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 			m.endRebuild(rs)
 			return true
 		}
-		newLen = max(newLen, calcTableLen(table.SumSize()<<1))
 		atomic.AddUint32(&m.growths, 1)
 	} else {
 		if newLen >= tableLen || newLen < m.minLen {
@@ -1395,12 +1394,12 @@ func (t *mapTable) AddSize(idx, delta uintptr) uintptr {
 // by summing all counter-stripes.
 //
 //go:nosplit
-func (t *mapTable) SumSize() uintptr {
+func (t *mapTable) SumSize() int {
 	var sum uintptr
 	for i := uintptr(0); i <= t.sizeMask; i++ {
 		sum += loadUintptr(&t.size.At(i).c)
 	}
-	return sum
+	return int(sum)
 }
 
 //go:nosplit

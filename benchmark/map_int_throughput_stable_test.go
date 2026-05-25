@@ -10,8 +10,7 @@ import (
 	"testing"
 	"time"
 
-	// "github.com/jeremiah-masters/dlht"
-
+	"github.com/jeremiah-masters/dlht"
 	"github.com/llxisdsh/cc"
 	"github.com/puzpuzpuz/xsync/v4"
 )
@@ -80,12 +79,12 @@ func (a *stableIntXsyncMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) 
 func (a *stableIntXsyncMapAdapter) Delete(k int)           { a.m.Delete(k) }
 func (a *stableIntXsyncMapAdapter) Size() int              { return a.m.Size() }
 
-// type stableIntDLHTMapAdapter struct{ m *dlht.Map[int, int] }
+type stableIntDLHTMapAdapter struct{ m *dlht.Map[int, int] }
 
-// func (a *stableIntDLHTMapAdapter) Insert(k int, v int)    { a.m.Insert(k, v) }
-// func (a *stableIntDLHTMapAdapter) Load(k int) (int, bool) { return a.m.Get(k) }
-// func (a *stableIntDLHTMapAdapter) Delete(k int)           { a.m.Delete(k) }
-// func (a *stableIntDLHTMapAdapter) Size() int              { return int(a.m.Size()) }
+func (a *stableIntDLHTMapAdapter) Insert(k int, v int)    { a.m.Insert(k, v) }
+func (a *stableIntDLHTMapAdapter) Load(k int) (int, bool) { return a.m.Get(k) }
+func (a *stableIntDLHTMapAdapter) Delete(k int)           { a.m.Delete(k) }
+func (a *stableIntDLHTMapAdapter) Size() int              { return int(a.m.Size()) }
 
 // TestIntThroughputStable uses one shared harness for int-key throughput.
 func TestIntThroughputStable(t *testing.T) {
@@ -148,12 +147,12 @@ func TestIntThroughputStable(t *testing.T) {
 				return &stableIntXsyncMapAdapter{m: xsync.NewMap[int, int](xsync.WithPresize(capHint))}
 			},
 		},
-		// {
-		// 	name: "dlht.Map",
-		// 	new: func(capHint int) stableIntMap {
-		// 		return &stableIntDLHTMapAdapter{m: dlht.New[int, int](dlht.Options{InitialSize: uint64(capHint)})}
-		// 	},
-		// },
+		{
+			name: "dlht.Map",
+			new: func(capHint int) stableIntMap {
+				return &stableIntDLHTMapAdapter{m: dlht.New[int, int](dlht.Options{InitialSize: uint64(capHint)})}
+			},
+		},
 	}
 
 	modes := []struct {
@@ -169,6 +168,8 @@ func TestIntThroughputStable(t *testing.T) {
 		insertMed float64
 		loadMed   float64
 		delMed    float64
+		memMiB    float64
+		memBPE    float64
 		insertJit float64
 		loadJit   float64
 		delJit    float64
@@ -179,9 +180,11 @@ func TestIntThroughputStable(t *testing.T) {
 		mode := mode
 		t.Run(mode.name, func(t *testing.T) {
 			type mapSummary struct {
-				insert []float64
-				load   []float64
-				del    []float64
+				insert   []float64
+				load     []float64
+				del      []float64
+				memMiB   []float64
+				memBytes []float64
 			}
 			modeSummary := make(map[string]*mapSummary, len(factories))
 			for _, f := range factories {
@@ -205,6 +208,8 @@ func TestIntThroughputStable(t *testing.T) {
 							insertTP := make([]float64, 0, rounds)
 							loadTP := make([]float64, 0, rounds)
 							deleteTP := make([]float64, 0, rounds)
+							memoryMiB := make([]float64, 0, rounds)
+							memoryBPE := make([]float64, 0, rounds)
 							capHint := 0
 							if mode.preCap {
 								capHint = total
@@ -212,6 +217,8 @@ func TestIntThroughputStable(t *testing.T) {
 
 							for round := 0; round < rounds; round++ {
 								runtime.GC()
+								var memBefore runtime.MemStats
+								runtime.ReadMemStats(&memBefore)
 								m := f.new(capHint)
 
 								insertDur := runParallel(total, workers, func(start, end int) {
@@ -222,6 +229,10 @@ func TestIntThroughputStable(t *testing.T) {
 								if got := m.Size(); got != total {
 									t.Fatalf("insert size mismatch: want=%d got=%d", total, got)
 								}
+								var memAfter runtime.MemStats
+								runtime.ReadMemStats(&memAfter)
+								memBytes := allocDeltaBytes(memBefore.Alloc, memAfter.Alloc)
+								memBytesPerEntry := memBytes / float64(total)
 
 								loadDur := runParallel(total, workers, func(start, end int) {
 									for i := start; i < end; i++ {
@@ -244,6 +255,11 @@ func TestIntThroughputStable(t *testing.T) {
 								insertTP = append(insertTP, throughputMops(total, insertDur, minMeasure))
 								loadTP = append(loadTP, throughputMops(total, loadDur, minMeasure))
 								deleteTP = append(deleteTP, throughputMops(total, deleteDur, minMeasure))
+								memMiB := memBytes / (1024 * 1024)
+								memoryMiB = append(memoryMiB, memMiB)
+								memoryBPE = append(memoryBPE, memBytesPerEntry)
+								sum.memMiB = append(sum.memMiB, memMiB)
+								sum.memBytes = append(sum.memBytes, memBytesPerEntry)
 							}
 
 							if detail {
@@ -259,6 +275,10 @@ func TestIntThroughputStable(t *testing.T) {
 									"delete mops: median=%.2f min=%.2f max=%.2f",
 									median(deleteTP), slices.Min(deleteTP), slices.Max(deleteTP),
 								)
+								t.Logf(
+									"memory: median=%.2f MiB median=%.1f B/entry",
+									median(memoryMiB), median(memoryBPE),
+								)
 							}
 
 							sum.insert = append(sum.insert, median(insertTP))
@@ -271,10 +291,11 @@ func TestIntThroughputStable(t *testing.T) {
 
 			for _, f := range factories {
 				s := modeSummary[f.name]
-				if s == nil || len(s.insert) == 0 || len(s.load) == 0 || len(s.del) == 0 {
+				if s == nil || len(s.insert) == 0 || len(s.load) == 0 || len(s.del) == 0 || len(s.memMiB) == 0 {
 					continue
 				}
 				iMed, lMed, dMed := median(s.insert), median(s.load), median(s.del)
+				mMed, bMed := median(s.memMiB), median(s.memBytes)
 				iJit := slices.Max(s.insert) / max(slices.Min(s.insert), 1e-9)
 				lJit := slices.Max(s.load) / max(slices.Min(s.load), 1e-9)
 				dJit := slices.Max(s.del) / max(slices.Min(s.del), 1e-9)
@@ -284,6 +305,8 @@ func TestIntThroughputStable(t *testing.T) {
 					insertMed: iMed,
 					loadMed:   lMed,
 					delMed:    dMed,
+					memMiB:    mMed,
+					memBPE:    bMed,
 					insertJit: iJit,
 					loadJit:   lJit,
 					delJit:    dJit,
@@ -304,8 +327,8 @@ func TestIntThroughputStable(t *testing.T) {
 		t.Logf("mode=%s", mode.name)
 		for _, r := range rows {
 			t.Logf(
-				"%s | insert=%.2f load=%.2f delete=%.2f mops | jitter i/l/d=%.2fx/%.2fx/%.2fx",
-				r.name, r.insertMed, r.loadMed, r.delMed, r.insertJit, r.loadJit, r.delJit,
+				"%s | insert=%.2f load=%.2f delete=%.2f mops | mem=%.1f B/entry %.2f MiB | jitter i/l/d=%.2fx/%.2fx/%.2fx",
+				r.name, r.insertMed, r.loadMed, r.delMed, r.memBPE, r.memMiB, r.insertJit, r.loadJit, r.delJit,
 			)
 		}
 	}

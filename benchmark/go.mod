@@ -8,6 +8,7 @@ require (
 	github.com/Snawoot/lfmap v0.1.2
 	github.com/alphadose/haxmap v1.4.1
 	github.com/fufuok/cmap v1.19.3
+	github.com/jeremiah-masters/dlht v0.0.0-20260507233412-e7a3bb1532f6
 	github.com/llxisdsh/cc v0.0.0
 	github.com/llxisdsh/pb v1.5.25
 	github.com/mhmtszr/concurrent-swiss-map v1.0.10

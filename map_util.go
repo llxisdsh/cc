@@ -180,15 +180,15 @@ func calcParallelism(items, cpus uintptr) uintptr {
 // return value must be a power of 2
 //
 //go:nosplit
-func calcTableLen(capacity uintptr) uintptr {
+func calcTableLen(capacity int) uintptr {
 	tableLen := uintptr(minTableLen)
-	const minThreshold = uintptr(float64(minTableLen*entriesPerBucket) * loadFactor)
+	const minThreshold = int(float64(minTableLen*entriesPerBucket) * loadFactor)
 	if capacity >= minThreshold {
 		const invFactor = 1.0 / (float64(entriesPerBucket) * loadFactor)
 		// +entriesPerBucket-1 is used to compensate for calculation
 		// inaccuracies
 		tableLen = nextPowOf2(
-			uintptr(float64(capacity+entriesPerBucket-1) * invFactor),
+			uintptr(float64(uintptr(capacity)+entriesPerBucket-1) * invFactor),
 		)
 	}
 	return tableLen

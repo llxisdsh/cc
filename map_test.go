@@ -46,7 +46,7 @@ type mapStats struct {
 	// Counter is the number of entries stored in the map according
 	// to the internal atomic counter. In the case of concurrent map
 	// modifications, this number may be different from Size.
-	Counter uintptr
+	Counter int
 	// CounterLen is the number of internal atomic counter stripes.
 	// This number may grow with the map capacity to improve
 	// multithreaded scalability.
@@ -896,11 +896,11 @@ func TestMapCalcLen(t *testing.T) {
 	var tableLen, growTableLen, sizeLen, parallelism, lastTableLen, lastGrowTableLen, lastSizeLen, lastParallelism uintptr
 	cpus := uintptr(runtime.GOMAXPROCS(0))
 	t.Log("runtime.GOMAXPROCS(0),", cpus)
-	for i := range uintptr(1000000) {
+	for i := range 1000000 {
 		tableLen = calcTableLen(i)
-		sizeLen = calcSizeLen(i, cpus)
+		sizeLen = calcSizeLen(uintptr(i), cpus)
 		// const capFactor = float64(entriesPerBucket) * mapLoadFactor
-		growThreshold := uintptr(
+		growThreshold := int(
 			float64(tableLen*entriesPerBucket) * loadFactor,
 		)
 		growTableLen = calcTableLen(growThreshold)

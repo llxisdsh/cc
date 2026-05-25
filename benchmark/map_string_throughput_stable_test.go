@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	// "github.com/jeremiah-masters/dlht"
+	"github.com/jeremiah-masters/dlht"
 	"github.com/llxisdsh/cc"
 	"github.com/puzpuzpuz/xsync/v4"
 )
@@ -53,6 +53,13 @@ func (a *stableCCFlatMapAdapter) Load(k string) (int, bool) { return a.m.Load(k)
 func (a *stableCCFlatMapAdapter) Delete(k string)           { a.m.Delete(k) }
 func (a *stableCCFlatMapAdapter) Size() int                 { return a.m.Size() }
 
+type stableCCFunnelMapAdapter struct{ m *cc.FunnelMap[string, int] }
+
+func (a *stableCCFunnelMapAdapter) Insert(k string, v int)    { a.m.LoadOrStore(k, v) }
+func (a *stableCCFunnelMapAdapter) Load(k string) (int, bool) { return a.m.Load(k) }
+func (a *stableCCFunnelMapAdapter) Delete(k string)           { a.m.Delete(k) }
+func (a *stableCCFunnelMapAdapter) Size() int                 { return a.m.Size() }
+
 type stableCCOFHTMapAdapter struct{ m *cc.OFHTMap[string, int] }
 
 func (a *stableCCOFHTMapAdapter) Insert(k string, v int)    { a.m.LoadOrStore(k, v) }
@@ -74,12 +81,12 @@ func (a *stableXsyncMapAdapter) Load(k string) (int, bool) { return a.m.Load(k) 
 func (a *stableXsyncMapAdapter) Delete(k string)           { a.m.Delete(k) }
 func (a *stableXsyncMapAdapter) Size() int                 { return a.m.Size() }
 
-// type stableDLHTMapAdapter struct{ m *dlht.Map[string, int] }
-//
-// func (a *stableDLHTMapAdapter) Insert(k string, v int)    { a.m.Insert(k, v) }
-// func (a *stableDLHTMapAdapter) Load(k string) (int, bool) { return a.m.Get(k) }
-// func (a *stableDLHTMapAdapter) Delete(k string)           { a.m.Delete(k) }
-// func (a *stableDLHTMapAdapter) Size() int                 { return int(a.m.Size()) }
+type stableDLHTMapAdapter struct{ m *dlht.Map[string, int] }
+
+func (a *stableDLHTMapAdapter) Insert(k string, v int)    { a.m.Insert(k, v) }
+func (a *stableDLHTMapAdapter) Load(k string) (int, bool) { return a.m.Get(k) }
+func (a *stableDLHTMapAdapter) Delete(k string)           { a.m.Delete(k) }
+func (a *stableDLHTMapAdapter) Size() int                 { return int(a.m.Size()) }
 
 // TestStringThroughputStable uses one shared harness for string-key throughput.
 func TestStringThroughputStable(t *testing.T) {
@@ -119,6 +126,12 @@ func TestStringThroughputStable(t *testing.T) {
 			},
 		},
 		{
+			name: "cc.FunnelMap",
+			new: func(capHint int) stableMap {
+				return &stableCCFunnelMapAdapter{m: cc.NewFunnelMap[string, int](cc.WithCapacity(capHint))}
+			},
+		},
+		{
 			name: "cc.OFHTMap",
 			new: func(capHint int) stableMap {
 				return &stableCCOFHTMapAdapter{m: cc.NewOFHTMap[string, int](cc.WithCapacity(capHint))}
@@ -137,12 +150,12 @@ func TestStringThroughputStable(t *testing.T) {
 			},
 		},
 
-		// {
-		// 	name: "dlht.Map",
-		// 	new: func(capHint int) stableMap {
-		// 		return &stableDLHTMapAdapter{m: dlht.New[string, int](dlht.Options{InitialSize: uint64(capHint)})}
-		// 	},
-		// },
+		{
+			name: "dlht.Map",
+			new: func(capHint int) stableMap {
+				return &stableDLHTMapAdapter{m: dlht.New[string, int](dlht.Options{InitialSize: uint64(capHint)})}
+			},
+		},
 	}
 
 	modes := []struct {
@@ -158,6 +171,8 @@ func TestStringThroughputStable(t *testing.T) {
 		insertMed float64
 		loadMed   float64
 		delMed    float64
+		memMiB    float64
+		memBPE    float64
 		insertJit float64
 		loadJit   float64
 		delJit    float64
@@ -168,9 +183,11 @@ func TestStringThroughputStable(t *testing.T) {
 		mode := mode
 		t.Run(mode.name, func(t *testing.T) {
 			type mapSummary struct {
-				insert []float64
-				load   []float64
-				del    []float64
+				insert   []float64
+				load     []float64
+				del      []float64
+				memMiB   []float64
+				memBytes []float64
 			}
 			modeSummary := make(map[string]*mapSummary, len(factories))
 			for _, f := range factories {
@@ -194,6 +211,8 @@ func TestStringThroughputStable(t *testing.T) {
 							insertTP := make([]float64, 0, rounds)
 							loadTP := make([]float64, 0, rounds)
 							deleteTP := make([]float64, 0, rounds)
+							memoryMiB := make([]float64, 0, rounds)
+							memoryBPE := make([]float64, 0, rounds)
 							capHint := 0
 							if mode.preCap {
 								capHint = total
@@ -201,6 +220,8 @@ func TestStringThroughputStable(t *testing.T) {
 
 							for round := 0; round < rounds; round++ {
 								runtime.GC()
+								var memBefore runtime.MemStats
+								runtime.ReadMemStats(&memBefore)
 								m := f.new(capHint)
 
 								insertDur := runParallel(total, workers, func(start, end int) {
@@ -211,6 +232,10 @@ func TestStringThroughputStable(t *testing.T) {
 								if got := m.Size(); got != total {
 									t.Fatalf("insert size mismatch: want=%d got=%d", total, got)
 								}
+								var memAfter runtime.MemStats
+								runtime.ReadMemStats(&memAfter)
+								memBytes := allocDeltaBytes(memBefore.Alloc, memAfter.Alloc)
+								memBytesPerEntry := memBytes / float64(total)
 
 								loadDur := runParallel(total, workers, func(start, end int) {
 									for i := start; i < end; i++ {
@@ -233,6 +258,11 @@ func TestStringThroughputStable(t *testing.T) {
 								insertTP = append(insertTP, throughputMops(total, insertDur, minMeasure))
 								loadTP = append(loadTP, throughputMops(total, loadDur, minMeasure))
 								deleteTP = append(deleteTP, throughputMops(total, deleteDur, minMeasure))
+								memMiB := memBytes / (1024 * 1024)
+								memoryMiB = append(memoryMiB, memMiB)
+								memoryBPE = append(memoryBPE, memBytesPerEntry)
+								sum.memMiB = append(sum.memMiB, memMiB)
+								sum.memBytes = append(sum.memBytes, memBytesPerEntry)
 							}
 
 							if detail {
@@ -248,6 +278,10 @@ func TestStringThroughputStable(t *testing.T) {
 									"delete mops: median=%.2f min=%.2f max=%.2f",
 									median(deleteTP), slices.Min(deleteTP), slices.Max(deleteTP),
 								)
+								t.Logf(
+									"memory: median=%.2f MiB median=%.1f B/entry",
+									median(memoryMiB), median(memoryBPE),
+								)
 							}
 
 							sum.insert = append(sum.insert, median(insertTP))
@@ -260,10 +294,11 @@ func TestStringThroughputStable(t *testing.T) {
 
 			for _, f := range factories {
 				s := modeSummary[f.name]
-				if s == nil || len(s.insert) == 0 || len(s.load) == 0 || len(s.del) == 0 {
+				if s == nil || len(s.insert) == 0 || len(s.load) == 0 || len(s.del) == 0 || len(s.memMiB) == 0 {
 					continue
 				}
 				iMed, lMed, dMed := median(s.insert), median(s.load), median(s.del)
+				mMed, bMed := median(s.memMiB), median(s.memBytes)
 				iJit := slices.Max(s.insert) / max(slices.Min(s.insert), 1e-9)
 				lJit := slices.Max(s.load) / max(slices.Min(s.load), 1e-9)
 				dJit := slices.Max(s.del) / max(slices.Min(s.del), 1e-9)
@@ -273,6 +308,8 @@ func TestStringThroughputStable(t *testing.T) {
 					insertMed: iMed,
 					loadMed:   lMed,
 					delMed:    dMed,
+					memMiB:    mMed,
+					memBPE:    bMed,
 					insertJit: iJit,
 					loadJit:   lJit,
 					delJit:    dJit,
@@ -293,8 +330,8 @@ func TestStringThroughputStable(t *testing.T) {
 		t.Logf("mode=%s", mode.name)
 		for _, r := range rows {
 			t.Logf(
-				"%s | insert=%.2f load=%.2f delete=%.2f mops | jitter i/l/d=%.2fx/%.2fx/%.2fx",
-				r.name, r.insertMed, r.loadMed, r.delMed, r.insertJit, r.loadJit, r.delJit,
+				"%s | insert=%.2f load=%.2f delete=%.2f mops | mem=%.1f B/entry %.2f MiB | jitter i/l/d=%.2fx/%.2fx/%.2fx",
+				r.name, r.insertMed, r.loadMed, r.delMed, r.memBPE, r.memMiB, r.insertJit, r.loadJit, r.delJit,
 			)
 		}
 	}
@@ -358,6 +395,13 @@ func throughputMops(total int, d, minDur time.Duration) float64 {
 		return 0
 	}
 	return v
+}
+
+func allocDeltaBytes(before, after uint64) float64 {
+	if after <= before {
+		return 0
+	}
+	return float64(after - before)
 }
 
 func median(v []float64) float64 {

@@ -26,7 +26,6 @@ type FunnelMap[K cmp.Ordered, V any] struct {
 	valEqual EqualFunc
 	rs       unsafe.Pointer // [*funnelRebuildState]
 	minLen   uintptr        // [WithCapacity]
-	size     PLocalCounter  // size counts only entries in the buckets array
 }
 
 // funnelRebuildState represents the current state of a resizing operation
@@ -47,7 +46,8 @@ type funnelTable[K cmp.Ordered, V any] struct {
 	mask      uintptr
 	overflow  *SkipMap[K, V]
 	stripeCap int
-	growCap   uintptr
+	growCap   int
+	size      PLocalCounterN // last field; counter 0 tracks bucket-resident entries
 }
 
 // funnelBucket represents a hash table bucket with cache-line alignment.
@@ -114,14 +114,14 @@ func (m *FunnelMap[K, V]) init(
 
 func newFunnelTable[K cmp.Ordered, V any](tableLen uintptr) *funnelTable[K, V] {
 	const capFactor = float64(fEntriesPerBucket) * loadFactor
-	growCap := uintptr(float64(tableLen) * capFactor)
+	growCap := int(float64(tableLen) * capFactor)
 	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
 	roundedSizeLen := nextPowOf2(maxProcs())
 	table := &funnelTable[K, V]{
 		buckets:   makeUnsafeSlice[funnelBucket](tableLen),
 		mask:      tableLen - 1,
 		overflow:  NewSkipMap[K, V](),
-		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
+		stripeCap: growCap >> bits.TrailingZeros32(uint32(roundedSizeLen)),
 		growCap:   growCap,
 	}
 	return table
@@ -329,7 +329,7 @@ slowPath:
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
-			m.size.Add(1)
+			table.size.Add(funnelSizeCounter, 1)
 			return
 		}
 	}
@@ -339,10 +339,10 @@ slowPath:
 	root.UnlockWithMeta(meta | opNextMask)
 
 	// Check if the table needs to grow
-	if int(m.size.Get().Load()) >= table.stripeCap {
+	if int(table.size.Get(funnelSizeCounter)) >= table.stripeCap {
 		if loadPtr(&m.rs) == nil {
-			size := m.size.Value() + uintptr(table.overflow.Size())
-			if size >= table.growCap {
+			totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+			if totalSize >= table.growCap {
 				m.tryResize(mapGrowHint, (table.mask+1)<<1)
 			}
 		}
@@ -707,17 +707,17 @@ slowPath:
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
-			m.size.Add(1)
+			table.size.Add(funnelSizeCounter, 1)
 			return retV, it.loaded
 		}
 		table.overflow.Store(*key, it.entry.value)
 		root.UnlockWithMeta(meta | opNextMask)
 
 		// Check if the table needs to grow
-		if int(m.size.Get().Load()) >= table.stripeCap {
+		if int(table.size.Get(funnelSizeCounter)) >= table.stripeCap {
 			if loadPtr(&m.rs) == nil {
-				size := m.size.Value() + uintptr(table.overflow.Size())
-				if size >= table.growCap {
+				totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+				if totalSize >= table.growCap {
 					m.tryResize(mapGrowHint, (table.mask+1)<<1)
 				}
 			}
@@ -737,7 +737,7 @@ slowPath:
 		storePtr(root.At(j), nil)
 		newMeta := setByte(meta, h2Empty, j)
 		root.UnlockWithMeta(newMeta)
-		m.size.Add(^uintptr(0))
+		table.size.Add(funnelSizeCounter, ^uintptr(0))
 
 		// Check if table shrinking is needed
 		if m.shrinkOn {
@@ -745,8 +745,8 @@ slowPath:
 				if loadPtr(&m.rs) == nil {
 					tableLen := table.mask + 1
 					if m.minLen < tableLen {
-						size := m.size.Value() + uintptr(table.overflow.Size())
-						if size < tableLen*fEntriesPerBucket/shrinkFraction {
+						totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+						if totalSize < int(tableLen*fEntriesPerBucket/shrinkFraction) {
 							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
 					}
@@ -812,8 +812,8 @@ func (m *FunnelMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
-	return int(m.size.Value()) + table.overflow.Size()
+	totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+	return max(totalSize, 0)
 }
 
 // ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
@@ -939,7 +939,7 @@ restart:
 				storePtr(b.At(j), nil)
 				meta = setByte(meta, h2Empty, j)
 				storeUint64(&b.meta, meta)
-				m.size.Add(^uintptr(0))
+				table.size.Add(funnelSizeCounter, ^uintptr(0))
 			default:
 				// cancelOp: no-op
 			}
@@ -1003,7 +1003,6 @@ func (m *FunnelMap[K, V]) Clear() {
 	m.rebuild(mapRebuildBlockWritersHint, func() {
 		newTable := newFunnelTable[K, V](m.minLen)
 		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
-		m.size.Clear()
 	})
 }
 
@@ -1025,7 +1024,7 @@ func (m *FunnelMap[K, V]) Grow(sizeAdd int) {
 	if loadPtr(&m.table) == nil {
 		m.slowInit()
 	}
-	m.doResize(mapGrowHint, uintptr(sizeAdd))
+	m.doResize(mapGrowHint, sizeAdd)
 }
 
 // Shrink reduces the capacity to fit the current size,
@@ -1040,7 +1039,7 @@ func (m *FunnelMap[K, V]) Shrink() {
 
 func (m *FunnelMap[K, V]) doResize(
 	hint mapRebuildHint,
-	sizeAdd uintptr,
+	sizeAdd int,
 ) {
 	for {
 		// Resize check
@@ -1051,7 +1050,8 @@ func (m *FunnelMap[K, V]) doResize(
 			if sizeAdd <= 0 {
 				return
 			}
-			newLen = fCalcTableLen(m.size.Value() + uintptr(table.overflow.Size()) + sizeAdd)
+			totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+			newLen = fCalcTableLen(totalSize + sizeAdd)
 			if newLen <= tableLen {
 				return
 			}
@@ -1060,7 +1060,8 @@ func (m *FunnelMap[K, V]) doResize(
 			if tableLen <= m.minLen {
 				return
 			}
-			newLen = fCalcTableLen(m.size.Value() + uintptr(table.overflow.Size()))
+			totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+			newLen = fCalcTableLen(totalSize)
 			if newLen >= tableLen {
 				return
 			}
@@ -1108,7 +1109,8 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	clone.keyHash = m.keyHash
 	clone.valEqual = m.valEqual
 	clone.minLen = m.minLen
-	newLen := fCalcTableLen(m.size.Value() + uintptr(table.overflow.Size()))
+	totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+	newLen := fCalcTableLen(totalSize)
 	newTable := newFunnelTable[K, V](newLen)
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
 	for k, v := range m.All() {
@@ -1208,7 +1210,6 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 			m.endRebuild(rs)
 			return true
 		}
-		newLen = max(newLen, calcTableLen(m.size.Value()<<1))
 	} else {
 		if newLen >= tableLen || newLen < m.minLen {
 			m.endRebuild(rs)
@@ -1273,6 +1274,7 @@ func (m *FunnelMap[K, V]) copyBucket(
 	newTable *funnelTable[K, V],
 ) {
 	mask := newTable.mask
+	var copied uintptr
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
 		// In Grow, runs once. In Shrink, runs twice (usually).
@@ -1314,6 +1316,7 @@ func (m *FunnelMap[K, V]) copyBucket(
 					emptyIdx := firstMarkedByteIndex(empty)
 					destB.meta = setByte(destMeta, h2v, emptyIdx)
 					*destB.At(emptyIdx) = ePtr
+					copied++
 				} else {
 					destB.meta = destMeta | opNextMask
 					if cacheHash[K]() {
@@ -1328,9 +1331,13 @@ func (m *FunnelMap[K, V]) copyBucket(
 			srcB.Unlock()
 		}
 	}
+	if copied != 0 {
+		newTable.size.Add(funnelSizeCounter, copied)
+	}
 }
 
 func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTable *funnelTable[K, V]) {
+	var copied uintptr
 	for k, v := range table.overflow.All() {
 		var hash uintptr
 		var h1v uintptr
@@ -1358,12 +1365,15 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: k, value: v})
 			}
 			*destB.At(emptyIdx) = newEntry
+			copied++
 		} else {
 			destB.meta = destMeta | opNextMask
 			newTable.overflow.Store(k, v)
 		}
 	}
-	m.size.Add(uintptr(table.overflow.Size()) - uintptr(newTable.overflow.Size()))
+	if copied != 0 {
+		newTable.size.Add(funnelSizeCounter, copied)
+	}
 }
 
 //go:nosplit
@@ -1398,6 +1408,8 @@ func (b *funnelBucket) UnlockWithMeta(meta uint64) {
 }
 
 const (
+	funnelSizeCounter = 0
+
 	// fEntriesPerBucket defines the number of per-bucket entry pointers.
 	// Computed at compile time to avoid padding while packing buckets
 	// tightly within cache lines.
@@ -1434,15 +1446,15 @@ func fMarkZeroBytes(w uint64) uint64 {
 }
 
 //go:nosplit
-func fCalcTableLen(capacity uintptr) uintptr {
+func fCalcTableLen(capacity int) uintptr {
 	tableLen := uintptr(minTableLen)
-	const minThreshold = uintptr(float64(minTableLen*fEntriesPerBucket) * loadFactor)
+	const minThreshold = int(float64(minTableLen*fEntriesPerBucket) * loadFactor)
 	if capacity >= minThreshold {
 		const invFactor = 1.0 / (float64(fEntriesPerBucket) * loadFactor)
 		// +entriesPerBucket-1 is used to compensate for calculation
 		// inaccuracies
 		tableLen = nextPowOf2(
-			uintptr(float64(capacity+fEntriesPerBucket-1) * invFactor),
+			uintptr(float64(uintptr(capacity)+fEntriesPerBucket-1) * invFactor),
 		)
 	}
 	return tableLen
