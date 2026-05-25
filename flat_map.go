@@ -626,6 +626,16 @@ func (m *FlatMap[K, V]) compute(
 					if flags&computeSkipIfFound != 0 {
 						return eVal, true
 					}
+					if flags&computeUsesValue != 0 {
+						if val != nil {
+							if m.valEqual != nil && m.valEqual(
+								noescape(unsafe.Pointer(&eVal)),
+								noescape(val),
+							) {
+								return eVal, true
+							}
+						}
+					}
 					goto slowPath
 				}
 			}
@@ -758,23 +768,6 @@ findLoop:
 	switch it.op {
 	case updateOp:
 		if it.loaded {
-			// valEqual: skip write if value unchanged
-			var oldValPtr unsafe.Pointer
-			if cacheHash[K]() {
-				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
-				oldValPtr = unsafe.Pointer(&slot.Ptr().value)
-			} else {
-				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
-				oldValPtr = unsafe.Pointer(&slot.Ptr().value)
-			}
-			if m.valEqual != nil && m.valEqual(
-				noescape(oldValPtr),
-				noescape(unsafe.Pointer(&it.entry.value)),
-			) {
-				root.Unlock()
-				return retV, it.loaded
-			}
-
 			// Update
 			lastB.seq.BeginWriteLocked()
 			if cacheHash[K]() {

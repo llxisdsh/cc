@@ -528,12 +528,33 @@ func (m *FunnelMap[K, V]) compute(
 						if flags&computeSkipIfFound != 0 {
 							return e.value, true
 						}
+						if flags&computeUsesValue != 0 {
+							if val != nil {
+								if m.valEqual != nil && m.valEqual(
+									noescape(unsafe.Pointer(&e.value)),
+									noescape(val),
+								) {
+									return e.value, true
+								}
+							}
+						}
 						goto slowPath
 					}
 				} else {
-					if (*entryNoHash[K, V])(ePtr).key == *key {
+					e := (*entryNoHash[K, V])(ePtr)
+					if e.key == *key {
 						if flags&computeSkipIfFound != 0 {
-							return (*entryNoHash[K, V])(ePtr).value, true
+							return e.value, true
+						}
+						if flags&computeUsesValue != 0 {
+							if val != nil {
+								if m.valEqual != nil && m.valEqual(
+									noescape(unsafe.Pointer(&e.value)),
+									noescape(val),
+								) {
+									return e.value, true
+								}
+							}
 						}
 						goto slowPath
 					}
@@ -663,23 +684,6 @@ slowPath:
 				root.Unlock()
 				return retV, it.loaded
 			}
-
-			// valEqual: skip write if value unchanged
-			var oldValPtr unsafe.Pointer
-			ePtr := *root.At(j)
-			if cacheHash[K]() {
-				oldValPtr = unsafe.Pointer(&(*entryWithHash[K, V])(ePtr).value)
-			} else {
-				oldValPtr = unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).value)
-			}
-			if m.valEqual != nil && m.valEqual(
-				noescape(oldValPtr),
-				noescape(unsafe.Pointer(&it.entry.value)),
-			) {
-				root.Unlock()
-				return retV, it.loaded
-			}
-
 			// Update
 			var newEntry unsafe.Pointer
 			if cacheHash[K]() {
