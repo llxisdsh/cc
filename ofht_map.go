@@ -15,8 +15,9 @@ const (
 	ofhtEnableIntKey = true
 	// ofhtEnableDedupVal enables deduplication checks for identical values.
 	ofhtEnableDedupVal = true
-	// ofhtEnableAggressiveGrow eagerly resizes the map when linear probing depth is high.
-	ofhtEnableAggressiveGrow = false
+	// ofhtEnableAggressiveGrow doubles resize slack when table allocation observes
+	// concurrent inserts after the resize trigger.
+	ofhtEnableAggressiveGrow = true
 	// ofhtEnableStoreInGrow permits store operations to directly populate the new table during resizing.
 	// NOTE: Benchmark results show that keeping this disabled (false) yields better performance for OFHTMap.
 	ofhtEnableStoreInGrow = false
@@ -125,14 +126,17 @@ const (
 	ofhtStoreFull
 )
 
+type ofhtResizeHint uint8
+
+const (
+	ofhtResizeNormal ofhtResizeHint = iota
+	ofhtResizeProbeLimit
+)
+
 const (
 	// occupied tracks physical slots that are no longer Empty.
 	ofhtCntOccupied int = iota
-	// inserted/deleted are logical event counters; Size is inserted - deleted.
-	// These P-local counters are not a transactional snapshot. Resize may use
-	// them as pressure hints, but slot CAS state is the source of correctness.
-	ofhtCntInserted
-	ofhtCntDeleted
+	ofhtCntTombstones
 )
 
 // NewOFHTMap creates an experimental OFHT-style map.
@@ -239,10 +243,10 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 			m.resizeIfNeeded(table)
 			return
 		case ofhtStoreFrozen:
-			table = m.afterFrozenTable(table)
+			table = m.helpResize(table)
 		case ofhtStoreFull:
 			occupied := int(m.size.Value(ofhtCntOccupied))
-			table = m.tryResize(table, occupied)
+			table = m.tryResize(table, occupied, ofhtResizeProbeLimit)
 		}
 	}
 }
@@ -269,10 +273,10 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 			}
 			return actual, loaded
 		case ofhtStoreFrozen:
-			table = m.afterFrozenTable(table)
+			table = m.helpResize(table)
 		case ofhtStoreFull:
 			occupied := int(m.size.Value(ofhtCntOccupied))
-			table = m.tryResize(table, occupied)
+			table = m.tryResize(table, occupied, ofhtResizeProbeLimit)
 		}
 	}
 }
@@ -298,10 +302,10 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case ofhtStoreOK:
 			return prev, loaded
 		case ofhtStoreFrozen:
-			table = m.afterFrozenTable(table)
+			table = m.helpResize(table)
 		case ofhtStoreFull:
 			occupied := int(m.size.Value(ofhtCntOccupied))
-			table = m.tryResize(table, occupied)
+			table = m.tryResize(table, occupied, ofhtResizeProbeLimit)
 		}
 	}
 }
@@ -326,7 +330,7 @@ func (m *OFHTMap[K, V]) Delete(key K) {
 		if status == ofhtStoreOK {
 			return
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -350,7 +354,7 @@ func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 		if status == ofhtStoreOK {
 			return prev, loaded
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -380,7 +384,7 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		if status == ofhtStoreOK {
 			return swapped
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -410,7 +414,7 @@ func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 		if status == ofhtStoreOK {
 			return deleted
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -457,13 +461,9 @@ func (m *OFHTMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
-	inserted := int(m.size.Value(ofhtCntInserted))
-	deleted := int(m.size.Value(ofhtCntDeleted))
-	if inserted <= deleted {
-		return 0
-	}
-	return inserted - deleted
+	occupied := int(m.size.Value(ofhtCntOccupied))
+	tombstones := int(m.size.Value(ofhtCntTombstones))
+	return max(occupied-tombstones, 0)
 }
 
 // Clear clears all key-value pairs from the map.
@@ -577,7 +577,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			}
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
-			m.size.Add(ofhtCntInserted, 1)
+			m.size.Add(ofhtCntTombstones, ^uintptr(0))
 			return ofhtStoreOK, *val, false
 		} else if state == ofhtStateBusy {
 			// delay(&spins)
@@ -592,7 +592,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			slot.key.WriteUnfenced(*key)
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
-			m.size.Add2(ofhtCntOccupied, 1, ofhtCntInserted, 1)
+			m.size.Add(ofhtCntOccupied, 1)
 			return ofhtStoreOK, *val, false
 		}
 	}
@@ -697,7 +697,7 @@ func (m *OFHTMap[K, V]) deleteFrom(
 			// same-key revival without permitting arbitrary tombstone reuse.
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(ofhtCntDeleted, 1)
+			m.size.Add(ofhtCntTombstones, 1)
 			return ofhtStoreOK, prev, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, *new(V), false
@@ -815,7 +815,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 			// deleteFrom: only the original key may revive this slot.
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(ofhtCntDeleted, 1)
+			m.size.Add(ofhtCntTombstones, 1)
 			return ofhtStoreOK, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, false
@@ -836,21 +836,16 @@ func (m *OFHTMap[K, V]) resizeIfNeeded(table *ofhtTable[K, V]) {
 	if localSize < table.stripeCap {
 		return
 	}
+	if table.allocating.Load() != 0 {
+		return
+	}
 	occupied := m.size.Value(ofhtCntOccupied)
 	if int(occupied) >= table.growCap {
-		m.tryResize(table, int(occupied))
+		m.tryResize(table, int(occupied), ofhtResizeNormal)
 	}
 }
 
-func (m *OFHTMap[K, V]) resizeShouldGrow(occupied, tombstones int) bool {
-	if occupied < 2 {
-		return true
-	}
-	half := occupied >> 1
-	return tombstones < half
-}
-
-func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int) *ofhtTable[K, V] {
+func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int, hint ofhtResizeHint) *ofhtTable[K, V] {
 	if table := m.table.Load(); table != old {
 		return table
 	}
@@ -858,16 +853,26 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int) *ofhtTable
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			inserted := int(m.size.Value(ofhtCntInserted))
-			deleted := int(m.size.Value(ofhtCntDeleted))
-			live := max(inserted-deleted, 0)
-			// occupied/inserted/deleted are read independently, so occupied can
-			// briefly lag behind live. Treat that as zero tombstone pressure
-			// rather than clamping live and corrupting Size after resize.
-			effectiveOccupied := max(live, occupied)
-			tombstones := effectiveOccupied - live
-			isGrow := m.resizeShouldGrow(effectiveOccupied, tombstones)
-			newTable := newOFHTTable[K, V](m.nextResizeSlotLen(old, isGrow, live))
+			tombstones := int(m.size.Value(ofhtCntTombstones))
+			slotLen := old.mask + 1
+			live := occupied - tombstones
+			// Base sizing follows the live entry count. At the normal grow
+			// threshold this rounds to 2x; tombstone-heavy resize can stay at
+			// the same size and compact deleted slots away.
+			nextLen := ofhtCalcSlotLen(live)
+			aggressive := hint == ofhtResizeProbeLimit
+			if ofhtEnableAggressiveGrow {
+				curOccupied := int(m.size.Value(ofhtCntOccupied))
+				occupiedInResize := curOccupied - occupied
+				aggressive = aggressive || occupiedInResize >= 2
+			}
+			// Probe-limit resize or observed concurrent insert pressure gets
+			// one extra size class, capped at 4x the old table.
+			if aggressive {
+				nextLen = min(nextLen<<1, slotLen<<2)
+			}
+
+			newTable := newOFHTTable[K, V](nextLen)
 			old.nextTable.Store(newTable)
 			next = newTable
 		} else {
@@ -893,15 +898,18 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int) *ofhtTable
 }
 
 func (m *OFHTMap[K, V]) helpResize(old *ofhtTable[K, V]) *ofhtTable[K, V] {
-	if table := m.table.Load(); table != old {
-		return table
-	}
+	for {
+		if table := m.table.Load(); table != old {
+			return table
+		}
 
-	next := old.nextTable.Load()
-	if next == nil {
-		return old
+		next := old.nextTable.Load()
+		if next == nil {
+			runtime.Gosched()
+			continue
+		}
+		return m.helpResizeInto(old, next)
 	}
-	return m.helpResizeInto(old, next)
 }
 
 func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K, V] {
@@ -973,50 +981,12 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
-			// Reset counters to describe the compacted next table. The three
-			// counters are not reset atomically; preserve logical live count
-			// from inserted-deleted and do not constrain it by occupied.
-			m.size.Reset(ofhtCntOccupied)
-			inserted := int(m.size.Reset(ofhtCntInserted))
-			deleted := int(m.size.Reset(ofhtCntDeleted))
-			live := max(inserted-deleted, 0)
-			if live > 0 {
-				m.size.Add2(ofhtCntOccupied, uintptr(live), ofhtCntInserted, uintptr(live))
-			}
+			occupied := m.size.Reset(ofhtCntOccupied)
+			tombstones := m.size.Reset(ofhtCntTombstones)
+			m.size.Add(ofhtCntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
-	}
-}
-
-func (m *OFHTMap[K, V]) nextResizeSlotLen(old *ofhtTable[K, V], isGrow bool, live int) uintptr {
-	slotLen := old.mask + 1
-	nextLen := slotLen
-	if isGrow {
-		nextLen <<= 1
-	}
-	if !ofhtEnableAggressiveGrow {
-		return nextLen
-	}
-
-	// Resize does not stop all writers immediately; goroutines that already
-	// hold old can keep inserting into slots that have not been frozen yet.
-	// When that concurrent window makes old much denser than the normal grow
-	// threshold, grow for roughly another table worth of inserts instead of
-	// forcing a near-immediate second resize.
-	if live > 0 {
-		liveSlots := min(live, int(slotLen))
-		nextLen = max(nextLen, ofhtCalcSlotLen(liveSlots<<1))
-	}
-	return nextLen
-}
-
-func (m *OFHTMap[K, V]) afterFrozenTable(old *ofhtTable[K, V]) *ofhtTable[K, V] {
-	for {
-		if table := m.helpResize(old); table != old {
-			return table
-		}
-		runtime.Gosched()
 	}
 }
 

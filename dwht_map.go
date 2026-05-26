@@ -17,8 +17,9 @@ const (
 	dwhtEnableIntKey = true
 	// dwhtEnableDedupVal enables deduplication checks for identical values.
 	dwhtEnableDedupVal = true
-	// dwhtEnableAggressiveGrow eagerly resizes the map when linear probing depth is high.
-	dwhtEnableAggressiveGrow = false
+	// dwhtEnableAggressiveGrow doubles resize slack when table allocation observes
+	// concurrent inserts after the resize trigger.
+	dwhtEnableAggressiveGrow = true
 	// dwhtEnableStoreInGrow permits store operations to directly populate the new table during resizing.
 	dwhtEnableStoreInGrow = true
 )
@@ -167,14 +168,17 @@ const (
 	dwhtStoreFull
 )
 
+type dwhtResizeHint uint8
+
+const (
+	dwhtResizeNormal dwhtResizeHint = iota
+	dwhtResizeProbeLimit
+)
+
 const (
 	// occupied tracks physical slots that are no longer Empty.
 	dwhtCntOccupied int = iota
-	// inserted/deleted are logical event counters; Size is inserted - deleted.
-	// These P-local counters are not a transactional snapshot. Resize may use
-	// them as pressure hints, but slot DWCAS state is the source of correctness.
-	dwhtCntInserted
-	dwhtCntDeleted
+	dwhtCntTombstones
 )
 
 // NewDWHTMap creates an experimental DWHT-style map.
@@ -269,10 +273,10 @@ func (m *DWHTMap[K, V]) Store(key K, value V) {
 			m.resizeIfNeeded(table)
 			return
 		case dwhtStoreFrozen:
-			table = m.afterFrozenTable(table)
+			table = m.helpResize(table)
 		case dwhtStoreFull:
 			occupied := int(m.size.Value(dwhtCntOccupied))
-			table = m.tryResize(table, occupied)
+			table = m.tryResize(table, occupied, dwhtResizeProbeLimit)
 		}
 	}
 }
@@ -299,10 +303,10 @@ func (m *DWHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 			}
 			return actual, loaded
 		case dwhtStoreFrozen:
-			table = m.afterFrozenTable(table)
+			table = m.helpResize(table)
 		case dwhtStoreFull:
 			occupied := int(m.size.Value(dwhtCntOccupied))
-			table = m.tryResize(table, occupied)
+			table = m.tryResize(table, occupied, dwhtResizeProbeLimit)
 		}
 	}
 }
@@ -328,10 +332,10 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case dwhtStoreOK:
 			return prev, loaded
 		case dwhtStoreFrozen:
-			table = m.afterFrozenTable(table)
+			table = m.helpResize(table)
 		case dwhtStoreFull:
 			occupied := int(m.size.Value(dwhtCntOccupied))
-			table = m.tryResize(table, occupied)
+			table = m.tryResize(table, occupied, dwhtResizeProbeLimit)
 		}
 	}
 }
@@ -356,7 +360,7 @@ func (m *DWHTMap[K, V]) Delete(key K) {
 		if status == dwhtStoreOK {
 			return
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -380,7 +384,7 @@ func (m *DWHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 		if status == dwhtStoreOK {
 			return prev, loaded
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -410,7 +414,7 @@ func (m *DWHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		if status == dwhtStoreOK {
 			return swapped
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -439,7 +443,7 @@ func (m *DWHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 		if status == dwhtStoreOK {
 			return deleted
 		}
-		table = m.afterFrozenTable(table)
+		table = m.helpResize(table)
 	}
 }
 
@@ -481,13 +485,9 @@ func (m *DWHTMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	// Weakly consistent P-local counters; may deviate slightly during concurrent resize.
-	inserted := int(m.size.Value(dwhtCntInserted))
-	deleted := int(m.size.Value(dwhtCntDeleted))
-	if inserted <= deleted {
-		return 0
-	}
-	return inserted - deleted
+	occupied := int(m.size.Value(dwhtCntOccupied))
+	tombstones := int(m.size.Value(dwhtCntTombstones))
+	return max(occupied-tombstones, 0)
 }
 
 // Clear clears all key-value pairs from the map.
@@ -598,7 +598,7 @@ func (m *DWHTMap[K, V]) storeInto(
 				probe--
 				continue
 			}
-			m.size.Add(dwhtCntInserted, 1)
+			m.size.Add(dwhtCntTombstones, ^uintptr(0))
 			return dwhtStoreOK, *val, false
 		} else if state == dwhtStateEmpty {
 			entry := atomic.LoadPointer(&slot.entry)
@@ -610,7 +610,7 @@ func (m *DWHTMap[K, V]) storeInto(
 				probe--
 				continue
 			}
-			m.size.Add2(dwhtCntOccupied, uintptr(1), dwhtCntInserted, uintptr(1))
+			m.size.Add(dwhtCntOccupied, 1)
 			return dwhtStoreOK, *val, false
 		}
 	}
@@ -706,7 +706,7 @@ func (m *DWHTMap[K, V]) deleteFrom(
 			if needValue {
 				prev = e.val
 			}
-			m.size.Add(dwhtCntDeleted, 1)
+			m.size.Add(dwhtCntTombstones, 1)
 			return dwhtStoreOK, prev, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, *new(V), false
@@ -809,7 +809,7 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 				continue
 			}
 
-			m.size.Add(dwhtCntDeleted, 1)
+			m.size.Add(dwhtCntTombstones, 1)
 			return dwhtStoreOK, true
 		} else if state == dwhtStateEmpty {
 			return dwhtStoreOK, false
@@ -826,38 +826,42 @@ func (m *DWHTMap[K, V]) resizeIfNeeded(table *dwhtTable[K, V]) {
 	if localSize < table.stripeCap {
 		return
 	}
+	if table.allocating.Load() != 0 {
+		return
+	}
 	occupied := int(m.size.Value(dwhtCntOccupied))
 	if occupied >= table.growCap {
-		m.tryResize(table, occupied)
+		m.tryResize(table, occupied, dwhtResizeNormal)
 	}
 }
 
-func (m *DWHTMap[K, V]) resizeShouldGrow(occupied, tombstones int) bool {
-	if occupied < 2 {
-		return true
-	}
-	half := occupied >> 1
-	return tombstones < half
-}
-
-func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int) *dwhtTable[K, V] {
+func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int, hint dwhtResizeHint) *dwhtTable[K, V] {
 	if table := m.table.Load(); table != old {
 		return table
 	}
-
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			inserted := int(m.size.Value(dwhtCntInserted))
-			deleted := int(m.size.Value(dwhtCntDeleted))
-			live := max(inserted-deleted, 0)
-			// occupied/inserted/deleted are read independently, so occupied can
-			// briefly lag behind live. Treat that as zero tombstone pressure
-			// rather than clamping live and corrupting Size after resize.
-			effectiveOccupied := max(live, occupied)
-			tombstones := effectiveOccupied - live
-			isGrow := m.resizeShouldGrow(effectiveOccupied, tombstones)
-			newTable := newDWHTTable[K, V](m.nextResizeSlotLen(old, isGrow, live))
+			tombstones := int(m.size.Value(dwhtCntTombstones))
+			slotLen := old.mask + 1
+			live := occupied - tombstones
+			// Base sizing follows the live entry count. At the normal grow
+			// threshold this rounds to 2x; tombstone-heavy resize can stay at
+			// the same size and compact deleted slots away.
+			nextLen := dwhtCalcSlotLen(live)
+			aggressive := hint == dwhtResizeProbeLimit
+			if dwhtEnableAggressiveGrow {
+				curOccupied := int(m.size.Value(dwhtCntOccupied))
+				occupiedInResize := curOccupied - occupied
+				aggressive = aggressive || occupiedInResize >= 2
+			}
+			// Probe-limit resize or observed concurrent insert pressure gets
+			// one extra size class, capped at 4x the old table.
+			if aggressive {
+				nextLen = min(nextLen<<1, slotLen<<2)
+			}
+
+			newTable := newDWHTTable[K, V](nextLen)
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
@@ -880,15 +884,18 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int) *dwhtTable
 }
 
 func (m *DWHTMap[K, V]) helpResize(old *dwhtTable[K, V]) *dwhtTable[K, V] {
-	if table := m.table.Load(); table != old {
-		return table
-	}
+	for {
+		if table := m.table.Load(); table != old {
+			return table
+		}
 
-	next := old.nextTable.Load()
-	if next == nil {
-		return old
+		next := old.nextTable.Load()
+		if next == nil {
+			runtime.Gosched()
+			continue
+		}
+		return m.helpResizeInto(old, next)
 	}
-	return m.helpResizeInto(old, next)
 }
 
 func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K, V] {
@@ -960,50 +967,12 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
-			// Reset counters to describe the compacted next table. The three
-			// counters are not reset atomically; preserve logical live count
-			// from inserted-deleted and do not constrain it by occupied.
-			m.size.Reset(dwhtCntOccupied)
-			inserted := int(m.size.Reset(dwhtCntInserted))
-			deleted := int(m.size.Reset(dwhtCntDeleted))
-			live := max(inserted-deleted, 0)
-			if live > 0 {
-				m.size.Add2(dwhtCntOccupied, uintptr(live), dwhtCntInserted, uintptr(live))
-			}
+			occupied := m.size.Reset(dwhtCntOccupied)
+			tombstones := m.size.Reset(dwhtCntTombstones)
+			m.size.Add(dwhtCntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
-	}
-}
-
-func (m *DWHTMap[K, V]) nextResizeSlotLen(old *dwhtTable[K, V], isGrow bool, live int) uintptr {
-	slotLen := old.mask + 1
-	nextLen := slotLen
-	if isGrow {
-		nextLen <<= 1
-	}
-	if !dwhtEnableAggressiveGrow {
-		return nextLen
-	}
-
-	// Resize does not stop all writers immediately; goroutines that already
-	// hold old can keep inserting into slots that have not been frozen yet.
-	// When that concurrent window makes old much denser than the normal grow
-	// threshold, grow for roughly another table worth of inserts instead of
-	// forcing a near-immediate second resize.
-	if live > 0 {
-		liveSlots := min(live, int(slotLen))
-		nextLen = max(nextLen, dwhtCalcSlotLen(liveSlots<<1))
-	}
-	return nextLen
-}
-
-func (m *DWHTMap[K, V]) afterFrozenTable(old *dwhtTable[K, V]) *dwhtTable[K, V] {
-	for {
-		if table := m.helpResize(old); table != old {
-			return table
-		}
-		runtime.Gosched()
 	}
 }
 
