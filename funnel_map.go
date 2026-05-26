@@ -26,6 +26,7 @@ type FunnelMap[K cmp.Ordered, V any] struct {
 	valEqual EqualFunc
 	rs       unsafe.Pointer // [*funnelRebuildState]
 	minLen   uintptr        // [WithCapacity]
+	size     PLocalCounterN // counter 0 tracks bucket-resident entries
 }
 
 // funnelRebuildState represents the current state of a resizing operation
@@ -47,7 +48,6 @@ type funnelTable[K cmp.Ordered, V any] struct {
 	overflow  *SkipMap[K, V]
 	stripeCap int
 	growCap   int
-	size      PLocalCounterN // last field; counter 0 tracks bucket-resident entries
 }
 
 // funnelBucket represents a hash table bucket with cache-line alignment.
@@ -247,7 +247,7 @@ slowPath:
 	if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 		switch rs.hint {
 		case mapGrowHint, mapShrinkHint:
-			if loadPtr(&rs.newTable) != nil {
+			if fShouldHelpResize(rs) {
 				root.Unlock()
 				m.helpCopyAndWait(rs)
 				table = (*funnelTable[K, V])(loadPtr(&m.table))
@@ -329,7 +329,7 @@ slowPath:
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
-			table.size.Add(funnelSizeCounter, 1)
+			m.size.Add(fSizeCounter, 1)
 			return
 		}
 	}
@@ -339,9 +339,9 @@ slowPath:
 	root.UnlockWithMeta(meta | opNextMask)
 
 	// Check if the table needs to grow
-	if int(table.size.Get(funnelSizeCounter)) >= table.stripeCap {
+	if int(m.size.Get(fSizeCounter)) >= table.stripeCap {
 		if loadPtr(&m.rs) == nil {
-			totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+			totalSize := int(m.size.Value(fSizeCounter)) + table.overflow.Size()
 			if totalSize >= table.growCap {
 				m.tryResize(mapGrowHint, (table.mask+1)<<1)
 			}
@@ -584,7 +584,7 @@ slowPath:
 		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.newTable) != nil {
+				if fShouldHelpResize(rs) {
 					root.Unlock()
 					m.helpCopyAndWait(rs)
 					table = (*funnelTable[K, V])(loadPtr(&m.table))
@@ -712,16 +712,16 @@ slowPath:
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
-			table.size.Add(funnelSizeCounter, 1)
+			m.size.Add(fSizeCounter, 1)
 			return retV, it.loaded
 		}
 		table.overflow.Store(*key, it.entry.value)
 		root.UnlockWithMeta(meta | opNextMask)
 
 		// Check if the table needs to grow
-		if int(table.size.Get(funnelSizeCounter)) >= table.stripeCap {
+		if int(m.size.Get(fSizeCounter)) >= table.stripeCap {
 			if loadPtr(&m.rs) == nil {
-				totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+				totalSize := int(m.size.Value(fSizeCounter)) + table.overflow.Size()
 				if totalSize >= table.growCap {
 					m.tryResize(mapGrowHint, (table.mask+1)<<1)
 				}
@@ -742,7 +742,7 @@ slowPath:
 		storePtr(root.At(j), nil)
 		newMeta := setByte(meta, h2Empty, j)
 		root.UnlockWithMeta(newMeta)
-		table.size.Add(funnelSizeCounter, ^uintptr(0))
+		m.size.Add(fSizeCounter, ^uintptr(0))
 
 		// Check if table shrinking is needed
 		if m.shrinkOn {
@@ -750,7 +750,7 @@ slowPath:
 				if loadPtr(&m.rs) == nil {
 					tableLen := table.mask + 1
 					if m.minLen < tableLen {
-						totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+						totalSize := int(m.size.Value(fSizeCounter)) + table.overflow.Size()
 						if totalSize < int(tableLen*fEntriesPerBucket/shrinkFraction) {
 							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
@@ -817,7 +817,7 @@ func (m *FunnelMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+	totalSize := int(m.size.Value(fSizeCounter)) + table.overflow.Size()
 	return max(totalSize, 0)
 }
 
@@ -896,7 +896,7 @@ restart:
 			if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
 				case mapGrowHint, mapShrinkHint:
-					if loadPtr(&rs.newTable) != nil {
+					if fShouldHelpResize(rs) {
 						b.Unlock()
 						m.helpCopyAndWait(rs)
 						goto restart
@@ -944,7 +944,7 @@ restart:
 				storePtr(b.At(j), nil)
 				meta = setByte(meta, h2Empty, j)
 				storeUint64(&b.meta, meta)
-				table.size.Add(funnelSizeCounter, ^uintptr(0))
+				m.size.Add(fSizeCounter, ^uintptr(0))
 			default:
 				// cancelOp: no-op
 			}
@@ -964,7 +964,7 @@ restart:
 			if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
 				case mapGrowHint, mapShrinkHint:
-					if loadPtr(&rs.newTable) != nil {
+					if fShouldHelpResize(rs) {
 						m.helpCopyAndWait(rs)
 						goto restart
 					}
@@ -1008,6 +1008,7 @@ func (m *FunnelMap[K, V]) Clear() {
 	m.rebuild(mapRebuildBlockWritersHint, func() {
 		newTable := newFunnelTable[K, V](m.minLen)
 		atomic.StorePointer(&m.table, unsafe.Pointer(newTable))
+		m.size.Clear()
 	})
 }
 
@@ -1055,7 +1056,7 @@ func (m *FunnelMap[K, V]) doResize(
 			if sizeAdd <= 0 {
 				return
 			}
-			totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+			totalSize := int(m.size.Value(fSizeCounter)) + table.overflow.Size()
 			newLen = fCalcTableLen(totalSize + sizeAdd)
 			if newLen <= tableLen {
 				return
@@ -1065,7 +1066,7 @@ func (m *FunnelMap[K, V]) doResize(
 			if tableLen <= m.minLen {
 				return
 			}
-			totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+			totalSize := int(m.size.Value(fSizeCounter)) + table.overflow.Size()
 			newLen = fCalcTableLen(totalSize)
 			if newLen >= tableLen {
 				return
@@ -1075,7 +1076,7 @@ func (m *FunnelMap[K, V]) doResize(
 		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.newTable) != nil {
+				if fShouldHelpResize(rs) {
 					m.helpCopyAndWait(rs)
 				} else {
 					runtime.Gosched()
@@ -1114,7 +1115,7 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	clone.keyHash = m.keyHash
 	clone.valEqual = m.valEqual
 	clone.minLen = m.minLen
-	totalSize := int(table.size.Value(funnelSizeCounter)) + table.overflow.Size()
+	totalSize := int(m.size.Value(fSizeCounter)) + table.overflow.Size()
 	newLen := fCalcTableLen(totalSize)
 	newTable := newFunnelTable[K, V](newLen)
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
@@ -1135,7 +1136,7 @@ func (m *FunnelMap[K, V]) rebuild(
 		if rs := (*funnelRebuildState)(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if loadPtr(&rs.newTable) != nil {
+				if fShouldHelpResize(rs) {
 					m.helpCopyAndWait(rs)
 				} else {
 					runtime.Gosched()
@@ -1246,6 +1247,15 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 //go:noinline
 func (m *FunnelMap[K, V]) helpCopyAndWait(rs *funnelRebuildState) {
 	newTable := (*funnelTable[K, V])(loadPtr(&rs.newTable))
+	for newTable == nil {
+		newTable = (*funnelTable[K, V])(loadPtr(&rs.newTable))
+		if newTable == nil {
+			if (*funnelRebuildState)(loadPtr(&m.rs)) != rs {
+				return
+			}
+			runtime.Gosched()
+		}
+	}
 	newLen := newTable.mask + 1
 	oldTable := (*funnelTable[K, V])(rs.oldTable)
 	oldLen := oldTable.mask + 1
@@ -1321,7 +1331,6 @@ func (m *FunnelMap[K, V]) copyBucket(
 					emptyIdx := firstMarkedByteIndex(empty)
 					destB.meta = setByte(destMeta, h2v, emptyIdx)
 					*destB.At(emptyIdx) = ePtr
-					copied++
 				} else {
 					destB.meta = destMeta | opNextMask
 					if cacheHash[K]() {
@@ -1331,13 +1340,14 @@ func (m *FunnelMap[K, V]) copyBucket(
 						e := (*entryNoHash[K, V])(ePtr)
 						newTable.overflow.Store(e.key, e.value)
 					}
+					copied++
 				}
 			}
 			srcB.Unlock()
 		}
 	}
 	if copied != 0 {
-		newTable.size.Add(funnelSizeCounter, copied)
+		m.size.Add(fSizeCounter, -copied)
 	}
 }
 
@@ -1377,7 +1387,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 		}
 	}
 	if copied != 0 {
-		newTable.size.Add(funnelSizeCounter, copied)
+		m.size.Add(fSizeCounter, copied)
 	}
 }
 
@@ -1412,8 +1422,21 @@ func (b *funnelBucket) UnlockWithMeta(meta uint64) {
 	BitUnlockWithStoreUint64(&b.meta, opLockMask, meta)
 }
 
+//go:nosplit
+func fShouldHelpResize(rs *funnelRebuildState) bool {
+	return !fResizeConcurrentWriters || loadPtr(&rs.newTable) != nil
+}
+
 const (
-	funnelSizeCounter = 0
+	fSizeCounter = 0
+
+	// fResizeConcurrentWriters allows writers to keep mutating the old
+	// table after grow/shrink starts but before the replacement table exists.
+	// This preserves the previous low-wait path for experiments, but it can
+	// race with overflow migration because SkipMap iteration is weakly
+	// consistent. Keep it disabled so resize makes old-table writes quiescent
+	// before copying overflow entries.
+	fResizeConcurrentWriters = false
 
 	// fEntriesPerBucket defines the number of per-bucket entry pointers.
 	// Computed at compile time to avoid padding while packing buckets
