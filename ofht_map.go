@@ -29,10 +29,11 @@ const (
 	// ofhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
 	ofhtLoadFactor = 0.625
 
-	// ofhtMaxProbeThreshold is the threshold of linear probing depth.
-	// If a store operation probes more than this many slots without success,
+	// ofhtMaxProbeThreshold is the largest probe offset tried by default.
+	// Since probe loops include both 0 and this limit, 511 means 512 slots.
+	// If a store operation probes more than this many offsets without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	ofhtMaxProbeThreshold = 1024
+	ofhtMaxProbeThreshold = 511
 
 	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
@@ -79,6 +80,7 @@ type OFHTMap[K comparable, V any] struct {
 type ofhtTable[K comparable, V any] struct {
 	slots      unsafeSlice[ofhtSlot[K, V]]
 	mask       uintptr
+	probeLimit uintptr
 	stripeCap  int
 	growCap    int
 	chunkSz    uintptr
@@ -169,7 +171,7 @@ func (m *OFHTMap[K, V]) init(cfg *MapConfig) {
 
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = ofhtCalcSlotLen(cfg.capacity)
-	m.table.Store(newOFHTTable[K, V](m.minLen))
+	m.table.Store(newOFHTTable[K, V](m.minLen, uintptr(ofhtMaxProbeThreshold)))
 }
 
 // Load retrieves the value for a key.
@@ -189,7 +191,7 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 	}
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
@@ -472,7 +474,7 @@ func (m *OFHTMap[K, V]) Clear() {
 	if table == nil {
 		return
 	}
-	m.table.Store(newOFHTTable[K, V](m.minLen))
+	m.table.Store(newOFHTTable[K, V](m.minLen, uintptr(ofhtMaxProbeThreshold)))
 	m.size.Clear()
 }
 
@@ -513,7 +515,7 @@ func (m *OFHTMap[K, V]) storeInto(
 ) (ofhtStoreStatus, V, bool) {
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		// Eagerly trigger a resize if the probe sequence is too long,
 		// preventing severe performance degradation due to clustering.
@@ -606,7 +608,7 @@ func (m *OFHTMap[K, V]) loadAndUpdateIn(
 	h uint32,
 ) (ofhtStoreStatus, V, bool) {
 	start := ofhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -660,7 +662,7 @@ func (m *OFHTMap[K, V]) deleteFrom(
 ) (ofhtStoreStatus, V, bool) {
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -719,7 +721,7 @@ func (m *OFHTMap[K, V]) compareAndSwapIn(
 ) (ofhtStoreStatus, bool) {
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -776,7 +778,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 ) (ofhtStoreStatus, bool) {
 	// var spins int
 	start := ofhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(ofhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slots.At((start + probe) & table.mask)
 		ctrl := slot.ctrl.Load()
@@ -854,7 +856,6 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int, hint ofhtR
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
 			tombstones := int(m.size.Value(ofhtCntTombstones))
-			slotLen := old.mask + 1
 			live := occupied - tombstones
 			// Base sizing follows the live entry count. At the normal grow
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
@@ -869,10 +870,20 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int, hint ofhtR
 			// Probe-limit resize or observed concurrent insert pressure gets
 			// one extra size class, capped at 4x the old table.
 			if aggressive {
+				slotLen := old.mask + 1
 				nextLen = min(nextLen<<1, slotLen<<2)
 			}
 
-			newTable := newOFHTTable[K, V](nextLen)
+			// probeLimit is an inclusive probe offset. Never shrink a table
+			// that already widened its window; when resize was caused by
+			// exhausting the window, double the number of slots future
+			// operations may scan.
+			probeLimit := min(nextLen-1, max(uintptr(ofhtMaxProbeThreshold), old.probeLimit))
+			if hint == ofhtResizeProbeLimit {
+				probeSlots := (old.probeLimit + 1) << 1
+				probeLimit = max(probeLimit, min(nextLen-1, probeSlots-1))
+			}
+			newTable := newOFHTTable[K, V](nextLen, probeLimit)
 			old.nextTable.Store(newTable)
 			next = newTable
 		} else {
@@ -915,7 +926,7 @@ func (m *OFHTMap[K, V]) helpResize(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K, V] {
 	slotLen := old.mask + 1
 	chunks, chunkSz := old.chunks, old.chunkSz
-	probeLimit := min(next.mask, uintptr(ofhtMaxProbeThreshold))
+	probeLimit := next.probeLimit
 
 	// Cooperative resize.
 	// Each slot is frozen before it is copied. This removes the old global
@@ -990,19 +1001,22 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 	}
 }
 
-func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
+func newOFHTTable[K comparable, V any](slotLen, probeLimit uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
+	probeLimit = min(slotLen-1, probeLimit)
 	growCap := int(float64(slotLen) * ofhtLoadFactor)
 	cpus := maxProcs()
 	roundedSizeLen := nextPowOf2(cpus)
+	stripeCap := int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen)))
 	chunks, chunkSz := ofhtResizeChunks(slotLen, cpus)
 	return &ofhtTable[K, V]{
-		slots:     makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
-		mask:      slotLen - 1,
-		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
-		growCap:   growCap,
-		chunks:    chunks,
-		chunkSz:   chunkSz,
+		slots:      makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
+		mask:       slotLen - 1,
+		probeLimit: probeLimit,
+		stripeCap:  stripeCap,
+		growCap:    growCap,
+		chunks:     chunks,
+		chunkSz:    chunkSz,
 	}
 }
 

@@ -15,7 +15,7 @@ func TestDWHTSlotStorageLayout(t *testing.T) {
 	hint := &dwhtSlotLayoutHints[idx]
 	hint.Store(dwhtSlotLayoutUnknown)
 
-	table := newDWHTTable[int, int](128)
+	table := newDWHTTable[int, int](128, uintptr(dwhtMaxProbeThreshold))
 	if uintptr(table.slotsBase)&(dwhtSlotBytes-1) != 0 {
 		t.Fatalf("slotsBase=%#x is not %d-byte aligned", uintptr(table.slotsBase), dwhtSlotBytes)
 	}
@@ -33,7 +33,7 @@ func TestDWHTSlotStorageLayout(t *testing.T) {
 		}
 	}
 
-	table = newDWHTTable[int, int](128)
+	table = newDWHTTable[int, int](128, uintptr(dwhtMaxProbeThreshold))
 	if uintptr(table.slotsBase)&(dwhtSlotBytes-1) != 0 {
 		t.Fatalf("hinted slotsBase=%#x is not %d-byte aligned", uintptr(table.slotsBase), dwhtSlotBytes)
 	}
@@ -458,5 +458,22 @@ func TestDWHTMapSameKeyTombstoneReuse(t *testing.T) {
 	}
 	if slotLen := table.mask + 1; slotLen != dwhtMinSlots {
 		t.Fatalf("same-key tombstone churn grew table to %d slots, want %d", slotLen, dwhtMinSlots)
+	}
+}
+
+func TestDWHTMapLongProbeLimitSurvivesResize(t *testing.T) {
+	m := NewDWHTMap[int, int](
+		WithCapacity(1),
+		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
+	)
+	const n = dwhtMaxProbeThreshold + 2
+	for i := range n {
+		m.Store(i, i*10)
+	}
+	for i := range n {
+		got, ok := m.Load(i)
+		if !ok || got != i*10 {
+			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", i, got, ok, i*10)
+		}
 	}
 }

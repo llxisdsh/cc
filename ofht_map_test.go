@@ -423,3 +423,20 @@ func TestOFHTMapSameKeyTombstoneReuse(t *testing.T) {
 		t.Fatalf("same-key tombstone churn grew table to %d slots, want %d", slotLen, ofhtMinSlots)
 	}
 }
+
+func TestOFHTMapLongProbeLimitSurvivesResize(t *testing.T) {
+	m := NewOFHTMap[int, int](
+		WithCapacity(1),
+		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
+	)
+	const n = ofhtMaxProbeThreshold + 2
+	for i := range n {
+		m.Store(i, i*10)
+	}
+	for i := range n {
+		got, ok := m.Load(i)
+		if !ok || got != i*10 {
+			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", i, got, ok, i*10)
+		}
+	}
+}

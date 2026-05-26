@@ -30,10 +30,11 @@ const (
 	// dwhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
 	dwhtLoadFactor = 0.625
 
-	// dwhtMaxProbeThreshold is the threshold of linear probing depth.
-	// If a store operation probes more than this many slots without success,
+	// dwhtMaxProbeThreshold is the largest probe offset tried by default.
+	// Since probe loops include both 0 and this limit, 511 means 512 slots.
+	// If a store operation probes more than this many offsets without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	dwhtMaxProbeThreshold = 1024
+	dwhtMaxProbeThreshold = 511
 
 	// dwhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
@@ -84,6 +85,7 @@ type DWHTMap[K comparable, V any] struct {
 type dwhtTable[K comparable, V any] struct {
 	slotsBase  unsafe.Pointer
 	mask       uintptr
+	probeLimit uintptr
 	stripeCap  int
 	growCap    int
 	chunkSz    uintptr
@@ -211,7 +213,7 @@ func (m *DWHTMap[K, V]) init(cfg *MapConfig) {
 
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = dwhtCalcSlotLen(cfg.capacity)
-	m.table.Store(newDWHTTable[K, V](m.minLen))
+	m.table.Store(newDWHTTable[K, V](m.minLen, uintptr(dwhtMaxProbeThreshold)))
 }
 
 // Load retrieves the value for a key.
@@ -230,7 +232,7 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 		h = uint32(hash ^ (hash >> 32))
 	}
 	start := dwhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
@@ -496,7 +498,7 @@ func (m *DWHTMap[K, V]) Clear() {
 	if table == nil {
 		return
 	}
-	m.table.Store(newDWHTTable[K, V](m.minLen))
+	m.table.Store(newDWHTTable[K, V](m.minLen, uintptr(dwhtMaxProbeThreshold)))
 	m.size.Clear()
 }
 
@@ -537,7 +539,7 @@ func (m *DWHTMap[K, V]) storeInto(
 ) (dwhtStoreStatus, V, bool) {
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
@@ -625,7 +627,7 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 ) (dwhtStoreStatus, V, bool) {
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
@@ -673,7 +675,7 @@ func (m *DWHTMap[K, V]) deleteFrom(
 	needValue bool,
 ) (dwhtStoreStatus, V, bool) {
 	start := dwhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
@@ -724,7 +726,7 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 ) (dwhtStoreStatus, bool) {
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
@@ -774,7 +776,7 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 	h uint32,
 ) (dwhtStoreStatus, bool) {
 	start := dwhtStart(h, table.mask)
-	limit := min(table.mask, uintptr(dwhtMaxProbeThreshold))
+	limit := table.probeLimit
 	for probe := uintptr(0); probe <= limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
@@ -843,7 +845,6 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int, hint dwhtR
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
 			tombstones := int(m.size.Value(dwhtCntTombstones))
-			slotLen := old.mask + 1
 			live := occupied - tombstones
 			// Base sizing follows the live entry count. At the normal grow
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
@@ -858,10 +859,20 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int, hint dwhtR
 			// Probe-limit resize or observed concurrent insert pressure gets
 			// one extra size class, capped at 4x the old table.
 			if aggressive {
+				slotLen := old.mask + 1
 				nextLen = min(nextLen<<1, slotLen<<2)
 			}
 
-			newTable := newDWHTTable[K, V](nextLen)
+			// probeLimit is an inclusive probe offset. Never shrink a table
+			// that already widened its window; when resize was caused by
+			// exhausting the window, double the number of slots future
+			// operations may scan.
+			probeLimit := min(nextLen-1, max(uintptr(dwhtMaxProbeThreshold), old.probeLimit))
+			if hint == dwhtResizeProbeLimit {
+				probeSlots := (old.probeLimit + 1) << 1
+				probeLimit = max(probeLimit, min(nextLen-1, probeSlots-1))
+			}
+			newTable := newDWHTTable[K, V](nextLen, probeLimit)
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
@@ -901,7 +912,7 @@ func (m *DWHTMap[K, V]) helpResize(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K, V] {
 	slotLen := old.mask + 1 // power of two
 	chunks, chunkSz := old.chunks, old.chunkSz
-	probeLimit := min(next.mask, uintptr(dwhtMaxProbeThreshold))
+	probeLimit := next.probeLimit
 	// Cooperative resize.
 	// Each slot is frozen before it is copied. This removes the old global
 	// freeze barrier while preserving the key rule: a copied slot can no longer
@@ -976,21 +987,24 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 	}
 }
 
-func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
+func newDWHTTable[K comparable, V any](slotLen, probeLimit uintptr) *dwhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dwhtMinSlots))
+	probeLimit = min(slotLen-1, probeLimit)
 	base, raw := makeDWHTSlots(slotLen)
 	growCap := int(float64(slotLen) * dwhtLoadFactor)
 	cpus := maxProcs()
 	roundedSizeLen := nextPowOf2(cpus)
+	stripeCap := int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen)))
 	chunks, chunkSz := dwhtResizeChunks(slotLen, cpus)
 	return &dwhtTable[K, V]{
-		slotsBase: base,
-		slotsRaw:  raw,
-		mask:      slotLen - 1,
-		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen))),
-		growCap:   growCap,
-		chunks:    chunks,
-		chunkSz:   chunkSz,
+		slotsBase:  base,
+		slotsRaw:   raw,
+		mask:       slotLen - 1,
+		probeLimit: probeLimit,
+		stripeCap:  stripeCap,
+		growCap:    growCap,
+		chunks:     chunks,
+		chunkSz:    chunkSz,
 	}
 }
 
