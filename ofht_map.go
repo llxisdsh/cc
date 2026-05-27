@@ -18,8 +18,9 @@ const (
 	// ofhtEnableAggressiveGrow doubles resize slack when table allocation observes
 	// concurrent inserts after the resize trigger.
 	ofhtEnableAggressiveGrow = true
-	// ofhtEnableStoreInGrow permits store operations to directly populate the new table during resizing.
-	// NOTE: Benchmark results show that keeping this disabled (false) yields better performance for OFHTMap.
+	// ofhtEnableStoreInGrow lets writers continue inserting into the old table
+	// while a resize leader is allocating/publishing the new table. Keep it off
+	// when old-table writes or later migration work are expected to be expensive.
 	ofhtEnableStoreInGrow = false
 )
 

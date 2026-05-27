@@ -20,7 +20,9 @@ const (
 	// dwhtEnableAggressiveGrow doubles resize slack when table allocation observes
 	// concurrent inserts after the resize trigger.
 	dwhtEnableAggressiveGrow = true
-	// dwhtEnableStoreInGrow permits store operations to directly populate the new table during resizing.
+	// dwhtEnableStoreInGrow lets writers continue inserting into the old table
+	// while a resize leader is allocating/publishing the new table. Keep it off
+	// when old-table writes or later migration work are expected to be expensive.
 	dwhtEnableStoreInGrow = true
 )
 

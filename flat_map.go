@@ -10,6 +10,13 @@ import (
 	"unsafe"
 )
 
+const (
+	// flatEnableStoreInGrow lets writers continue inserting into the old table
+	// while a resize leader is allocating/publishing the new table. Keep it off
+	// when old-table writes or later migration work are expected to be expensive.
+	flatEnableStoreInGrow = false
+)
+
 // FlatMap implements a flat hash map using seqlock.
 // Table and key/value pairs are stored inline (flat).
 // Value size is not limited by the CPU word size.
@@ -319,7 +326,7 @@ slowPath:
 	if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
 		switch rs.hint {
 		case mapGrowHint, mapShrinkHint:
-			if rs.newTableSeq.Ready() {
+			if flatShouldHelpResize(rs) {
 				root.Unlock()
 				m.helpCopyAndWait(rs)
 				table = SeqLockRead32(&m.tableSeq, &m.table)
@@ -658,7 +665,7 @@ slowPath:
 		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if rs.newTableSeq.Ready() {
+				if flatShouldHelpResize(rs) {
 					root.Unlock()
 					m.helpCopyAndWait(rs)
 					table = SeqLockRead32(&m.tableSeq, &m.table)
@@ -1030,7 +1037,7 @@ restart:
 			if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
 				switch rs.hint {
 				case mapGrowHint, mapShrinkHint:
-					if rs.newTableSeq.Ready() {
+					if flatShouldHelpResize(rs) {
 						root.Unlock()
 						m.helpCopyAndWait(rs)
 						goto restart
@@ -1182,7 +1189,7 @@ func (m *FlatMap[K, V]) doResize(hint mapRebuildHint, sizeAdd int) {
 		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if rs.newTableSeq.Ready() {
+				if flatShouldHelpResize(rs) {
 					m.helpCopyAndWait(rs)
 				} else {
 					runtime.Gosched()
@@ -1257,7 +1264,7 @@ func (m *FlatMap[K, V]) rebuild(
 		if rs := (*flatRebuildState[K, V])(loadPtr(&m.rs)); rs != nil {
 			switch rs.hint {
 			case mapGrowHint, mapShrinkHint:
-				if rs.newTableSeq.Ready() {
+				if flatShouldHelpResize(rs) {
 					m.helpCopyAndWait(rs)
 				} else {
 					runtime.Gosched()
@@ -1359,6 +1366,16 @@ func (m *FlatMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 //go:noinline
 func (m *FlatMap[K, V]) helpCopyAndWait(rs *flatRebuildState[K, V]) {
 	newTable := SeqLockRead32(&rs.newTableSeq, &rs.newTable)
+	for newTable.buckets == nil {
+		newTable = SeqLockRead32(&rs.newTableSeq, &rs.newTable)
+		if newTable.buckets == nil {
+			if (*flatRebuildState[K, V])(loadPtr(&m.rs)) != rs {
+				return
+			}
+			runtime.Gosched()
+		}
+	}
+
 	newLen := newTable.mask + 1
 	oldTable := rs.oldTable
 	oldLen := oldTable.mask + 1
@@ -1531,4 +1548,9 @@ func (b *flatBucketHeader) Unlock() {
 //go:nosplit
 func (b *flatBucketHeader) UnlockWithMeta(meta uint64) {
 	BitUnlockWithStoreUint64(&b.meta, opLockMask, meta)
+}
+
+//go:nosplit
+func flatShouldHelpResize[K comparable, V any](rs *flatRebuildState[K, V]) bool {
+	return !flatEnableStoreInGrow || rs.newTableSeq.Ready()
 }

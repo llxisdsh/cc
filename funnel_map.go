@@ -9,6 +9,13 @@ import (
 	"unsafe"
 )
 
+const (
+	// funnelEnableStoreInGrow lets writers continue inserting into the old table
+	// while a resize leader is allocating/publishing the new table. Keep it off
+	// when old-table writes or later migration work are expected to be expensive.
+	funnelEnableStoreInGrow = false
+)
+
 // FunnelMap is a high-throughput, concurrent-safe hash map that leverages a
 // SkipMap as its collision resolution mechanism. By combining the cache-friendly
 // inline storage of a hash table with the lock-free ordered overflow management
@@ -1422,15 +1429,8 @@ func (b *funnelBucket) UnlockWithMeta(meta uint64) {
 	BitUnlockWithStoreUint64(&b.meta, opLockMask, meta)
 }
 
-//go:nosplit
-func fShouldHelpResize(rs *funnelRebuildState) bool {
-	return !fResizeConcurrentWriters || loadPtr(&rs.newTable) != nil
-}
-
 const (
 	fSizeCounter = 0
-
-	fResizeConcurrentWriters = true
 
 	// fEntriesPerBucket defines the number of per-bucket entry pointers.
 	// Computed at compile time to avoid padding while packing buckets
@@ -1480,4 +1480,9 @@ func fCalcTableLen(capacity int) uintptr {
 		)
 	}
 	return tableLen
+}
+
+//go:nosplit
+func fShouldHelpResize(rs *funnelRebuildState) bool {
+	return !funnelEnableStoreInGrow || loadPtr(&rs.newTable) != nil
 }
