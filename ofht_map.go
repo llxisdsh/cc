@@ -870,6 +870,7 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int, hint ofhtR
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
 			// the same size and compact deleted slots away.
 			nextLen := ofhtCalcSlotLen(live)
+			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == ofhtResizeProbeLimit
 			if ofhtEnableAggressiveGrow {
 				curOccupied := int(m.size.Value(ofhtCntOccupied))

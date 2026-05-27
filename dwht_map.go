@@ -859,6 +859,7 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int, hint dwhtR
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
 			// the same size and compact deleted slots away.
 			nextLen := dwhtCalcSlotLen(live)
+			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == dwhtResizeProbeLimit
 			if dwhtEnableAggressiveGrow {
 				curOccupied := int(m.size.Value(dwhtCntOccupied))
