@@ -27,6 +27,11 @@ type call[V any] struct {
 
 // OnceGroup represents a class of work and forms a namespace in
 // which units of work can be executed with duplicate suppression.
+//
+// OnceGroup has singleflight-style semantics, not sync.Once semantics:
+// it suppresses only concurrent duplicate calls. When an in-flight call
+// completes, whether it returns normally, panics, or calls runtime.Goexit,
+// the key is forgotten and later calls for the same key execute fn again.
 type OnceGroup[K comparable, V any] struct {
 	m Map[K, *call[V]]
 }
@@ -36,6 +41,10 @@ type OnceGroup[K comparable, V any] struct {
 // time. If a duplicate comes in, the duplicate caller waits for the
 // original to complete and receives the same results.
 // The return value shared indicates whether v was given to multiple callers.
+//
+// If fn panics or calls runtime.Goexit, the same outcome is propagated to all
+// callers waiting on that in-flight call. The key is not marked as permanently
+// complete, so a later Do call for the same key will invoke fn again.
 func (g *OnceGroup[K, V]) Do(
 	key K,
 	fn func() (V, error),
@@ -71,6 +80,9 @@ func (g *OnceGroup[K, V]) Do(
 // caller's goroutine. To ensure the panic is not lost and is observed, the
 // goroutine handling the channel will panic and then block forever (select {}),
 // matching x/sync/singleflight behavior.
+//
+// Like Do, DoChan suppresses only in-flight duplicates. After the call finishes
+// or panics, later calls for the same key execute fn again.
 func (g *OnceGroup[K, V]) DoChan(
 	key K,
 	fn func() (V, error),

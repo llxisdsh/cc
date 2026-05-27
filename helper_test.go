@@ -3,6 +3,7 @@ package cc
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -177,6 +178,21 @@ func TestParallel(t *testing.T) {
 	})
 	if err != context.Canceled {
 		t.Errorf("expected Canceled, got %v", err)
+	}
+}
+
+func TestParallelDefaultN(t *testing.T) {
+	expected := runtime.GOMAXPROCS(0)
+	var count int32
+	err := Parallel(context.Background(), 0, func(ctx context.Context, i int) error {
+		atomic.AddInt32(&count, 1)
+		return nil
+	})
+	if err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
+	if count != int32(expected) {
+		t.Errorf("expected %d runs, got %d", expected, count)
 	}
 }
 

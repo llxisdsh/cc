@@ -2,6 +2,7 @@ package cc
 
 import (
 	"context"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -134,7 +135,7 @@ func Repeat(ctx context.Context, interval time.Duration, action func(context.Con
 //	})
 func Parallel(ctx context.Context, n int, action func(context.Context, int) error) error {
 	if n <= 0 {
-		n = 1
+		n = runtime.GOMAXPROCS(0)
 	}
 
 	if ctx.Err() != nil {

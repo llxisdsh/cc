@@ -36,7 +36,7 @@ State-of-the-art concurrent map implementations, delivering extreme performance 
 Tools to manage task execution and flow.
 
 - [**`WorkerPool`**](./worker_pool.go): Robust, high-performance worker pool with zero-allocation on happy path.
-- [**`OnceGroup[K, V]`**](./once_group.go): Coalesces duplicate requests (singleflight). \~20× faster than `singleflight` with panic propagation.
+- [**`OnceGroup[K, V]`**](./once_group.go): Coalesces in-flight duplicate requests (singleflight). \~20× faster than `singleflight` with panic propagation.
 
 ### 🔒 Synchronization Primitives
 
@@ -173,7 +173,9 @@ wp.Close()
 
 ```go
 var g cc.OnceGroup[string, string]
-// Coalesce duplicate requests
+// Coalesce in-flight duplicate requests.
+// Results are not cached; later calls for the same key run again.
+// Panic and Goexit are propagated to current waiters only.
 val, err, shared := g.Do("key", func() (string, error) {
     return "expensive-op", nil
 })
@@ -288,4 +290,3 @@ b := cc.NewBarter[string]()
 // G1: b.Exchange("ping") -> returns "pong"
 // G2: b.Exchange("pong") -> returns "ping"
 ```
-

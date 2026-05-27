@@ -148,7 +148,7 @@ func (a *skipNodeArray[K, V]) at(i int) **skipNode[K, V] {
 // Yields stable performance bypassing heavy standard rand routines.
 func (s *SkipMap[K, V]) randomLevel() int {
 	lvl := 1
-	r := fastrand()
+	r := runtime_cheaprand()
 	// Exhaust randomness effectively by taking 2 bits at a time (p=0.25).
 	for (r & 3) == 0 {
 		lvl++
@@ -466,5 +466,5 @@ func (s *SkipMap[K, V]) Size() int {
 	return int(loadUintptr(&s.count))
 }
 
-//go:linkname fastrand runtime.fastrand
-func fastrand() uint32
+//go:linkname runtime_cheaprand runtime.cheaprand
+func runtime_cheaprand() uint32

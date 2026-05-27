@@ -223,29 +223,22 @@ retry:
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
 			if cacheHash[K]() {
-				var eKey K
-				var eVal V
-				var eHash uintptr
 				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
 				e := slot.ReadUnfenced()
-				eHash, eKey, eVal = e.hash, e.key, e.value
 				if !b.seq.EndRead(s1) {
 					continue retry
 				}
-				if eHash == hash && eKey == key {
-					return eVal, true
+				if e.hash == hash && e.key == key {
+					return e.value, true
 				}
 			} else {
-				var eKey K
-				var eVal V
 				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
 				e := slot.ReadUnfenced()
-				eKey, eVal = e.key, e.value
 				if !b.seq.EndRead(s1) {
 					continue retry
 				}
-				if eKey == key {
-					return eVal, true
+				if e.key == key {
+					return e.value, true
 				}
 			}
 		}
@@ -289,30 +282,38 @@ func (m *FlatMap[K, V]) Store(key K, value V) {
 		meta := loadUint64Fast(&b.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			var eKey K
-			var eVal V
-			var eHash uintptr
 			if cacheHash[K]() {
 				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
 				e := slot.ReadUnfenced()
-				eHash, eKey, eVal = e.hash, e.key, e.value
+				if !b.seq.EndRead(s1) {
+					goto slowPath
+				}
+				if e.hash == hash && e.key == key {
+					// valEqual: skip write if value unchanged
+					if m.valEqual != nil && m.valEqual(
+						noescape(unsafe.Pointer(&e.value)),
+						noescape(unsafe.Pointer(&value)),
+					) {
+						return
+					}
+					goto slowPath
+				}
 			} else {
 				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
 				e := slot.ReadUnfenced()
-				eKey, eVal = e.key, e.value
-			}
-			if !b.seq.EndRead(s1) {
-				goto slowPath
-			}
-			if (!cacheHash[K]() || eHash == hash) && eKey == key {
-				// valEqual: skip write if value unchanged
-				if m.valEqual != nil && m.valEqual(
-					noescape(unsafe.Pointer(&eVal)),
-					noescape(unsafe.Pointer(&value)),
-				) {
-					return
+				if !b.seq.EndRead(s1) {
+					goto slowPath
 				}
-				goto slowPath
+				if e.key == key {
+					// valEqual: skip write if value unchanged
+					if m.valEqual != nil && m.valEqual(
+						noescape(unsafe.Pointer(&e.value)),
+						noescape(unsafe.Pointer(&value)),
+					) {
+						return
+					}
+					goto slowPath
+				}
 			}
 		}
 		if meta&opNextMask == 0 {
@@ -364,31 +365,31 @@ slowPath:
 		meta := loadUint64Fast(&lastB.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
-			var eKey K
 			if cacheHash[K]() {
 				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
-				if slot.Ptr().hash != hash {
+				e := slot.Ptr()
+				if e.hash != hash || e.key != key {
 					continue
 				}
-				eKey = slot.Ptr().key
 			} else {
 				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
-				eKey = slot.Ptr().key
-			}
-			if eKey == key {
-				// Update
-				lastB.seq.BeginWriteLocked()
-				if cacheHash[K]() {
-					slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
-					slot.WriteUnfenced(entryWithHash[K, V]{hash: hash, key: key, value: value})
-				} else {
-					slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
-					slot.WriteUnfenced(entryNoHash[K, V]{key: key, value: value})
+				e := slot.Ptr()
+				if e.key != key {
+					continue
 				}
-				lastB.seq.EndWriteLocked()
-				root.Unlock()
-				return
 			}
+			// Update
+			lastB.seq.BeginWriteLocked()
+			if cacheHash[K]() {
+				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
+				slot.WriteUnfenced(entryWithHash[K, V]{hash: hash, key: key, value: value})
+			} else {
+				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
+				slot.WriteUnfenced(entryNoHash[K, V]{key: key, value: value})
+			}
+			lastB.seq.EndWriteLocked()
+			root.Unlock()
+			return
 		}
 		if emptyB == nil {
 			if empty := (^meta) & metaMask; empty != 0 {
@@ -614,36 +615,50 @@ func (m *FlatMap[K, V]) compute(
 			meta := loadUint64Fast(&b.meta)
 			for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 				j := firstMarkedByteIndex(marked)
-				var eKey K
-				var eVal V
-				var eHash uintptr
 				if cacheHash[K]() {
 					slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(b, j))
 					e := slot.ReadUnfenced()
-					eHash, eKey, eVal = e.hash, e.key, e.value
+					if !b.seq.EndRead(s1) {
+						goto slowPath
+					}
+					if e.hash == hash && e.key == *key {
+						if flags&computeSkipIfFound != 0 {
+							return e.value, true
+						}
+						if flags&computeUsesValue != 0 {
+							if val != nil {
+								if m.valEqual != nil && m.valEqual(
+									noescape(unsafe.Pointer(&e.value)),
+									noescape(val),
+								) {
+									return e.value, true
+								}
+							}
+						}
+						goto slowPath
+					}
 				} else {
 					slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(b, j))
 					e := slot.ReadUnfenced()
-					eKey, eVal = e.key, e.value
-				}
-				if !b.seq.EndRead(s1) {
-					goto slowPath
-				}
-				if (!cacheHash[K]() || eHash == hash) && eKey == *key {
-					if flags&computeSkipIfFound != 0 {
-						return eVal, true
+					if !b.seq.EndRead(s1) {
+						goto slowPath
 					}
-					if flags&computeUsesValue != 0 {
-						if val != nil {
-							if m.valEqual != nil && m.valEqual(
-								noescape(unsafe.Pointer(&eVal)),
-								noescape(val),
-							) {
-								return eVal, true
+					if e.key == *key {
+						if flags&computeSkipIfFound != 0 {
+							return e.value, true
+						}
+						if flags&computeUsesValue != 0 {
+							if val != nil {
+								if m.valEqual != nil && m.valEqual(
+									noescape(unsafe.Pointer(&e.value)),
+									noescape(val),
+								) {
+									return e.value, true
+								}
 							}
 						}
+						goto slowPath
 					}
-					goto slowPath
 				}
 			}
 			if meta&opNextMask == 0 {
@@ -711,23 +726,21 @@ findLoop:
 		meta = loadUint64Fast(&lastB.meta)
 		for marked := markZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j = firstMarkedByteIndex(marked)
-			var eKey K
-			var eVal V
 			if cacheHash[K]() {
 				slot := (*SeqLockSlot[entryWithHash[K, V]])(m.entryAt(lastB, j))
 				e := slot.Ptr()
-				if e.hash != hash {
+				if e.hash != hash || e.key != *key {
 					continue
 				}
-				eKey, eVal = e.key, e.value
+				it.entry.value, it.loaded = e.value, true
+				break findLoop
 			} else {
 				slot := (*SeqLockSlot[entryNoHash[K, V]])(m.entryAt(lastB, j))
 				e := slot.Ptr()
-				eKey, eVal = e.key, e.value
-			}
-
-			if eKey == *key {
-				it.entry.value, it.loaded = eVal, true
+				if e.key != *key {
+					continue
+				}
+				it.entry.value, it.loaded = e.value, true
 				break findLoop
 			}
 		}
