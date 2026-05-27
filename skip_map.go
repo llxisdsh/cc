@@ -467,4 +467,5 @@ func (s *SkipMap[K, V]) Size() int {
 }
 
 //go:linkname runtime_cheaprand runtime.cheaprand
+//go:nosplit
 func runtime_cheaprand() uint32
