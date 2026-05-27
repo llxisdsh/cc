@@ -1525,7 +1525,7 @@ func (b *flatBucketHeader) Lock() {
 
 //go:nosplit
 func (b *flatBucketHeader) Unlock() {
-	BitUnlockUint64(&b.meta, opLockMask)
+	BitUnlockUint64Fast(&b.meta, opLockMask)
 }
 
 //go:nosplit

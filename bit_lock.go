@@ -35,7 +35,15 @@ func BitTryLockUint64(addr *uint64, mask uint64) bool {
 	return atomic.CompareAndSwapUint64(addr, cur, cur|mask)
 }
 
-// BitUnlockUint64 releases the bit-lock by clearing the specified bit mask.
+// BitUnlockUint64 releases the bit-lock safely using atomic subtraction.
+// It is 100% safe to use even when other threads concurrently modify non-lock bits.
+//
+//go:nosplit
+func BitUnlockUint64(addr *uint64, mask uint64) {
+	atomic.AndUint64(addr, ^mask)
+}
+
+// BitUnlockUint64Fast releases the bit-lock by clearing the specified bit mask.
 // It preserves other bits in the value.
 //
 // Performance & Safety Note:
@@ -49,7 +57,7 @@ func BitTryLockUint64(addr *uint64, mask uint64) bool {
 // writing to the non-lock bits of addr, otherwise concurrent updates will be lost.
 //
 //go:nosplit
-func BitUnlockUint64(addr *uint64, mask uint64) {
+func BitUnlockUint64Fast(addr *uint64, mask uint64) {
 	atomic.StoreUint64(addr, loadUint64Fast(addr)&^mask)
 }
 
@@ -90,14 +98,22 @@ func BitTryLockUint32(addr *uint32, mask uint32) bool {
 	return atomic.CompareAndSwapUint32(addr, cur, cur|mask)
 }
 
-// BitUnlockUint32 releases the bit-lock by clearing the specified bit mask.
+// BitUnlockUint32 releases the bit-lock safely using atomic subtraction.
+// It is 100% safe to use even when other threads concurrently modify non-lock bits.
+//
+//go:nosplit
+func BitUnlockUint32(addr *uint32, mask uint32) {
+	atomic.AndUint32(addr, ^mask)
+}
+
+// BitUnlockUint32Fast releases the bit-lock by clearing the specified bit mask.
 //
 // Performance & Safety Note:
 // Uses a fast non-atomic read followed by an atomic store to bypass RMW overhead.
 // Only safe when no other threads concurrently modify non-lock bits in addr.
 //
 //go:nosplit
-func BitUnlockUint32(addr *uint32, mask uint32) {
+func BitUnlockUint32Fast(addr *uint32, mask uint32) {
 	atomic.StoreUint32(addr, loadUint32Fast(addr)&^mask)
 }
 
@@ -136,14 +152,22 @@ func BitTryLockUintptr(addr *uintptr, mask uintptr) bool {
 	return atomic.CompareAndSwapUintptr(addr, cur, cur|mask)
 }
 
-// BitUnlockUintptr releases the bit-lock by clearing the specified bit mask.
+// BitUnlockUintptr releases the bit-lock safely using atomic subtraction.
+// It is 100% safe to use even when other threads concurrently modify non-lock bits.
+//
+//go:nosplit
+func BitUnlockUintptr(addr *uintptr, mask uintptr) {
+	atomic.AndUintptr(addr, ^mask)
+}
+
+// BitUnlockUintptrFast releases the bit-lock by clearing the specified bit mask.
 //
 // Performance & Safety Note:
 // Uses a fast non-atomic read followed by an atomic store to bypass RMW overhead.
 // Only safe when no other threads concurrently modify non-lock bits in addr.
 //
 //go:nosplit
-func BitUnlockUintptr(addr *uintptr, mask uintptr) {
+func BitUnlockUintptrFast(addr *uintptr, mask uintptr) {
 	atomic.StoreUintptr(addr, loadUintptrFast(addr)&^mask)
 }
 

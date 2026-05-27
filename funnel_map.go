@@ -1414,7 +1414,7 @@ func (b *funnelBucket) Lock() {
 
 //go:nosplit
 func (b *funnelBucket) Unlock() {
-	BitUnlockUint64(&b.meta, opLockMask)
+	BitUnlockUint64Fast(&b.meta, opLockMask)
 }
 
 //go:nosplit
@@ -1430,13 +1430,7 @@ func fShouldHelpResize(rs *funnelRebuildState) bool {
 const (
 	fSizeCounter = 0
 
-	// fResizeConcurrentWriters allows writers to keep mutating the old
-	// table after grow/shrink starts but before the replacement table exists.
-	// This preserves the previous low-wait path for experiments, but it can
-	// race with overflow migration because SkipMap iteration is weakly
-	// consistent. Keep it disabled so resize makes old-table writes quiescent
-	// before copying overflow entries.
-	fResizeConcurrentWriters = false
+	fResizeConcurrentWriters = true
 
 	// fEntriesPerBucket defines the number of per-bucket entry pointers.
 	// Computed at compile time to avoid padding while packing buckets

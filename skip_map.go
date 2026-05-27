@@ -117,6 +117,12 @@ func (n *skipNode[K, V]) lock() {
 
 //go:nosplit
 func (n *skipNode[K, V]) unlock() {
+	// Must NOT use BitUnlockUint32Fast here!
+	// In SkipMap, threads concurrently call setFlag(skipFlagLinked) using
+	// atomic.OrUint32 while another thread might hold the lock bit.
+	// If the lock holder uses the Fast version (non-atomic read + atomic store),
+	// it can overwrite and permanently lose the concurrent skipFlagLinked update,
+	// leading to "Lost Update" bugs (e.g., nodes silently skipped by Range).
 	BitUnlockUint32(&n.flags, skipFlagLock)
 }
 

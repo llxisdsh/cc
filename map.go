@@ -1435,7 +1435,7 @@ func (b *bucket) Lock() {
 
 //go:nosplit
 func (b *bucket) Unlock() {
-	BitUnlockUint64(&b.meta, opLockMask)
+	BitUnlockUint64Fast(&b.meta, opLockMask)
 }
 
 //go:nosplit
