@@ -30,11 +30,12 @@ const (
 	// dwhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
 	dwhtLoadFactor = 0.625
 
-	// dwhtMaxProbeThreshold is the largest probe offset tried by default.
-	// Since probe loops include both 0 and this limit, 511 means 512 slots.
+	// dwhtMaxProbeThreshold is the default number of probe slots tried.
+	// Probe loops use probe < limit, so this value is interpreted as the
+	// number of slots scanned.
 	// If a store operation probes more than this many offsets without success,
 	// it will eagerly trigger a resize even if the table is not fully loaded.
-	dwhtMaxProbeThreshold = 511
+	dwhtMaxProbeThreshold = 512
 
 	// dwhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
@@ -233,7 +234,7 @@ func (m *DWHTMap[K, V]) Load(key K) (value V, ok bool) {
 	}
 	start := dwhtStart(h, table.mask)
 	limit := table.probeLimit
-	for probe := uintptr(0); probe <= limit; probe++ {
+	for probe := uintptr(0); probe < limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
 		state := dwhtCtrlState(ctrl)
@@ -540,7 +541,7 @@ func (m *DWHTMap[K, V]) storeInto(
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
 	limit := table.probeLimit
-	for probe := uintptr(0); probe <= limit; probe++ {
+	for probe := uintptr(0); probe < limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
 		if ctrl&dwhtFrozen != 0 {
@@ -628,7 +629,7 @@ func (m *DWHTMap[K, V]) loadAndUpdateIn(
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
 	limit := table.probeLimit
-	for probe := uintptr(0); probe <= limit; probe++ {
+	for probe := uintptr(0); probe < limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
 		if ctrl&dwhtFrozen != 0 {
@@ -676,7 +677,7 @@ func (m *DWHTMap[K, V]) deleteFrom(
 ) (dwhtStoreStatus, V, bool) {
 	start := dwhtStart(h, table.mask)
 	limit := table.probeLimit
-	for probe := uintptr(0); probe <= limit; probe++ {
+	for probe := uintptr(0); probe < limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
 		if ctrl&dwhtFrozen != 0 {
@@ -727,7 +728,7 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 	var newEntry *dwhtEntry[K, V]
 	start := dwhtStart(h, table.mask)
 	limit := table.probeLimit
-	for probe := uintptr(0); probe <= limit; probe++ {
+	for probe := uintptr(0); probe < limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
 		if ctrl&dwhtFrozen != 0 {
@@ -777,7 +778,7 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 ) (dwhtStoreStatus, bool) {
 	start := dwhtStart(h, table.mask)
 	limit := table.probeLimit
-	for probe := uintptr(0); probe <= limit; probe++ {
+	for probe := uintptr(0); probe < limit; probe++ {
 		slot := table.slot((start + probe) & table.mask)
 		ctrl := atomic.LoadUint64(&slot.ctrl)
 		if ctrl&dwhtFrozen != 0 {
@@ -863,14 +864,14 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int, hint dwhtR
 				nextLen = min(nextLen<<1, slotLen<<2)
 			}
 
-			// probeLimit is an inclusive probe offset. Never shrink a table
+			// probeLimit is the number of probe slots scanned. Never shrink a table
 			// that already widened its window; when resize was caused by
 			// exhausting the window, double the number of slots future
 			// operations may scan.
-			probeLimit := min(nextLen-1, max(uintptr(dwhtMaxProbeThreshold), old.probeLimit))
+			probeLimit := min(nextLen, max(uintptr(dwhtMaxProbeThreshold), old.probeLimit))
 			if hint == dwhtResizeProbeLimit {
-				probeSlots := (old.probeLimit + 1) << 1
-				probeLimit = max(probeLimit, min(nextLen-1, probeSlots-1))
+				probeSlots := old.probeLimit << 1
+				probeLimit = max(probeLimit, min(nextLen, probeSlots))
 			}
 			newTable := newDWHTTable[K, V](nextLen, probeLimit)
 			old.nextTable.CompareAndSwap(nil, newTable)
@@ -959,7 +960,7 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 			h := dwhtCtrlH2(ctrl)
 			destStart := dwhtStart(h, next.mask)
 			probe := uintptr(0)
-			for ; probe <= probeLimit; probe++ {
+			for ; probe < probeLimit; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
 				destCtrl := atomic.LoadUint64(&destSlot.ctrl)
 				if dwhtCtrlState(destCtrl) != dwhtStateEmpty {
@@ -973,7 +974,7 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 				}
 				break
 			}
-			if probe > probeLimit {
+			if probe >= probeLimit {
 				panic("cc: DWHTMap grow produced a full table")
 			}
 		}
@@ -989,7 +990,7 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 
 func newDWHTTable[K comparable, V any](slotLen, probeLimit uintptr) *dwhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dwhtMinSlots))
-	probeLimit = min(slotLen-1, probeLimit)
+	probeLimit = min(slotLen, probeLimit)
 	base, raw := makeDWHTSlots(slotLen)
 	growCap := int(float64(slotLen) * dwhtLoadFactor)
 	cpus := maxProcs()
