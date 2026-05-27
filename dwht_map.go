@@ -30,12 +30,20 @@ const (
 	// dwhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
 	dwhtLoadFactor = 0.625
 
-	// dwhtMaxProbeThreshold is the default number of probe slots tried.
-	// Probe loops use probe < limit, so this value is interpreted as the
-	// number of slots scanned.
-	// If a store operation probes more than this many offsets without success,
-	// it will eagerly trigger a resize even if the table is not fully loaded.
-	dwhtMaxProbeThreshold = 512
+	// dwhtMaxProbeThreshold is the baseline probe window (slots).
+	//
+	// Tail model (linear probing):
+	//   P(any run >= k) <= n * alpha^k
+	// => k*(n) = ceil( ln(n/epsilon) / -ln(alpha) ).
+	//
+	// The implementation rounds k* to power-of-two windows (nextPow2), so
+	// thresholds become stepwise. With alpha=0.625 and epsilon=1e-6:
+	//   k*(128) = 40 -> window 64,
+	// and the 64->128 step appears when n > epsilon * alpha^(-64) (~1.1e7, ~2^24).
+	//
+	// We keep a fixed baseline floor for stable read/miss locality, and rely on
+	// probe-limit-triggered growth to handle clustering or hash degeneration.
+	dwhtMaxProbeThreshold = 64
 
 	// dwhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
