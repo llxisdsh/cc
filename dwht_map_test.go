@@ -466,7 +466,7 @@ func TestDWHTMapLongProbeLimitSurvivesResize(t *testing.T) {
 		WithCapacity(1),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
 	)
-	const n = dwhtMaxProbeThreshold + 2
+	const n = dwhtMaxProbeThreshold + 1
 	for i := range n {
 		m.Store(i, i*10)
 	}
@@ -474,6 +474,87 @@ func TestDWHTMapLongProbeLimitSurvivesResize(t *testing.T) {
 		got, ok := m.Load(i)
 		if !ok || got != i*10 {
 			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", i, got, ok, i*10)
+		}
+	}
+}
+
+func TestDWHTMapLongProbeLimitRepeatedResizeBadHash(t *testing.T) {
+	m := NewDWHTMap[int, int](
+		WithCapacity(1),
+		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
+	)
+
+	// Push far beyond one probe-limit-triggered resize to stress repeated
+	// grow/copy under maximum clustering.
+	const n = dwhtMaxProbeThreshold * 16
+	for i := range n {
+		m.Store(i, i+1)
+	}
+	for i := range n {
+		got, ok := m.Load(i)
+		if !ok || got != i+1 {
+			t.Fatalf("Load(%d)=(%d,%v), want (%d,true)", i, got, ok, i+1)
+		}
+	}
+	if got := m.Size(); got != n {
+		t.Fatalf("Size()=%d, want %d", got, n)
+	}
+
+	table := m.table.Load()
+	if table == nil {
+		t.Fatal("table is nil")
+	}
+	if table.probeLimit < uintptr(dwhtMaxProbeThreshold) {
+		t.Fatalf("probeLimit=%d, want >= %d", table.probeLimit, dwhtMaxProbeThreshold)
+	}
+}
+
+func TestDWHTMapLongProbeLimitConcurrentBadHashMixed(t *testing.T) {
+	m := NewDWHTMap[int, int](
+		WithCapacity(1),
+		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
+	)
+
+	const (
+		goroutines = 24
+		keysPerG   = 64
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := range goroutines {
+		go func(id int) {
+			defer wg.Done()
+			base := id * keysPerG
+			for i := range keysPerG {
+				k := base + i
+				m.Store(k, k)
+				if got, ok := m.Load(k); !ok || got != k {
+					t.Errorf("Load(%d)=(%d,%v), want (%d,true)", k, got, ok, k)
+				}
+				if !m.CompareAndSwap(k, k, k+1) {
+					t.Errorf("CompareAndSwap(%d) failed", k)
+				}
+				if got, ok := m.LoadOrStore(k, -1); !ok || got != k+1 {
+					t.Errorf("LoadOrStore(%d)=(%d,%v), want (%d,true)", k, got, ok, k+1)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	expected := goroutines * keysPerG
+	if got := m.Size(); got != expected {
+		t.Fatalf("Size()=%d, want %d", got, expected)
+	}
+	for g := range goroutines {
+		base := g * keysPerG
+		for i := range keysPerG {
+			k := base + i
+			got, ok := m.Load(k)
+			if !ok || got != k+1 {
+				t.Fatalf("final Load(%d)=(%d,%v), want (%d,true)", k, got, ok, k+1)
+			}
 		}
 	}
 }
