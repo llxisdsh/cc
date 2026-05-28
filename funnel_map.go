@@ -1241,7 +1241,7 @@ func (m *FunnelMap[K, V]) tryResize(hint mapRebuildHint, newLen uintptr) bool {
 	// (srcIdx += baseLen) in the inner loop, a single goroutine exclusively
 	// owns the write operations for its assigned destination buckets.
 	baseLen := min(newLen, tableLen)
-	chunkSz := max(1, baseLen>>bits.TrailingZeros32(chunks))
+	chunkSz := max(uintptr(1), baseLen>>bits.TrailingZeros32(chunks))
 	rs.chunks = chunks
 	rs.chunkSz = chunkSz
 	rs.oldTable = unsafe.Pointer(table)
