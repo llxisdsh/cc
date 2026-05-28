@@ -15,7 +15,7 @@ func TestDWHTSlotStorageLayout(t *testing.T) {
 	hint := &dwhtSlotLayoutHints[idx]
 	hint.Store(dwhtSlotLayoutUnknown)
 
-	table := newDWHTTable[int, int](128, uintptr(dwhtMaxProbeThreshold))
+	table := newDWHTTable[int, int](128)
 	if uintptr(table.slotsBase)&(dwhtSlotBytes-1) != 0 {
 		t.Fatalf("slotsBase=%#x is not %d-byte aligned", uintptr(table.slotsBase), dwhtSlotBytes)
 	}
@@ -33,7 +33,7 @@ func TestDWHTSlotStorageLayout(t *testing.T) {
 		}
 	}
 
-	table = newDWHTTable[int, int](128, uintptr(dwhtMaxProbeThreshold))
+	table = newDWHTTable[int, int](128)
 	if uintptr(table.slotsBase)&(dwhtSlotBytes-1) != 0 {
 		t.Fatalf("hinted slotsBase=%#x is not %d-byte aligned", uintptr(table.slotsBase), dwhtSlotBytes)
 	}

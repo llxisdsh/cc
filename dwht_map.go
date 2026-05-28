@@ -94,18 +94,19 @@ type DWHTMap[K comparable, V any] struct {
 }
 
 type dwhtTable[K comparable, V any] struct {
-	slotsBase  unsafe.Pointer
-	mask       uintptr
-	probeLimit uintptr
-	stripeCap  int
-	growCap    int
-	chunkSz    uintptr
-	chunks     uint32
-	allocating atomic.Uint32 // 0: no one is allocating, 1: allocating
-	copyIdx    atomic.Uint32 // Next chunk index for cooperative resize
-	copyDone   atomic.Uint32 // Number of resize chunks completed
-	nextTable  atomic.Pointer[dwhtTable[K, V]]
-	slotsRaw   unsafe.Pointer // keeps the typed backing array alive for GC
+	slotsBase    unsafe.Pointer
+	mask         uintptr
+	probeLimit   uintptr
+	stripeCap    int
+	growCap      int
+	chunkSz      uintptr
+	chunks       uint32
+	allocating   atomic.Uint32 // 0: no one is allocating, 1: allocating
+	copyIdx      atomic.Uint32 // Next chunk index for cooperative resize
+	copyDone     atomic.Uint32 // Number of resize chunks completed
+	nextTable    atomic.Pointer[dwhtTable[K, V]]
+	copyMaxProbe atomic.Uintptr // Max probe distance observed during resize copy
+	slotsRaw     unsafe.Pointer // keeps the typed backing array alive for GC
 }
 
 type dwhtEntry[K comparable, V any] struct {
@@ -224,7 +225,7 @@ func (m *DWHTMap[K, V]) init(cfg *MapConfig) {
 
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = dwhtCalcSlotLen(cfg.capacity)
-	m.table.Store(newDWHTTable[K, V](m.minLen, uintptr(dwhtMaxProbeThreshold)))
+	m.table.Store(newDWHTTable[K, V](m.minLen))
 }
 
 // Load retrieves the value for a key.
@@ -509,7 +510,7 @@ func (m *DWHTMap[K, V]) Clear() {
 	if table == nil {
 		return
 	}
-	m.table.Store(newDWHTTable[K, V](m.minLen, uintptr(dwhtMaxProbeThreshold)))
+	m.table.Store(newDWHTTable[K, V](m.minLen))
 	m.size.Clear()
 }
 
@@ -758,7 +759,7 @@ func (m *DWHTMap[K, V]) compareAndSwapIn(
 				continue
 			}
 			if m.valEqual == nil {
-				panic("cc: value is not comparable; use WithValueEqual")
+				panicDWHTValueNotComparable()
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
 				return dwhtStoreOK, false
@@ -808,7 +809,7 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 				continue
 			}
 			if m.valEqual == nil {
-				panic("cc: value is not comparable; use WithValueEqual")
+				panicDWHTValueNotComparable()
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
 				return dwhtStoreOK, false
@@ -875,16 +876,7 @@ func (m *DWHTMap[K, V]) tryResize(old *dwhtTable[K, V], occupied int, hint dwhtR
 				nextLen = min(nextLen<<1, slotLen<<2)
 			}
 
-			// probeLimit is the number of probe slots scanned. Never shrink a table
-			// that already widened its window; when resize was caused by
-			// exhausting the window, double the number of slots future
-			// operations may scan.
-			probeLimit := min(nextLen, max(uintptr(dwhtMaxProbeThreshold), old.probeLimit))
-			if hint == dwhtResizeProbeLimit {
-				probeSlots := old.probeLimit << 1
-				probeLimit = max(probeLimit, min(nextLen, probeSlots))
-			}
-			newTable := newDWHTTable[K, V](nextLen, probeLimit)
+			newTable := newDWHTTable[K, V](nextLen)
 			old.nextTable.CompareAndSwap(nil, newTable)
 			next = old.nextTable.Load()
 		} else {
@@ -924,7 +916,7 @@ func (m *DWHTMap[K, V]) helpResize(old *dwhtTable[K, V]) *dwhtTable[K, V] {
 func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K, V] {
 	slotLen := old.mask + 1 // power of two
 	chunks, chunkSz := old.chunks, old.chunkSz
-	probeLimit := next.probeLimit
+	nextLen := next.mask + 1
 	// Cooperative resize.
 	// Each slot is frozen before it is copied. This removes the old global
 	// freeze barrier while preserving the key rule: a copied slot can no longer
@@ -932,6 +924,7 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 	for {
 		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= chunks {
+			// Wait for leader to finish.
 			for {
 				table := m.table.Load()
 				if table != old {
@@ -940,6 +933,7 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 				runtime.Gosched()
 			}
 		}
+		var copyMaxProbe uintptr
 		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
@@ -971,7 +965,7 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 			h := dwhtCtrlH2(ctrl)
 			destStart := dwhtStart(h, next.mask)
 			probe := uintptr(0)
-			for ; probe < probeLimit; probe++ {
+			for ; probe < nextLen; probe++ {
 				destSlot := next.slot((destStart + probe) & next.mask)
 				destCtrl := atomic.LoadUint64(&destSlot.ctrl)
 				if dwhtCtrlState(destCtrl) != dwhtStateEmpty {
@@ -985,23 +979,41 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 				}
 				break
 			}
-			if probe >= probeLimit {
-				panic("cc: DWHTMap grow produced a full table")
+			if probe >= nextLen {
+				panicDWHTGrowExceededMaxProbeThreshold()
+			}
+			if probe > copyMaxProbe {
+				copyMaxProbe = probe
+			}
+		}
+		for {
+			cur := next.copyMaxProbe.Load()
+			if copyMaxProbe <= cur {
+				break
+			}
+			if next.copyMaxProbe.CompareAndSwap(cur, copyMaxProbe) {
+				break
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
 			occupied := m.size.Reset(dwhtCntOccupied)
 			tombstones := m.size.Reset(dwhtCntTombstones)
 			m.size.Add(dwhtCntOccupied, occupied-tombstones)
+			// Adaptive probe limit: tighten based on the max probe distance
+			// actually observed during migration. This allows the window to
+			// shrink when clustering dissipates after table growth or
+			// tombstone compaction, avoiding a permanently inflated miss path.
+			observed := next.copyMaxProbe.Load() + 1
+			next.probeLimit = min(nextLen, nextPowOf2(max(observed<<1, dwhtMaxProbeThreshold)))
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
 	}
 }
 
-func newDWHTTable[K comparable, V any](slotLen, probeLimit uintptr) *dwhtTable[K, V] {
+func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, dwhtMinSlots))
-	probeLimit = min(slotLen, probeLimit)
+	probeLimit := min(slotLen, uintptr(dwhtMaxProbeThreshold))
 	base, raw := makeDWHTSlots(slotLen)
 	growCap := int(float64(slotLen) * dwhtLoadFactor)
 	cpus := maxProcs()
@@ -1050,7 +1062,8 @@ func makeDWHTSlots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer) {
 		}
 	}
 
-	panic("cc: DWHTMap slot storage is not 16-byte aligned")
+	panicDWHTSlotStorageMisaligned()
+	return nil, nil
 }
 
 func makeDWHTRawSlots(slotLen uintptr) (unsafe.Pointer, unsafe.Pointer, bool) {
@@ -1131,4 +1144,19 @@ func dwhtIntHash(x uintptr) uint32 {
 		return uint32(x) * uint32(0x9e3779b9)
 	}
 	return uint32((uint64(x) * uint64(0x9e3779b97f4a7c15)) >> 32)
+}
+
+//go:noinline
+func panicDWHTValueNotComparable() {
+	panic("cc: value is not comparable; use WithValueEqual")
+}
+
+//go:noinline
+func panicDWHTGrowExceededMaxProbeThreshold() {
+	panic("cc: DWHTMap grow exceeded max probe threshold")
+}
+
+//go:noinline
+func panicDWHTSlotStorageMisaligned() {
+	panic("cc: DWHTMap slot storage is not 16-byte aligned")
 }

@@ -88,17 +88,18 @@ type OFHTMap[K comparable, V any] struct {
 }
 
 type ofhtTable[K comparable, V any] struct {
-	slots      unsafeSlice[ofhtSlot[K, V]]
-	mask       uintptr
-	probeLimit uintptr
-	stripeCap  int
-	growCap    int
-	chunkSz    uintptr
-	chunks     uint32
-	allocating atomic.Uint32 // 0: no one is allocating, 1: allocating
-	copyIdx    atomic.Uint32 // Next chunk index for cooperative resize
-	copyDone   atomic.Uint32 // Number of resize chunks completed
-	nextTable  atomic.Pointer[ofhtTable[K, V]]
+	slots        unsafeSlice[ofhtSlot[K, V]]
+	mask         uintptr
+	probeLimit   uintptr
+	stripeCap    int
+	growCap      int
+	chunkSz      uintptr
+	chunks       uint32
+	allocating   atomic.Uint32 // 0: no one is allocating, 1: allocating
+	copyIdx      atomic.Uint32 // Next chunk index for cooperative resize
+	copyDone     atomic.Uint32 // Number of resize chunks completed
+	nextTable    atomic.Pointer[ofhtTable[K, V]]
+	copyMaxProbe atomic.Uintptr // Max probe distance observed during resize copy
 }
 
 type ofhtSlot[K comparable, V any] struct {
@@ -181,7 +182,7 @@ func (m *OFHTMap[K, V]) init(cfg *MapConfig) {
 
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = ofhtCalcSlotLen(cfg.capacity)
-	m.table.Store(newOFHTTable[K, V](m.minLen, uintptr(ofhtMaxProbeThreshold)))
+	m.table.Store(newOFHTTable[K, V](m.minLen))
 }
 
 // Load retrieves the value for a key.
@@ -484,7 +485,7 @@ func (m *OFHTMap[K, V]) Clear() {
 	if table == nil {
 		return
 	}
-	m.table.Store(newOFHTTable[K, V](m.minLen, uintptr(ofhtMaxProbeThreshold)))
+	m.table.Store(newOFHTTable[K, V](m.minLen))
 	m.size.Clear()
 }
 
@@ -755,7 +756,7 @@ func (m *OFHTMap[K, V]) compareAndSwapIn(
 				continue
 			}
 			if m.valEqual == nil {
-				panic("cc: value is not comparable; use WithValueEqual")
+				panicOFHTValueNotComparable()
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(old))) {
 				return ofhtStoreOK, false
@@ -812,7 +813,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 				continue
 			}
 			if m.valEqual == nil {
-				panic("cc: value is not comparable; use WithValueEqual")
+				panicOFHTValueNotComparable()
 			}
 			if !m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(old))) {
 				return ofhtStoreOK, false
@@ -885,16 +886,7 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int, hint ofhtR
 				nextLen = min(nextLen<<1, slotLen<<2)
 			}
 
-			// probeLimit is the number of probe slots scanned. Never shrink a table
-			// that already widened its window; when resize was caused by
-			// exhausting the window, double the number of slots future
-			// operations may scan.
-			probeLimit := min(nextLen, max(uintptr(ofhtMaxProbeThreshold), old.probeLimit))
-			if hint == ofhtResizeProbeLimit {
-				probeSlots := old.probeLimit << 1
-				probeLimit = max(probeLimit, min(nextLen, probeSlots))
-			}
-			newTable := newOFHTTable[K, V](nextLen, probeLimit)
+			newTable := newOFHTTable[K, V](nextLen)
 			old.nextTable.Store(newTable)
 			next = newTable
 		} else {
@@ -937,7 +929,7 @@ func (m *OFHTMap[K, V]) helpResize(old *ofhtTable[K, V]) *ofhtTable[K, V] {
 func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K, V] {
 	slotLen := old.mask + 1
 	chunks, chunkSz := old.chunks, old.chunkSz
-	probeLimit := next.probeLimit
+	nextLen := next.mask + 1
 
 	// Cooperative resize.
 	// Each slot is frozen before it is copied. This removes the old global
@@ -946,6 +938,7 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 	for {
 		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= chunks {
+			// Wait for leader to finish.
 			for {
 				table := m.table.Load()
 				if table != old {
@@ -954,6 +947,7 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 				runtime.Gosched()
 			}
 		}
+		var copyMaxProbe uintptr
 		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
 		for i := start; i < end; i++ {
@@ -980,7 +974,7 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 				// keep the copying logic close to the source.
 				destStart := ofhtStart(h, next.mask)
 				probe := uintptr(0)
-				for ; probe < probeLimit; probe++ {
+				for ; probe < nextLen; probe++ {
 					destSlot := next.slots.At((destStart + probe) & next.mask)
 					destCtrl := destSlot.ctrl.Load()
 					if ofhtCtrlState(destCtrl) != ofhtStateEmpty {
@@ -997,24 +991,42 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 					destSlot.val.WriteUnfenced(v)
 					break // Successfully copied this entry
 				}
-				if probe >= probeLimit {
-					panic("cc: OFHTMap grow exceeded max probe threshold")
+				if probe >= nextLen {
+					panicOFHTGrowExceededMaxProbeThreshold()
 				}
+				if probe > copyMaxProbe {
+					copyMaxProbe = probe
+				}
+			}
+		}
+		for {
+			cur := next.copyMaxProbe.Load()
+			if copyMaxProbe <= cur {
+				break
+			}
+			if next.copyMaxProbe.CompareAndSwap(cur, copyMaxProbe) {
+				break
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
 			occupied := m.size.Reset(ofhtCntOccupied)
 			tombstones := m.size.Reset(ofhtCntTombstones)
 			m.size.Add(ofhtCntOccupied, occupied-tombstones)
+			// Adaptive probe limit: tighten based on the max probe distance
+			// actually observed during migration. This allows the window to
+			// shrink when clustering dissipates after table growth or
+			// tombstone compaction, avoiding a permanently inflated miss path.
+			observed := next.copyMaxProbe.Load() + 1
+			next.probeLimit = min(nextLen, nextPowOf2(max(observed<<1, ofhtMaxProbeThreshold)))
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
 	}
 }
 
-func newOFHTTable[K comparable, V any](slotLen, probeLimit uintptr) *ofhtTable[K, V] {
+func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
-	probeLimit = min(slotLen, probeLimit)
+	probeLimit := min(slotLen, uintptr(ofhtMaxProbeThreshold))
 	growCap := int(float64(slotLen) * ofhtLoadFactor)
 	cpus := maxProcs()
 	roundedSizeLen := nextPowOf2(cpus)
@@ -1091,4 +1103,14 @@ func ofhtIntHash(x uintptr) uint32 {
 		return uint32(x) * uint32(0x9e3779b9)
 	}
 	return uint32((uint64(x) * uint64(0x9e3779b97f4a7c15)) >> 32)
+}
+
+//go:noinline
+func panicOFHTValueNotComparable() {
+	panic("cc: value is not comparable; use WithValueEqual")
+}
+
+//go:noinline
+func panicOFHTGrowExceededMaxProbeThreshold() {
+	panic("cc: OFHTMap grow exceeded max probe threshold")
 }
