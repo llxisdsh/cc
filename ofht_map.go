@@ -22,6 +22,10 @@ const (
 	// while a resize leader is allocating/publishing the new table. Keep it off
 	// when old-table writes or later migration work are expected to be expensive.
 	ofhtEnableStoreInGrow = false
+	// ofhtEnableSameKeyTombstoneReuse lets a Store revive a tombstone left by
+	// the same key. When disabled, deletes clear both key and value while the
+	// tombstone remains as a probe-continuation marker until resize compaction.
+	ofhtEnableSameKeyTombstoneReuse = true
 )
 
 const (
@@ -69,10 +73,11 @@ const (
 //   - Resize allocates a next table, cooperatively freezes old slots, copies
 //     frozen full slots, waits for all resize chunks to finish, then publishes
 //     the new table.
-//   - Deleted slots remain tombstones. Only the original key may revive its
-//     own tombstone; arbitrary tombstone reuse could hide an equal key later
-//     in the probe sequence. Tombstones count as occupied until resize copy
-//     compacts them away. Resize sizes the next table from live entries, so
+//   - Deleted slots remain tombstones. With same-key tombstone reuse enabled,
+//     the slot keeps its key but clears its value so only the original key may
+//     revive its own tombstone; arbitrary tombstone reuse could hide an equal
+//     key later in the probe sequence. Tombstones count as occupied until resize
+//     copy compacts them away. Resize sizes the next table from live entries, so
 //     tombstone-heavy rebuilds may shrink after compaction.
 //   - Probing is bounded by a per-table probeLimit. Exhausting it triggers a
 //     resize, and the published next-table limit is derived from the largest
@@ -579,6 +584,9 @@ func (m *OFHTMap[K, V]) storeInto(
 			slot.ctrl.Store(ofhtCtrlUpdate(busyCtrl))
 			return ofhtStoreOK, *val, true
 		} else if state == ofhtStateDeleted {
+			if !ofhtEnableSameKeyTombstoneReuse {
+				continue
+			}
 			// Only the same key may revive its own tombstone. Reusing an
 			// arbitrary Deleted slot is unsafe: another goroutine may have
 			// inserted the same key earlier in the probe sequence meanwhile.
@@ -717,8 +725,9 @@ func (m *OFHTMap[K, V]) deleteFrom(
 				prev = slot.val.ReadUnfenced()
 			}
 
-			// Keep key attached to the tombstone. The key is needed to allow
-			// same-key revival without permitting arbitrary tombstone reuse.
+			if !ofhtEnableSameKeyTombstoneReuse {
+				slot.key.WriteUnfenced(*new(K))
+			}
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(ofhtCntTombstones, 1)
@@ -835,8 +844,9 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 				continue
 			}
 
-			// Keep key attached to the tombstone for the same reason as
-			// deleteFrom: only the original key may revive this slot.
+			if !ofhtEnableSameKeyTombstoneReuse {
+				slot.key.WriteUnfenced(*new(K))
+			}
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
 			m.size.Add(ofhtCntTombstones, 1)

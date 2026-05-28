@@ -435,6 +435,9 @@ func TestDWHTMapClearBasic(t *testing.T) {
 }
 
 func TestDWHTMapSameKeyTombstoneReuse(t *testing.T) {
+	if !dwhtEnableSameKeyTombstoneReuse {
+		t.Skip("same-key tombstone reuse disabled")
+	}
 	m := NewDWHTMap[int, int](WithCapacity(1))
 	for i := range 10000 {
 		actual, loaded := m.LoadOrStore(7, i)

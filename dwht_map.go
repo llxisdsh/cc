@@ -24,6 +24,10 @@ const (
 	// while a resize leader is allocating/publishing the new table. Keep it off
 	// when old-table writes or later migration work are expected to be expensive.
 	dwhtEnableStoreInGrow = true
+	// dwhtEnableSameKeyTombstoneReuse lets a Store revive a tombstone left by
+	// the same key. When enabled, deletes keep only a key-bearing zero-value
+	// entry so the deleted value can be released before resize compaction.
+	dwhtEnableSameKeyTombstoneReuse = true
 )
 
 const (
@@ -72,10 +76,11 @@ const (
 //   - Resize allocates a next table, cooperatively freezes old slots, copies
 //     frozen full slots by reusing their entry pointers, waits for all resize
 //     chunks to finish, then publishes the new table.
-//   - Deleted slots remain tombstones. Only the original key may revive its
-//     own tombstone; arbitrary tombstone reuse could hide an equal key later
-//     in the probe sequence. Tombstones count as occupied until resize copy
-//     compacts them away. Resize sizes the next table from live entries, so
+//   - Deleted slots remain tombstones. With same-key tombstone reuse enabled,
+//     the slot keeps a key-bearing zero-value entry so only the original key may
+//     revive its own tombstone; arbitrary tombstone reuse could hide an equal
+//     key later in the probe sequence. Tombstones count as occupied until resize
+//     copy compacts them away. Resize sizes the next table from live entries, so
 //     tombstone-heavy rebuilds may shrink after compaction.
 //   - Probing is bounded by a per-table probeLimit. Exhausting it triggers a
 //     resize, and the published next-table limit is derived from the largest
@@ -601,6 +606,9 @@ func (m *DWHTMap[K, V]) storeInto(
 			}
 			return dwhtStoreOK, *val, true
 		} else if state == dwhtStateDeleted {
+			if !dwhtEnableSameKeyTombstoneReuse {
+				continue
+			}
 			// Only the same key may revive its own tombstone. Reusing an
 			// arbitrary Deleted slot is unsafe: another goroutine may have
 			// inserted the same key earlier in the probe sequence meanwhile.
@@ -720,17 +728,21 @@ func (m *DWHTMap[K, V]) deleteFrom(
 			}
 
 			newCtrl := dwhtCtrlDelete(ctrl)
-			// Keep entry attached to the tombstone. The key is needed to allow
-			// same-key revival without permitting arbitrary tombstone reuse.
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, entry) {
-				probe--
-				continue
-			}
-
 			var prev V
 			if needValue {
 				prev = e.val
 			}
+			var deletedEntry unsafe.Pointer
+			if dwhtEnableSameKeyTombstoneReuse {
+				// Keep only the key attached to the tombstone. The old value can
+				// be released while the key still prevents arbitrary reuse.
+				deletedEntry = unsafe.Pointer(&dwhtEntry[K, V]{key: e.key})
+			}
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, deletedEntry) {
+				probe--
+				continue
+			}
+
 			m.size.Add(dwhtCntTombstones, 1)
 			return dwhtStoreOK, prev, true
 		} else if state == dwhtStateEmpty {
@@ -827,9 +839,13 @@ func (m *DWHTMap[K, V]) compareAndDeleteIn(
 			}
 
 			newCtrl := dwhtCtrlDelete(ctrl)
-			// Keep entry attached to the tombstone for the same reason as
-			// deleteFrom: only the original key may revive this slot.
-			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, entry) {
+			var deletedEntry unsafe.Pointer
+			if dwhtEnableSameKeyTombstoneReuse {
+				// Keep only the key attached to the tombstone for the same reason
+				// as deleteFrom: only the original key may revive this slot.
+				deletedEntry = unsafe.Pointer(&dwhtEntry[K, V]{key: e.key})
+			}
+			if !asm.DWCAS(unsafe.Pointer(slot), ctrl, entry, newCtrl, deletedEntry) {
 				probe--
 				continue
 			}

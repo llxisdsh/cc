@@ -398,6 +398,9 @@ func TestOFHTMapClearBasic(t *testing.T) {
 }
 
 func TestOFHTMapSameKeyTombstoneReuse(t *testing.T) {
+	if !ofhtEnableSameKeyTombstoneReuse {
+		t.Skip("same-key tombstone reuse disabled")
+	}
 	m := NewOFHTMap[int, int](WithCapacity(1))
 	for i := range 10000 {
 		actual, loaded := m.LoadOrStore(7, i)
