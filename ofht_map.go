@@ -69,12 +69,23 @@ const (
 //   - Resize allocates a next table, cooperatively freezes old slots, copies
 //     frozen full slots, waits for all resize chunks to finish, then publishes
 //     the new table.
+//   - Deleted slots remain tombstones. Only the original key may revive its
+//     own tombstone; arbitrary tombstone reuse could hide an equal key later
+//     in the probe sequence. Tombstones count as occupied until resize copy
+//     compacts them away. Resize sizes the next table from live entries, so
+//     tombstone-heavy rebuilds may shrink after compaction.
+//   - Probing is bounded by a per-table probeLimit. Exhausting it triggers a
+//     resize, and the published next-table limit is derived from the largest
+//     probe distance observed during copy.
 //
-// OFHTMap avoids root-bucket locks and per-entry heap allocation, but updates
-// to a slot are not single-instruction atomic because generic K/V values are
-// stored inline.
+// Compared with [DWHTMap], OFHTMap avoids per-entry heap allocation by storing
+// keys and values inline. Slot updates use the optimistic busy-state protocol
+// described above instead of publishing a control word and entry pointer with
+// double-word CAS.
 //
-// OFHTMap is zero-value ready, but is intentionally excluded from race builds.
+// OFHTMap is zero-value ready.
+// This implementation is built only for !race targets; race builds expose
+// OFHTMap as an alias of [Map].
 type OFHTMap[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[ofhtTable[K, V]]

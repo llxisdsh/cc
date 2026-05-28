@@ -72,15 +72,26 @@ const (
 //   - Resize allocates a next table, cooperatively freezes old slots, copies
 //     frozen full slots by reusing their entry pointers, waits for all resize
 //     chunks to finish, then publishes the new table.
+//   - Deleted slots remain tombstones. Only the original key may revive its
+//     own tombstone; arbitrary tombstone reuse could hide an equal key later
+//     in the probe sequence. Tombstones count as occupied until resize copy
+//     compacts them away. Resize sizes the next table from live entries, so
+//     tombstone-heavy rebuilds may shrink after compaction.
+//   - Probing is bounded by a per-table probeLimit. Exhausting it triggers a
+//     resize, and the published next-table limit is derived from the largest
+//     probe distance observed during copy.
 //
-// Compared with [OFHTMap], DWHTMap pays one heap object per live entry, but slot
-// publication is atomic and readers never observe a busy inline-update state.
+// Compared with [OFHTMap], DWHTMap pays one heap object per live entry, but it
+// publishes each slot transition as a single double-word CAS over the control
+// word and entry pointer.
 //
-// DWHTMap is zero-value ready, but is intentionally excluded from race builds
-// and currently requires amd64 or arm64 DWCAS support.
+// DWHTMap is zero-value ready.
+// This implementation is built only for !race amd64/arm64 targets with DWCAS
+// support; other builds expose DWHTMap as an alias of [Map].
 //
-// WARNING on ARM64: The asm implementation relies on the ARMv8.1-A LSE CASPAL instruction.
-// Running on older ARMv8.0 hardware without LSE will trigger a SIGILL (Illegal Instruction) crash.
+// WARNING on ARM64: The asm implementation relies on the ARMv8.1-A LSE CASPAL
+// instruction. Running on older ARMv8.0 hardware without LSE will trigger a
+// SIGILL (Illegal Instruction) crash.
 type DWHTMap[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[dwhtTable[K, V]]
