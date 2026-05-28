@@ -64,7 +64,7 @@ func (e *Latch) slowWait() {
 		}
 
 		if (s >> 1) == 0x7FFFFFFF {
-			panic("cc: Latch waiter overflow")
+			panicLatchWaiterOverflow()
 		}
 
 		if e.state.CompareAndSwap(s, s+latchOneWaiter) {
@@ -72,4 +72,9 @@ func (e *Latch) slowWait() {
 			return
 		}
 	}
+}
+
+//go:noinline
+func panicLatchWaiterOverflow() {
+	panic("cc: Latch waiter overflow")
 }

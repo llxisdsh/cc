@@ -149,7 +149,7 @@ func (e *Gate) slowWait() {
 
 		// Not Open. Add to waiter count.
 		if (s & gateCntMsk) == gateCntMsk {
-			panic("cc: Gate waiter overflow")
+			panicGateWaiterOverflow()
 		}
 		if e.state.CompareAndSwap(s, s+1) {
 			gen := (s >> 32) & 0x7FFFFFFF
@@ -169,4 +169,9 @@ func (e *Gate) slowWait() {
 // IsOpen returns true if the gate is currently opened.
 func (e *Gate) IsOpen() bool {
 	return e.state.Load()&gateOpenBit != 0
+}
+
+//go:noinline
+func panicGateWaiterOverflow() {
+	panic("cc: Gate waiter overflow")
 }

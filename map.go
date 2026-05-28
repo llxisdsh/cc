@@ -462,7 +462,7 @@ func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("called CompareAndSwap when value is not of comparable type")
+		panicMapCompareAndSwapValueNotComparable()
 	}
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
@@ -487,7 +487,7 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("called CompareAndDelete when value is not of comparable type")
+		panicMapCompareAndDeleteValueNotComparable()
 	}
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
@@ -1441,4 +1441,14 @@ func (b *bucket) Unlock() {
 //go:nosplit
 func (b *bucket) UnlockWithMeta(meta uint64) {
 	BitUnlockWithStoreUint64(&b.meta, opLockMask, meta)
+}
+
+//go:noinline
+func panicMapCompareAndSwapValueNotComparable() {
+	panic("called CompareAndSwap when value is not of comparable type")
+}
+
+//go:noinline
+func panicMapCompareAndDeleteValueNotComparable() {
+	panic("called CompareAndDelete when value is not of comparable type")
 }

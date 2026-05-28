@@ -43,10 +43,10 @@ type Rally struct {
 // the caller was the last to arrive (the one who tripped the barrier).
 func (b *Rally) Meet(parties int) int {
 	if parties <= 0 {
-		panic("cc: parties must be positive")
+		panicRallyPartiesMustBePositive()
 	}
 	if uint64(parties) > (1<<32)-1 {
-		panic("cc: parties exceeds max uint32")
+		panicRallyPartiesExceedsMaxUint32()
 	}
 
 	// Fast path for single party
@@ -79,4 +79,14 @@ func (b *Rally) Meet(parties int) int {
 			return int(count)
 		}
 	}
+}
+
+//go:noinline
+func panicRallyPartiesMustBePositive() {
+	panic("cc: parties must be positive")
+}
+
+//go:noinline
+func panicRallyPartiesExceedsMaxUint32() {
+	panic("cc: parties exceeds max uint32")
 }

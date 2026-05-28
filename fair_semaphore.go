@@ -81,7 +81,7 @@ func (s *FairSemaphore) Release(n int64) {
 	s.mu.Lock()
 	if s.permits > 0 && s.permits+n < 0 {
 		s.mu.Unlock()
-		panic("cc: FairSemaphore permit overflow")
+		panicFairSemaphorePermitOverflow()
 	}
 	s.permits += n
 	for s.head != nil && s.permits >= s.head.n {
@@ -94,4 +94,9 @@ func (s *FairSemaphore) Release(n int64) {
 		w.sema.Release()
 	}
 	s.mu.Unlock()
+}
+
+//go:noinline
+func panicFairSemaphorePermitOverflow() {
+	panic("cc: FairSemaphore permit overflow")
 }

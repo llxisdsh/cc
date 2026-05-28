@@ -504,7 +504,7 @@ func (m *FlatMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("called CompareAndSwap when value is not of comparable type")
+		panicFlatMapCompareAndSwapValueNotComparable()
 	}
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
@@ -529,7 +529,7 @@ func (m *FlatMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("called CompareAndDelete when value is not of comparable type")
+		panicFlatMapCompareAndDeleteValueNotComparable()
 	}
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
@@ -1566,4 +1566,14 @@ func (b *flatBucketHeader) UnlockWithMeta(meta uint64) {
 //go:nosplit
 func flatShouldHelpResize[K comparable, V any](rs *flatRebuildState[K, V]) bool {
 	return !flatEnableStoreInGrow || rs.newTableSeq.Ready()
+}
+
+//go:noinline
+func panicFlatMapCompareAndSwapValueNotComparable() {
+	panic("called CompareAndSwap when value is not of comparable type")
+}
+
+//go:noinline
+func panicFlatMapCompareAndDeleteValueNotComparable() {
+	panic("called CompareAndDelete when value is not of comparable type")
 }

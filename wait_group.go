@@ -48,10 +48,10 @@ func (wg *WaitGroup) Add(delta int) {
 
 		newCnt := cnt + int64(delta)
 		if newCnt < 0 {
-			panic("cc: negative WaitGroup counter")
+			panicWaitGroupNegativeCounter()
 		}
 		if newCnt >= (1 << taskBits) {
-			panic("cc: WaitGroup counter overflow")
+			panicWaitGroupCounterOverflow()
 		}
 
 		next := state
@@ -114,7 +114,7 @@ func (wg *WaitGroup) slowWait() {
 
 		waiters := (state & waiterMask) >> taskBits
 		if waiters == (1<<waiterBits)-1 {
-			panic("cc: WaitGroup waiter overflow")
+			panicWaitGroupWaiterOverflow()
 		}
 
 		// Increment waiter count
@@ -154,4 +154,19 @@ func (wg *WaitGroup) Waiters() int {
 // It does not block.
 func (wg *WaitGroup) TryWait() bool {
 	return wg.Count() == 0
+}
+
+//go:noinline
+func panicWaitGroupNegativeCounter() {
+	panic("cc: negative WaitGroup counter")
+}
+
+//go:noinline
+func panicWaitGroupCounterOverflow() {
+	panic("cc: WaitGroup counter overflow")
+}
+
+//go:noinline
+func panicWaitGroupWaiterOverflow() {
+	panic("cc: WaitGroup waiter overflow")
 }

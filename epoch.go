@@ -55,7 +55,7 @@ func (e *Epoch) Add(delta uint64) uint64 {
 	// Check/Predict overflow before adding
 	oldVal := e.state.Load()
 	if oldVal > ^uint64(0)-delta {
-		panic("cc: Epoch counter overflow")
+		panicEpochCounterOverflow()
 	}
 
 	newVal := e.state.Add(delta)
@@ -133,4 +133,9 @@ func (e *Epoch) slowWaitAtLeast(target uint64) {
 
 	// 3. Sleep
 	w.sema.Acquire()
+}
+
+//go:noinline
+func panicEpochCounterOverflow() {
+	panic("cc: Epoch counter overflow")
 }

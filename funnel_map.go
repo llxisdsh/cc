@@ -424,7 +424,7 @@ func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("called CompareAndSwap when value is not of comparable type")
+		panicFunnelMapCompareAndSwapValueNotComparable()
 	}
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
@@ -449,7 +449,7 @@ func (m *FunnelMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("called CompareAndDelete when value is not of comparable type")
+		panicFunnelMapCompareAndDeleteValueNotComparable()
 	}
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
@@ -1485,4 +1485,14 @@ func fCalcTableLen(capacity int) uintptr {
 //go:nosplit
 func fShouldHelpResize(rs *funnelRebuildState) bool {
 	return !funnelEnableStoreInGrow || loadPtr(&rs.newTable) != nil
+}
+
+//go:noinline
+func panicFunnelMapCompareAndSwapValueNotComparable() {
+	panic("called CompareAndSwap when value is not of comparable type")
+}
+
+//go:noinline
+func panicFunnelMapCompareAndDeleteValueNotComparable() {
+	panic("called CompareAndDelete when value is not of comparable type")
 }

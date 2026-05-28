@@ -58,7 +58,7 @@ func (g *OnceGroup[K, V]) Do(
 		c.latch.Wait()
 		var e *panicError
 		if errors.As(c.err, &e) {
-			panic(e)
+			panicOnceGroup(e)
 		} else if errors.Is(c.err, errGoexit) {
 			runtime.Goexit()
 		}
@@ -100,7 +100,7 @@ func (g *OnceGroup[K, V]) DoChan(
 			var e *panicError
 			switch {
 			case errors.As(c.err, &e):
-				go panic(e)
+				go panicOnceGroup(e)
 				select {}
 			case errors.Is(c.err, errGoexit):
 				return
@@ -182,10 +182,10 @@ func (g *OnceGroup[K, V]) doCall(
 			// Match x/sync: ensure panic is unrecoverable and visible.
 			if len(chs) > 0 {
 				//goland:noinspection All
-				go panic(e)
+				go panicOnceGroup(e)
 				select {}
 			} else {
-				panic(e)
+				panicOnceGroup(e)
 			}
 		case errors.Is(c.err, errGoexit):
 			// Primary goroutine already Goexit'ed; nothing to do here.
@@ -255,3 +255,8 @@ func newPanicError(v any) error {
 }
 
 var errGoexit = errors.New("runtime.Goexit was called")
+
+//go:noinline
+func panicOnceGroup(e *panicError) {
+	panic(e)
+}

@@ -49,7 +49,7 @@ func (p *Phaser) Register() int {
 	p.mu.Lock()
 	if (p.state.Load()>>16)&0xFFFF == 0xFFFF {
 		p.mu.Unlock()
-		panic("cc: Phaser parties overflow")
+		panicPhaserPartiesOverflow()
 	}
 	p.state.Add(1 << 16) // Increment parties
 	phase := int(p.state.Load() >> 32)
@@ -168,4 +168,9 @@ func (p *Phaser) ArriveAndDeregister() int {
 	p.state.Store(uint64(phase)<<32 | uint64(parties)<<16 | uint64(arrived))
 	p.mu.Unlock()
 	return phase
+}
+
+//go:noinline
+func panicPhaserPartiesOverflow() {
+	panic("cc: Phaser parties overflow")
 }
