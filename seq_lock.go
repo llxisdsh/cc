@@ -261,12 +261,51 @@ func (slot *SeqLockSlot[T]) ReadUnfenced() (v T) {
 				q[1] = atomic.LoadUintptr(&p[1])
 				q[2] = atomic.LoadUintptr(&p[2])
 				q[3] = atomic.LoadUintptr(&p[3])
+			case 5:
+				p := (*[5]uintptr)(unsafe.Pointer(&slot.buf))
+				q := (*[5]uintptr)(unsafe.Pointer(&v))
+				q[0] = atomic.LoadUintptr(&p[0])
+				q[1] = atomic.LoadUintptr(&p[1])
+				q[2] = atomic.LoadUintptr(&p[2])
+				q[3] = atomic.LoadUintptr(&p[3])
+				q[4] = atomic.LoadUintptr(&p[4])
+			case 6:
+				p := (*[6]uintptr)(unsafe.Pointer(&slot.buf))
+				q := (*[6]uintptr)(unsafe.Pointer(&v))
+				q[0] = atomic.LoadUintptr(&p[0])
+				q[1] = atomic.LoadUintptr(&p[1])
+				q[2] = atomic.LoadUintptr(&p[2])
+				q[3] = atomic.LoadUintptr(&p[3])
+				q[4] = atomic.LoadUintptr(&p[4])
+				q[5] = atomic.LoadUintptr(&p[5])
+			case 7:
+				p := (*[7]uintptr)(unsafe.Pointer(&slot.buf))
+				q := (*[7]uintptr)(unsafe.Pointer(&v))
+				q[0] = atomic.LoadUintptr(&p[0])
+				q[1] = atomic.LoadUintptr(&p[1])
+				q[2] = atomic.LoadUintptr(&p[2])
+				q[3] = atomic.LoadUintptr(&p[3])
+				q[4] = atomic.LoadUintptr(&p[4])
+				q[5] = atomic.LoadUintptr(&p[5])
+				q[6] = atomic.LoadUintptr(&p[6])
+			case 8:
+				p := (*[8]uintptr)(unsafe.Pointer(&slot.buf))
+				q := (*[8]uintptr)(unsafe.Pointer(&v))
+				q[0] = atomic.LoadUintptr(&p[0])
+				q[1] = atomic.LoadUintptr(&p[1])
+				q[2] = atomic.LoadUintptr(&p[2])
+				q[3] = atomic.LoadUintptr(&p[3])
+				q[4] = atomic.LoadUintptr(&p[4])
+				q[5] = atomic.LoadUintptr(&p[5])
+				q[6] = atomic.LoadUintptr(&p[6])
+				q[7] = atomic.LoadUintptr(&p[7])
 			default:
-				for i := range n {
-					off := i * ws
-					src := (*uintptr)(unsafe.Add(unsafe.Pointer(&slot.buf), off))
-					dst := (*uintptr)(unsafe.Add(unsafe.Pointer(&v), off))
-					*dst = atomic.LoadUintptr(src)
+				src := unsafe.Pointer(&slot.buf)
+				dst := unsafe.Pointer(&v)
+				for range n {
+					*(*uintptr)(dst) = atomic.LoadUintptr((*uintptr)(src))
+					src = unsafe.Add(src, ws)
+					dst = unsafe.Add(dst, ws)
 				}
 			}
 			return v
