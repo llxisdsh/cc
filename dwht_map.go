@@ -183,7 +183,8 @@ const (
 	//   bits 34..62: sequence, bumped on every slot transition
 	//   bit 63:      frozen during resize
 	// The sequence is part of the DWCAS expected ctrl word, so stale CAS
-	// attempts cannot succeed after a delete/revive/update cycle.
+	// attempts are rejected after a delete/revive/update cycle unless the
+	// per-slot sequence wraps back to the same value.
 	dwhtSeqShift = 34
 	dwhtSeqInc   = uint64(1) << dwhtSeqShift
 
