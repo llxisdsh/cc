@@ -307,6 +307,10 @@ slowPath:
 		emptyB *bucket
 		emptyI uintptr
 	)
+	// Build the replacement entry after resize/table validation. Moving this
+	// before the bucket lock can shorten the critical section for distributed
+	// writers, but it also front-loads allocation pressure on hot buckets and
+	// retry paths; benchmarks showed that tradeoff is not a stable win.
 	var newEntry unsafe.Pointer
 	if cacheHash[K]() {
 		newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: key, value: value})
@@ -1326,6 +1330,9 @@ func (m *Map[K, V]) copyBucket(
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
 		// In Grow, runs once. In Shrink, runs twice (usually).
+		// Shrink could avoid rehashing by using destination i and recovering h2
+		// from source meta, but keeping one loop avoids a grow-path branch or a
+		// duplicated migration body.
 		for srcIdx := i; srcIdx < oldLen; srcIdx += baseLen {
 			srcB := table.buckets.At(srcIdx)
 			srcB.Lock()

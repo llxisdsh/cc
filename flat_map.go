@@ -1424,6 +1424,9 @@ func (m *FlatMap[K, V]) copyBucket(
 	for i := start; i < end; i++ {
 		// Visit all source buckets that map to this destination bucket.
 		// In Grow, runs once. In Shrink, runs twice (usually).
+		// Shrink could avoid rehashing by using destination i and recovering h2
+		// from source meta, but keeping one loop avoids a grow-path branch or a
+		// duplicated migration body.
 		for srcIdx := i; srcIdx < oldLen; srcIdx += baseLen {
 			srcB := m.bucketAt(table.buckets, srcIdx)
 			srcB.Lock()
