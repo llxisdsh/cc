@@ -50,6 +50,79 @@ func TestSkipMap_Basic(t *testing.T) {
 	}
 }
 
+func TestSkipMap_ZeroValue(t *testing.T) {
+	var m SkipMap[int, string]
+
+	if m.Size() != 0 {
+		t.Fatalf("expected zero-value map size 0, got %d", m.Size())
+	}
+	if v, ok := m.Load(1); ok || v != "" {
+		t.Fatalf("expected missing zero value, got %q: %v", v, ok)
+	}
+	if m.Delete(1) {
+		t.Fatalf("expected delete on zero-value map to return false")
+	}
+	m.Range(func(key int, value string) bool {
+		t.Fatalf("empty zero-value map should not iterate")
+		return true
+	})
+	if m.head != nil {
+		t.Fatalf("read-only zero-value operations should not initialize head")
+	}
+
+	m.Store(1, "a")
+	if v, ok := m.Load(1); !ok || v != "a" {
+		t.Fatalf("expected 1: a, got %q: %v", v, ok)
+	}
+
+	if v, loaded := m.LoadOrStore(1, "b"); !loaded || v != "a" {
+		t.Fatalf("expected existing 1: a, got %q: %v", v, loaded)
+	}
+	if v, loaded := m.LoadOrStore(2, "b"); loaded || v != "b" {
+		t.Fatalf("expected stored 2: b, got %q: %v", v, loaded)
+	}
+
+	seen := 0
+	m.Range(func(key int, value string) bool {
+		seen++
+		return true
+	})
+	if seen != 2 {
+		t.Fatalf("expected 2 range entries, got %d", seen)
+	}
+
+	if v, ok := m.LoadAndDelete(1); !ok || v != "a" {
+		t.Fatalf("expected deleted 1: a, got %q: %v", v, ok)
+	}
+	if m.Size() != 1 {
+		t.Fatalf("expected size 1 after delete, got %d", m.Size())
+	}
+}
+
+func TestSkipMap_ZeroValueConcurrentFirstUse(t *testing.T) {
+	var m SkipMap[int, int]
+	var wg sync.WaitGroup
+	const workers = 100
+
+	for i := range workers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m.Store(i, i*i)
+		}(i)
+	}
+	wg.Wait()
+
+	if m.Size() != workers {
+		t.Fatalf("expected %d elements, got %d", workers, m.Size())
+	}
+	for i := range workers {
+		if v, ok := m.Load(i); !ok || v != i*i {
+			t.Fatalf("expected %d: %d, got %d: %v", i, i*i, v, ok)
+		}
+	}
+}
+
 func TestSkipMap_Concurrency(t *testing.T) {
 	m := NewSkipMap[int, int]()
 	var wg sync.WaitGroup

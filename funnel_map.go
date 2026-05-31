@@ -52,7 +52,7 @@ type funnelRebuildState struct {
 type funnelTable[K cmp.Ordered, V any] struct {
 	buckets   unsafeSlice[funnelBucket]
 	mask      uintptr
-	overflow  *SkipMap[K, V]
+	overflow  SkipMap[K, V]
 	stripeCap int
 	growCap   int
 }
@@ -127,7 +127,6 @@ func newFunnelTable[K cmp.Ordered, V any](tableLen uintptr) *funnelTable[K, V] {
 	table := &funnelTable[K, V]{
 		buckets:   makeUnsafeSlice[funnelBucket](tableLen),
 		mask:      tableLen - 1,
-		overflow:  NewSkipMap[K, V](),
 		stripeCap: growCap >> bits.TrailingZeros32(uint32(roundedSizeLen)),
 		growCap:   growCap,
 	}

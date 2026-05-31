@@ -21,8 +21,9 @@ const (
 
 // SkipMap represents a lock-free, concurrent-safe skip list mapping keys to values.
 // It is designed to scale under heavy contention while minimizing cache-line bounces.
+// The zero value is ready to use.
 type SkipMap[K cmp.Ordered, V any] struct {
-	head     *skipNode[K, V]
+	head     unsafe.Pointer // *skipNode[K, V]
 	topLevel uintptr
 	count    uintptr
 }
@@ -40,12 +41,44 @@ type skipNode[K cmp.Ordered, V any] struct {
 
 // NewSkipMap initializes an empty concurrent skip map.
 func NewSkipMap[K cmp.Ordered, V any]() *SkipMap[K, V] {
+	m := new(SkipMap[K, V])
+	m.ensureHead()
+	return m
+}
+
+func (s *SkipMap[K, V]) ensureHead() *skipNode[K, V] {
+	head := s.loadHead()
+	if head != nil {
+		return head
+	}
+	return s.slowInit()
+}
+
+//go:nosplit
+func (s *SkipMap[K, V]) loadHead() *skipNode[K, V] {
+	return (*skipNode[K, V])(loadPtr(&s.head))
+}
+
+//go:noinline
+func (s *SkipMap[K, V]) slowInit() *skipNode[K, V] {
+	for {
+		head := s.loadHead()
+		if head != nil {
+			return head
+		}
+
+		head = newSkipMapHead[K, V]()
+		atomic.CompareAndSwapUintptr(&s.topLevel, 0, skipDefaultLevel)
+		if atomic.CompareAndSwapPointer(&s.head, nil, unsafe.Pointer(head)) {
+			return head
+		}
+	}
+}
+
+func newSkipMapHead[K cmp.Ordered, V any]() *skipNode[K, V] {
 	head := newSkipNode(*new(K), *new(V), skipMaxLevel)
 	head.setFlag(skipFlagLinked)
-	return &SkipMap[K, V]{
-		head:     head,
-		topLevel: skipDefaultLevel,
-	}
+	return head
 }
 
 // newSkipNode allocates a skip list node and extends the pointer array if it exceeds base links.
@@ -171,9 +204,7 @@ func (s *SkipMap[K, V]) randomLevel() int {
 	return lvl
 }
 
-// search locates a key and populate the path with previous and next nodes.
-func (s *SkipMap[K, V]) search(k K, prevs, nexts *skipNodeArray[K, V]) *skipNode[K, V] {
-	curr := s.head
+func (s *SkipMap[K, V]) searchFrom(curr *skipNode[K, V], k K, prevs, nexts *skipNodeArray[K, V]) *skipNode[K, V] {
 	top := int(loadUintptr(&s.topLevel)) - 1
 	for i := top; i >= 0; i-- {
 		nex := curr.next(i)
@@ -191,10 +222,8 @@ func (s *SkipMap[K, V]) search(k K, prevs, nexts *skipNodeArray[K, V]) *skipNode
 	return nil
 }
 
-// searchForDelete is an optimized search tailored for deletion that yields the layer the key was found.
-func (s *SkipMap[K, V]) searchForDelete(k K, prevs, nexts *skipNodeArray[K, V]) int {
+func (s *SkipMap[K, V]) searchForDeleteFrom(curr *skipNode[K, V], k K, prevs, nexts *skipNodeArray[K, V]) int {
 	foundAt := -1
-	curr := s.head
 	top := int(loadUintptr(&s.topLevel)) - 1
 	for i := top; i >= 0; i-- {
 		nex := curr.next(i)
@@ -231,11 +260,12 @@ func purgeLocks[K cmp.Ordered, V any](prevs *skipNodeArray[K, V], top int) {
 // pointer level (storePtr uses atomic.StorePointer) but the caller
 // should not rely on read-modify-write atomicity.
 func (s *SkipMap[K, V]) Store(key K, value V) {
+	head := s.ensureHead()
 	lvl := s.randomLevel()
 	var prevs, nexts skipNodeArray[K, V]
 
 	for {
-		if hit := s.search(key, &prevs, &nexts); hit != nil {
+		if hit := s.searchFrom(head, key, &prevs, &nexts); hit != nil {
 			if !hit.hasFlag(skipFlagMarked) {
 				hit.storeVal(value)
 				return
@@ -279,7 +309,10 @@ func (s *SkipMap[K, V]) Store(key K, value V) {
 
 // Load retrieves a mapping. Returns zero value and false if missing.
 func (s *SkipMap[K, V]) Load(key K) (value V, ok bool) {
-	curr := s.head
+	curr := s.loadHead()
+	if curr == nil {
+		return *new(V), false
+	}
 	top := int(loadUintptr(&s.topLevel)) - 1
 	for i := top; i >= 0; i-- {
 		nex := curr.next(i)
@@ -306,6 +339,11 @@ func (s *SkipMap[K, V]) Delete(key K) bool {
 
 // LoadAndDelete ensures the removal of a mapping and returns it.
 func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
+	head := s.loadHead()
+	if head == nil {
+		return *new(V), false
+	}
+
 	var (
 		victim       *skipNode[K, V]
 		marked       bool
@@ -313,7 +351,7 @@ func (s *SkipMap[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
 		prevs, nexts skipNodeArray[K, V]
 	)
 	for {
-		hitLvl := s.searchForDelete(key, &prevs, &nexts)
+		hitLvl := s.searchForDeleteFrom(head, key, &prevs, &nexts)
 
 		isRemovable := hitLvl != -1 &&
 			(*nexts.at(hitLvl)).hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) &&
@@ -381,13 +419,15 @@ func (s *SkipMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 
 // LoadOrStoreFn operates analogously to LoadOrStore but fetches assignment lazily.
 func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loaded bool) {
+	head := s.ensureHead()
+
 	var (
 		lvl          int
 		prevs, nexts skipNodeArray[K, V]
 	)
 	for {
 		top := int(loadUintptr(&s.topLevel))
-		hit := s.search(key, &prevs, &nexts)
+		hit := s.searchFrom(head, key, &prevs, &nexts)
 		if hit != nil {
 			if !hit.hasFlag(skipFlagMarked) {
 				return hit.loadVal(), true
@@ -439,7 +479,12 @@ func (s *SkipMap[K, V]) LoadOrStoreFn(key K, newValFn func() V) (actual V, loade
 
 // Range interates cleanly over active mappings.
 func (s *SkipMap[K, V]) Range(yield func(key K, value V) bool) {
-	curr := s.head.next(0)
+	head := s.loadHead()
+	if head == nil {
+		return
+	}
+
+	curr := head.next(0)
 	for curr != nil {
 		if !curr.hasFlags(skipFlagLinked|skipFlagMarked, skipFlagLinked) {
 			curr = curr.next(0)
