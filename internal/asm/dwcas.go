@@ -27,11 +27,8 @@ func DWCAS(ptr unsafe.Pointer, old1 uint64, old2 unsafe.Pointer, new1 uint64, ne
 	if writeBarrier.enabled {
 		runtime_atomicwb((*unsafe.Pointer)(unsafe.Add(ptr, 8)), new2)
 	}
-	return dwcasAsm(ptr, old1, old2, new1, new2)
+	return dwcas(ptr, old1, old2, new1, new2)
 }
-
-//go:nosplit
-func dwcasAsm(ptr unsafe.Pointer, old1 uint64, old2 unsafe.Pointer, new1 uint64, new2 unsafe.Pointer) bool
 
 //go:nosplit
 //go:linkname runtime_atomicwb runtime.atomicwb

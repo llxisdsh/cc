@@ -93,10 +93,6 @@ const (
 // DWHTMap is zero-value ready.
 // This implementation is built only for !race amd64/arm64 targets with DWCAS
 // support; other builds expose DWHTMap as an alias of [Map].
-//
-// WARNING on ARM64: The asm implementation relies on the ARMv8.1-A LSE CASPAL
-// instruction. Running on older ARMv8.0 hardware without LSE will trigger a
-// SIGILL (Illegal Instruction) crash.
 type DWHTMap[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[dwhtTable[K, V]]
