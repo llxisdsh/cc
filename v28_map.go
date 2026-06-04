@@ -1,0 +1,1406 @@
+//go:build !race && amd64 && goexperiment.simd
+
+package cc
+
+import (
+	"math/bits"
+	"math/rand/v2"
+	"runtime"
+	"simd/archsimd"
+	"sync/atomic"
+	"unsafe"
+)
+
+const (
+	v28MinBuckets      = 8
+	v28SlotsPerBucket  = 28
+	v28LoadFactorNum   = 15
+	v28LoadFactorDen   = 16
+	v28MaxProbeBuckets = 8
+	v28LaneMask        = uint32(1)<<v28SlotsPerBucket - 1
+)
+
+const (
+	v28EnableAggressiveGrow        = true
+	v28EnableSameKeyTombstoneReuse = true
+)
+
+const (
+	v28TagEmpty   = uint8(0)
+	v28TagDeleted = uint8(1)
+)
+
+const (
+	v28VersionMask   = uint32(0x001fffff)
+	v28OverflowShift = 21
+	v28OverflowMask  = uint32(0x1ff) << v28OverflowShift
+	v28FrozenMask    = uint32(1) << 30
+	v28WritingMask   = uint32(1) << 31
+)
+
+const (
+	v28CntUsed = iota
+	v28CntDeleted
+)
+
+type v28Status uint8
+
+const (
+	v28OK v28Status = iota
+	v28Full
+	v28Retry
+	v28Frozen
+)
+
+type v28ResizeHint uint8
+
+const (
+	v28ResizeNormal v28ResizeHint = iota
+	v28ResizeProbeLimit
+	v28ResizeCompact
+)
+
+// V28Map is an experimental SIMD-probed open-addressed map.
+//
+// Each 32-byte bucket stores 28 one-byte tags plus a compact control word.
+// Entries are kept in a separate flat array and addressed by bucket/lane,
+// so probing stays cache-dense while key/value storage remains contiguous.
+// Reads use a bucket version snapshot; writes publish through a short
+// per-bucket writing window, and resize freezes old buckets cooperatively.
+//
+// WARNING: integer keys use the fast integer hash path. For other key types,
+// especially string keys, the default Go built-in/maphash-style hashers may
+// contend with the SIMD probing path on some CPUs. Use [WithKeyHasherUnsafe]
+// with a fast non-AES hash such as wyhash or xxh3 when measuring throughput.
+type V28Map[K comparable, V any] struct {
+	_         noCopy
+	table     atomic.Pointer[v28Table[K, V]]
+	initState atomic.Uint32
+	intKey    bool
+	seed      uintptr
+	keyHash   HashFunc
+	valEqual  EqualFunc
+	minLen    uintptr
+	size      PLocalCounterN
+}
+
+type v28Table[K comparable, V any] struct {
+	buckets       unsafeSlice[v28Bucket]
+	entries       unsafeSlice[v28Entry[K, V]]
+	mask          uintptr
+	probeLimit    uintptr
+	stripeCap     int
+	growCap       int
+	intKey        bool
+	nextTable     atomic.Pointer[v28Table[K, V]]
+	allocating    atomic.Uint32
+	copyIdx       atomic.Uint32
+	copyDone      atomic.Uint32
+	copyMaxProbe  atomic.Uintptr
+	chunks        uint32
+	chunkSz       uintptr
+	bucketBacking []byte
+}
+
+type v28Bucket struct {
+	tags [28]byte
+	ctrl atomic.Uint32
+}
+
+type v28Entry[K comparable, V any] struct {
+	key K
+	val V
+}
+
+func NewV28Map[K comparable, V any](options ...func(*MapConfig)) *V28Map[K, V] {
+	var cfg MapConfig
+	for _, o := range options {
+		o(noEscape(&cfg))
+	}
+	m := &V28Map[K, V]{}
+	m.init(noEscape(&cfg))
+	return m
+}
+
+func (m *V28Map[K, V]) init(cfg *MapConfig) {
+	if !archsimd.X86.AVX2() {
+		panic("cc: V28Map requires AVX2")
+	}
+	if cfg.keyHash == nil {
+		cfg.keyHash = parseKeyInterface[K]()
+	}
+	if cfg.valEqual == nil {
+		cfg.valEqual = parseValueInterface[V]()
+	}
+	m.keyHash, m.valEqual, m.intKey = defaultHasher[K, V]()
+	if cfg.keyHash != nil {
+		m.keyHash = cfg.keyHash
+		m.intKey = false
+	}
+	if cfg.valEqual != nil {
+		m.valEqual = cfg.valEqual
+	}
+	m.seed = uintptr(rand.Uint64())
+	m.minLen = v28CalcBucketLen(cfg.capacity)
+	m.table.Store(newV28Table[K, V](m.minLen, m.intKey))
+}
+
+func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
+	for {
+		table := m.table.Load()
+		if table == nil {
+			return *new(V), false
+		}
+		hash := m.hashKey(noEscape(&key))
+		tag, start := v28HashParts(hash, table.intKey, table.mask)
+		for probe := uintptr(0); probe < table.probeLimit; probe++ {
+			bi := (start + probe) & table.mask
+			b := table.buckets.At(bi)
+		retryBucket:
+			ctrl := b.ctrl.Load()
+			if ctrl&v28WritingMask != 0 {
+				goto retryBucket
+			}
+			words := v28LoadTagWords(b)
+			match := v28MatchBits(words, tag)
+			for match != 0 {
+				lane := uintptr(bits.TrailingZeros32(match))
+				e := table.entry(bi, lane)
+				k, v := e.key, e.val
+				ctrl2 := b.ctrl.Load()
+				if ctrl != ctrl2 || ctrl2&v28WritingMask != 0 {
+					goto retryBucket
+				}
+				if k == key {
+					return v, true
+				}
+				match &= match - 1
+			}
+			if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+				if ctrl != b.ctrl.Load() {
+					goto retryBucket
+				}
+				if next := table.nextTable.Load(); next != nil {
+					m.helpResizeInto(table, next)
+					break
+				}
+				return *new(V), false
+			}
+		}
+		if next := table.nextTable.Load(); next != nil {
+			m.helpResizeInto(table, next)
+			continue
+		}
+		return *new(V), false
+	}
+}
+
+func (m *V28Map[K, V]) Store(key K, value V) {
+	m.store(noEscape(&key), noEscape(&value), false)
+}
+
+func (m *V28Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+	return m.store(noEscape(&key), noEscape(&value), true)
+}
+
+func (m *V28Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
+	return m.update(noEscape(&key), noEscape(&value), false)
+}
+
+func (m *V28Map[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
+	return m.delete(noEscape(&key), true)
+}
+
+func (m *V28Map[K, V]) Delete(key K) {
+	_, _ = m.delete(noEscape(&key), false)
+}
+
+func (m *V28Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
+	table := m.table.Load()
+	if table == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("cc: value is not comparable; use WithValueEqual")
+	}
+	hash := m.hashKey(noEscape(&key))
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return false
+			}
+			hash = m.hashKey(noEscape(&key))
+			continue
+		}
+		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), noEscape(&new))
+		switch status {
+		case v28OK:
+			return swapped
+		case v28Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(noEscape(&key))
+		case v28Retry:
+			runtime.Gosched()
+		case v28Full:
+			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
+			hash = m.hashKey(noEscape(&key))
+		}
+	}
+}
+
+func (m *V28Map[K, V]) CompareAndDelete(key K, old V) bool {
+	table := m.table.Load()
+	if table == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("cc: value is not comparable; use WithValueEqual")
+	}
+	hash := m.hashKey(noEscape(&key))
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return false
+			}
+			hash = m.hashKey(noEscape(&key))
+			continue
+		}
+		status, deleted := m.compareAndDeleteIn(table, noEscape(&key), hash, noEscape(&old))
+		switch status {
+		case v28OK:
+			return deleted
+		case v28Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(noEscape(&key))
+		case v28Retry:
+			runtime.Gosched()
+		case v28Full:
+			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
+			hash = m.hashKey(noEscape(&key))
+		}
+	}
+}
+
+func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loaded bool) {
+	table := m.ensureTable()
+	hash := m.hashKey(noEscape(&key))
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			hash = m.hashKey(noEscape(&key))
+			continue
+		}
+		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
+		switch status {
+		case v28OK:
+			if !loaded && shouldCheckResize && int(m.size.Get(v28CntUsed)) >= table.stripeCap {
+				m.resizeIfNeeded(table)
+			}
+			return actual, loaded
+		case v28Full:
+			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
+			hash = m.hashKey(noEscape(&key))
+		case v28Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(noEscape(&key))
+		case v28Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V28Map[K, V]) Range(yield func(K, V) bool) {
+	for {
+		table := m.table.Load()
+		if table == nil {
+			return
+		}
+		for i := uintptr(0); i <= table.mask; i++ {
+			b := table.buckets.At(i)
+		retry:
+			ctrl := b.ctrl.Load()
+			if ctrl&v28WritingMask != 0 {
+				goto retry
+			}
+			words := v28LoadTagWords(b)
+			full := v28FullBits(words)
+			for full != 0 {
+				lane := uintptr(bits.TrailingZeros32(full))
+				e := table.entry(i, lane)
+				k, v := e.key, e.val
+				if ctrl != b.ctrl.Load() {
+					goto retry
+				}
+				if !yield(k, v) {
+					return
+				}
+				full &= full - 1
+			}
+		}
+		if next := table.nextTable.Load(); next != nil {
+			m.helpResizeInto(table, next)
+			continue
+		}
+		return
+	}
+}
+
+func (m *V28Map[K, V]) All() func(yield func(K, V) bool) {
+	return m.Range
+}
+
+type V28MapStats struct {
+	Buckets         uintptr
+	Capacity        uintptr
+	Live            uintptr
+	Used            uintptr
+	Deleted         uintptr
+	FullBuckets     uintptr
+	OverflowBuckets uintptr
+	FullLanes       uintptr
+	EmptyLanes      uintptr
+	TombstoneLanes  uintptr
+	MaxOverflow     uint16
+	MaxProbe        uintptr
+	ProbeTotal      uintptr
+	ProbeSamples    uintptr
+}
+
+func (m *V28Map[K, V]) Stats() V28MapStats {
+	table := m.table.Load()
+	used := m.size.Value(v28CntUsed)
+	deleted := m.size.Value(v28CntDeleted)
+	stats := V28MapStats{
+		Live:    used - deleted,
+		Used:    used,
+		Deleted: deleted,
+	}
+	if table == nil {
+		return stats
+	}
+	stats.Buckets = table.bucketLen()
+	stats.Capacity = stats.Buckets * v28SlotsPerBucket
+	for i := uintptr(0); i <= table.mask; i++ {
+		b := table.buckets.At(i)
+		ctrl := b.ctrl.Load()
+		words := v28LoadTagWords(b)
+		full := v28FullBits(words)
+		empty := v28EmptyBits(words)
+		deleted := v28DeletedBits(words)
+		fullCount := uintptr(bits.OnesCount32(full))
+		stats.FullLanes += fullCount
+		stats.EmptyLanes += uintptr(bits.OnesCount32(empty))
+		stats.TombstoneLanes += uintptr(bits.OnesCount32(deleted))
+		if fullCount == v28SlotsPerBucket {
+			stats.FullBuckets++
+		}
+		if overflow := v28Overflow(ctrl); overflow != 0 {
+			stats.OverflowBuckets++
+			if overflow > stats.MaxOverflow {
+				stats.MaxOverflow = overflow
+			}
+		}
+		fullScan := full
+		for fullScan != 0 {
+			lane := uintptr(bits.TrailingZeros32(fullScan))
+			e := table.entry(i, lane)
+			hash := m.hashKey(noEscape(&e.key))
+			_, start := v28HashParts(hash, table.intKey, table.mask)
+			probe := (i - start) & table.mask
+			stats.ProbeTotal += probe
+			stats.ProbeSamples++
+			if probe > stats.MaxProbe {
+				stats.MaxProbe = probe
+			}
+			fullScan &= fullScan - 1
+		}
+	}
+	return stats
+}
+
+func (m *V28Map[K, V]) Size() int {
+	used := int(m.size.Value(v28CntUsed))
+	deleted := int(m.size.Value(v28CntDeleted))
+	return max(used-deleted, 0)
+}
+
+func (m *V28Map[K, V]) Clear() {
+	if m.table.Load() == nil {
+		return
+	}
+	m.size.Clear()
+	m.table.Store(newV28Table[K, V](m.minLen, m.intKey))
+}
+
+func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
+	table := m.ensureTable()
+	hash := m.hashKey(key)
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			hash = m.hashKey(key)
+			continue
+		}
+		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
+		switch status {
+		case v28OK:
+			if !loaded && shouldCheckResize && int(m.size.Get(v28CntUsed)) >= table.stripeCap {
+				m.resizeIfNeeded(table)
+			}
+			return actual, loaded
+		case v28Full:
+			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
+			hash = m.hashKey(key)
+		case v28Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(key)
+		case v28Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V28Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loaded bool) {
+	table := m.table.Load()
+	if table == nil {
+		return *new(V), false
+	}
+	hash := m.hashKey(key)
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return *new(V), false
+			}
+			hash = m.hashKey(key)
+			continue
+		}
+		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
+		switch status {
+		case v28OK:
+			if !loaded && shouldCheckResize && int(m.size.Get(v28CntUsed)) >= table.stripeCap {
+				m.resizeIfNeeded(table)
+			}
+			return previous, loaded
+		case v28Full:
+			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
+			hash = m.hashKey(key)
+		case v28Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(key)
+		case v28Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V28Map[K, V]) storeIn(
+	table *v28Table[K, V],
+	key *K,
+	val *V,
+	hash uintptr,
+	onlyIfAbsent bool,
+) (v28Status, V, bool, bool) {
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return v28Frozen, *new(V), false, false
+		}
+		if ctrl&v28WritingMask != 0 {
+			return v28Retry, *new(V), false, false
+		}
+		words := v28LoadTagWords(b)
+		match := v28MatchBits(words, tag)
+		for match != 0 {
+			lane := uintptr(bits.TrailingZeros32(match))
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+				if status != v28OK {
+					return status, *new(V), false, false
+				}
+				if onlyIfAbsent {
+					v28EndWriteUnchanged(b, ctrl)
+					return v28OK, v, true, false
+				}
+				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
+					v28EndWriteUnchanged(b, ctrl)
+					return v28OK, e.val, true, false
+				}
+				e.val = *val
+				v28EndWriteModified(b, ctrl)
+				return v28OK, *val, true, false
+			}
+			match &= match - 1
+		}
+		if v28EnableSameKeyTombstoneReuse {
+			deleted := v28DeletedBits(words)
+			for deleted != 0 {
+				lane := uintptr(bits.TrailingZeros32(deleted))
+				e := table.entry(bi, lane)
+				k := e.key
+				if ctrl != b.ctrl.Load() {
+					goto retryBucket
+				}
+				if k == *key {
+					ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+					if status != v28OK {
+						return status, *new(V), false, false
+					}
+					e.val = *val
+					v28StoreTag(b, lane, tag)
+					v28EndWriteModified(b, ctrl)
+					m.size.Add(v28CntDeleted, ^uintptr(0))
+					return v28OK, *val, false, false
+				}
+				deleted &= deleted - 1
+			}
+		}
+		if empty := v28EmptyBits(words); empty != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+			if status != v28OK {
+				return status, *new(V), false, false
+			}
+			lane := uintptr(bits.TrailingZeros32(empty))
+			if probe != 0 && !table.addOverflow(start, probe) {
+				v28EndWriteUnchanged(b, ctrl)
+				return v28Retry, *new(V), false, false
+			}
+			e := table.entry(bi, lane)
+			e.key = *key
+			e.val = *val
+			v28StoreTag(b, lane, tag)
+			v28EndWriteModified(b, ctrl)
+			m.size.Add(v28CntUsed, 1)
+			return v28OK, *val, false, empty&(empty-1) == 0
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v28Full, *new(V), false, false
+}
+
+func (m *V28Map[K, V]) updateIn(
+	table *v28Table[K, V],
+	key *K,
+	val *V,
+	hash uintptr,
+	onlyIfAbsent bool,
+) (v28Status, V, bool, bool) {
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return v28Frozen, *new(V), false, false
+		}
+		if ctrl&v28WritingMask != 0 {
+			return v28Retry, *new(V), false, false
+		}
+		words := v28LoadTagWords(b)
+		match := v28MatchBits(words, tag)
+		for match != 0 {
+			lane := uintptr(bits.TrailingZeros32(match))
+			e := table.entry(bi, lane)
+			k, previous := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+				if status != v28OK {
+					return status, *new(V), false, false
+				}
+				if onlyIfAbsent {
+					v28EndWriteUnchanged(b, ctrl)
+					return v28OK, previous, true, false
+				}
+				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&previous)), noescape(unsafe.Pointer(val))) {
+					v28EndWriteUnchanged(b, ctrl)
+					return v28OK, previous, true, false
+				}
+				e.val = *val
+				v28EndWriteModified(b, ctrl)
+				return v28OK, previous, true, false
+			}
+			match &= match - 1
+		}
+		if v28EnableSameKeyTombstoneReuse {
+			deleted := v28DeletedBits(words)
+			for deleted != 0 {
+				lane := uintptr(bits.TrailingZeros32(deleted))
+				e := table.entry(bi, lane)
+				k := e.key
+				if ctrl != b.ctrl.Load() {
+					goto retryBucket
+				}
+				if k == *key {
+					ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+					if status != v28OK {
+						return status, *new(V), false, false
+					}
+					e.val = *val
+					v28StoreTag(b, lane, tag)
+					v28EndWriteModified(b, ctrl)
+					m.size.Add(v28CntDeleted, ^uintptr(0))
+					return v28OK, *new(V), false, false
+				}
+				deleted &= deleted - 1
+			}
+		}
+		if empty := v28EmptyBits(words); empty != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+			if status != v28OK {
+				return status, *new(V), false, false
+			}
+			lane := uintptr(bits.TrailingZeros32(empty))
+			if probe != 0 && !table.addOverflow(start, probe) {
+				v28EndWriteUnchanged(b, ctrl)
+				return v28Retry, *new(V), false, false
+			}
+			e := table.entry(bi, lane)
+			e.key = *key
+			e.val = *val
+			v28StoreTag(b, lane, tag)
+			v28EndWriteModified(b, ctrl)
+			m.size.Add(v28CntUsed, 1)
+			return v28OK, *new(V), false, empty&(empty-1) == 0
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v28Full, *new(V), false, false
+}
+
+func (m *V28Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
+	table := m.table.Load()
+	if table == nil {
+		return *new(V), false
+	}
+	hash := m.hashKey(key)
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return *new(V), false
+			}
+			hash = m.hashKey(key)
+			continue
+		}
+		status, previous, loaded := m.deleteIn(table, key, hash, needValue)
+		switch status {
+		case v28OK:
+			return previous, loaded
+		case v28Full:
+			return *new(V), false
+		case v28Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(key)
+		case v28Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V28Map[K, V]) deleteIn(
+	table *v28Table[K, V],
+	key *K,
+	hash uintptr,
+	needValue bool,
+) (v28Status, V, bool) {
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return v28Frozen, *new(V), false
+		}
+		if ctrl&v28WritingMask != 0 {
+			return v28Retry, *new(V), false
+		}
+		words := v28LoadTagWords(b)
+		match := v28MatchBits(words, tag)
+		for match != 0 {
+			lane := uintptr(bits.TrailingZeros32(match))
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+				if status != v28OK {
+					return status, *new(V), false
+				}
+				var prev V
+				if needValue {
+					prev = v
+				}
+				if !v28EnableSameKeyTombstoneReuse {
+					e.key = *new(K)
+				}
+				e.val = *new(V)
+				v28StoreTag(b, lane, v28TagDeleted)
+				v28EndWriteModified(b, ctrl)
+				m.size.Add(v28CntDeleted, 1)
+				return v28OK, prev, true
+			}
+			match &= match - 1
+		}
+		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return v28OK, *new(V), false
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v28Full, *new(V), false
+}
+
+func (m *V28Map[K, V]) compareAndSwapIn(
+	table *v28Table[K, V],
+	key *K,
+	hash uintptr,
+	old *V,
+	new *V,
+) (v28Status, bool) {
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return v28Frozen, false
+		}
+		if ctrl&v28WritingMask != 0 {
+			return v28Retry, false
+		}
+		words := v28LoadTagWords(b)
+		match := v28MatchBits(words, tag)
+		for match != 0 {
+			lane := uintptr(bits.TrailingZeros32(match))
+			e := table.entry(bi, lane)
+			k, cur := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+				if status != v28OK {
+					return status, false
+				}
+				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+					v28EndWriteUnchanged(b, ctrl)
+					return v28OK, false
+				}
+				e.val = *new
+				v28EndWriteModified(b, ctrl)
+				return v28OK, true
+			}
+			match &= match - 1
+		}
+		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return v28OK, false
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v28Full, false
+}
+
+func (m *V28Map[K, V]) compareAndDeleteIn(
+	table *v28Table[K, V],
+	key *K,
+	hash uintptr,
+	old *V,
+) (v28Status, bool) {
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return v28Frozen, false
+		}
+		if ctrl&v28WritingMask != 0 {
+			return v28Retry, false
+		}
+		words := v28LoadTagWords(b)
+		match := v28MatchBits(words, tag)
+		for match != 0 {
+			lane := uintptr(bits.TrailingZeros32(match))
+			e := table.entry(bi, lane)
+			k, cur := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+				if status != v28OK {
+					return status, false
+				}
+				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+					v28EndWriteUnchanged(b, ctrl)
+					return v28OK, false
+				}
+				if !v28EnableSameKeyTombstoneReuse {
+					e.key = *new(K)
+				}
+				e.val = *new(V)
+				v28StoreTag(b, lane, v28TagDeleted)
+				v28EndWriteModified(b, ctrl)
+				m.size.Add(v28CntDeleted, 1)
+				return v28OK, true
+			}
+			match &= match - 1
+		}
+		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return v28OK, false
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v28Full, false
+}
+
+func (m *V28Map[K, V]) computeIn(
+	table *v28Table[K, V],
+	key *K,
+	hash uintptr,
+	fn func(e *MapEntry[K, V]),
+) (v28Status, V, bool, bool) {
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return v28Frozen, *new(V), false, false
+		}
+		if ctrl&v28WritingMask != 0 {
+			return v28Retry, *new(V), false, false
+		}
+		words := v28LoadTagWords(b)
+		match := v28MatchBits(words, tag)
+		for match != 0 {
+			lane := uintptr(bits.TrailingZeros32(match))
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+				if status != v28OK {
+					return status, *new(V), false, false
+				}
+				it := MapEntry[K, V]{
+					entry:  entry_[K, V]{hash: hash, key: *key, value: v},
+					loaded: true,
+				}
+				fn(noEscape(&it))
+				switch it.op {
+				case updateOp:
+					e.val = it.entry.value
+					v28EndWriteModified(b, ctrl)
+					return v28OK, it.entry.value, true, false
+				case deleteOp:
+					if !v28EnableSameKeyTombstoneReuse {
+						e.key = *new(K)
+					}
+					e.val = *new(V)
+					v28StoreTag(b, lane, v28TagDeleted)
+					v28EndWriteModified(b, ctrl)
+					m.size.Add(v28CntDeleted, 1)
+					return v28OK, it.entry.value, true, false
+				default:
+					v28EndWriteUnchanged(b, ctrl)
+					return v28OK, it.entry.value, true, false
+				}
+			}
+			match &= match - 1
+		}
+		if v28EnableSameKeyTombstoneReuse {
+			deleted := v28DeletedBits(words)
+			for deleted != 0 {
+				lane := uintptr(bits.TrailingZeros32(deleted))
+				e := table.entry(bi, lane)
+				k := e.key
+				if ctrl != b.ctrl.Load() {
+					goto retryBucket
+				}
+				if k == *key {
+					ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+					if status != v28OK {
+						return status, *new(V), false, false
+					}
+					it := MapEntry[K, V]{
+						entry: entry_[K, V]{hash: hash, key: *key},
+					}
+					fn(noEscape(&it))
+					if it.op != updateOp {
+						v28EndWriteUnchanged(b, ctrl)
+						return v28OK, *new(V), false, false
+					}
+					e.val = it.entry.value
+					v28StoreTag(b, lane, tag)
+					v28EndWriteModified(b, ctrl)
+					m.size.Add(v28CntDeleted, ^uintptr(0))
+					return v28OK, it.entry.value, false, false
+				}
+				deleted &= deleted - 1
+			}
+		}
+		if empty := v28EmptyBits(words); empty != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+			if status != v28OK {
+				return status, *new(V), false, false
+			}
+			lane := uintptr(bits.TrailingZeros32(empty))
+			it := MapEntry[K, V]{
+				entry: entry_[K, V]{hash: hash, key: *key},
+			}
+			fn(noEscape(&it))
+			if it.op != updateOp {
+				v28EndWriteUnchanged(b, ctrl)
+				return v28OK, *new(V), false, false
+			}
+			if probe != 0 && !table.addOverflow(start, probe) {
+				v28EndWriteUnchanged(b, ctrl)
+				return v28Retry, *new(V), false, false
+			}
+			e := table.entry(bi, lane)
+			e.key = *key
+			e.val = it.entry.value
+			v28StoreTag(b, lane, tag)
+			v28EndWriteModified(b, ctrl)
+			m.size.Add(v28CntUsed, 1)
+			return v28OK, it.entry.value, false, empty&(empty-1) == 0
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v28Full, *new(V), false, false
+}
+
+func (m *V28Map[K, V]) resizeIfNeeded(table *v28Table[K, V]) {
+	used := int(m.size.Value(v28CntUsed))
+	if used >= table.growCap {
+		m.tryResize(table, used, v28ResizeNormal)
+		return
+	}
+	deleted := int(m.size.Value(v28CntDeleted))
+	live := used - deleted
+	if deleted > v28SlotsPerBucket && deleted > live/4 {
+		m.tryResize(table, used, v28ResizeCompact)
+	}
+}
+
+func (m *V28Map[K, V]) tryResize(old *v28Table[K, V], used int, hint v28ResizeHint) *v28Table[K, V] {
+	if table := m.table.Load(); table != old {
+		return table
+	}
+	next := old.nextTable.Load()
+	if next == nil {
+		if old.allocating.CompareAndSwap(0, 1) {
+			deleted := int(m.size.Value(v28CntDeleted))
+			live := used - deleted
+			nextLen := v28CalcBucketLen(live)
+			nextLen = max(nextLen, m.minLen)
+			aggressive := hint == v28ResizeProbeLimit
+			if v28EnableAggressiveGrow {
+				curUsed := int(m.size.Value(v28CntUsed))
+				usedInResize := curUsed - used
+				aggressive = aggressive || usedInResize >= 2
+			}
+			if aggressive {
+				nextLen = min(nextLen<<1, old.bucketLen()<<2)
+			}
+			next = newV28Table[K, V](nextLen, old.intKey)
+			old.nextTable.Store(next)
+		} else {
+			for next == nil {
+				runtime.Gosched()
+				next = old.nextTable.Load()
+			}
+		}
+	}
+	return m.helpResizeInto(old, next)
+}
+
+func (m *V28Map[K, V]) helpResize(old *v28Table[K, V]) *v28Table[K, V] {
+	next := old.nextTable.Load()
+	if next == nil {
+		return m.tryResize(old, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
+	}
+	return m.helpResizeInto(old, next)
+}
+
+func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V] {
+	for {
+		chunk := old.copyIdx.Add(1) - 1
+		if chunk >= old.chunks {
+			for {
+				table := m.table.Load()
+				if table != old {
+					return table
+				}
+				runtime.Gosched()
+			}
+		}
+		copyMaxProbe := uintptr(0)
+		start := uintptr(chunk) * old.chunkSz
+		end := min(start+old.chunkSz, old.bucketLen())
+		for i := start; i < end; i++ {
+			b := old.buckets.At(i)
+			words := v28FreezeAndLoadTags(b)
+			full := v28FullBits(words)
+			for full != 0 {
+				lane := uintptr(bits.TrailingZeros32(full))
+				e := old.entry(i, lane)
+				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)))
+				if probe > copyMaxProbe {
+					copyMaxProbe = probe
+				}
+				full &= full - 1
+			}
+		}
+		for {
+			cur := next.copyMaxProbe.Load()
+			if copyMaxProbe <= cur {
+				break
+			}
+			if next.copyMaxProbe.CompareAndSwap(cur, copyMaxProbe) {
+				break
+			}
+		}
+		if old.copyDone.Add(1) == old.chunks {
+			observed := next.copyMaxProbe.Load() + 1
+			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, uintptr(v28MaxProbeBuckets))))
+			used := m.size.Reset(v28CntUsed)
+			deleted := m.size.Reset(v28CntDeleted)
+			m.size.Add(v28CntUsed, used-deleted)
+			m.table.CompareAndSwap(old, next)
+		}
+	}
+}
+
+func (m *V28Map[K, V]) ensureTable() *v28Table[K, V] {
+	if table := m.table.Load(); table != nil {
+		return table
+	}
+	return m.slowInit()
+}
+
+//go:noinline
+func (m *V28Map[K, V]) slowInit() *v28Table[K, V] {
+	for {
+		table := m.table.Load()
+		if table != nil {
+			return table
+		}
+		if m.initState.CompareAndSwap(0, 1) {
+			table = m.table.Load()
+			if table == nil {
+				var cfg MapConfig
+				m.init(noEscape(&cfg))
+				table = m.table.Load()
+			}
+			return table
+		}
+		runtime.Gosched()
+	}
+}
+
+//go:nosplit
+func (m *V28Map[K, V]) hashKey(key *K) uintptr {
+	if m.intKey {
+		return intHash[K](noescape(unsafe.Pointer(key)))
+	}
+	return m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+}
+
+func newV28Table[K comparable, V any](bucketLen uintptr, intKey bool) *v28Table[K, V] {
+	bucketLen = nextPowOf2(max(bucketLen, uintptr(v28MinBuckets)))
+	slotLen := bucketLen * v28SlotsPerBucket
+	growCap := int(slotLen * v28LoadFactorNum / v28LoadFactorDen)
+	cpus := max(uintptr(runtime.GOMAXPROCS(0)), 1)
+	roundedSizeLen := nextPowOf2(cpus)
+	stripeCap := int(uintptr(growCap) >> bits.TrailingZeros(uint(roundedSizeLen)))
+	chunks, chunkSz := v28ResizeChunks(bucketLen, cpus)
+	buckets, bucketBacking := makeV28Buckets(bucketLen)
+	entries := makeUnsafeSlice[v28Entry[K, V]](slotLen)
+	return &v28Table[K, V]{
+		buckets:       buckets,
+		entries:       entries,
+		mask:          bucketLen - 1,
+		probeLimit:    min(bucketLen, uintptr(v28MaxProbeBuckets)),
+		stripeCap:     stripeCap,
+		growCap:       growCap,
+		intKey:        intKey,
+		chunks:        chunks,
+		chunkSz:       chunkSz,
+		bucketBacking: bucketBacking,
+	}
+}
+
+func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], []byte) {
+	stride := unsafe.Sizeof(v28Bucket{})
+	const align = cacheLineSize
+	backing := make([]byte, bucketLen*stride+align-1)
+	base := uintptr(unsafe.Pointer(unsafe.SliceData(backing)))
+	aligned := (base + align - 1) &^ (align - 1)
+	return unsafeSlice[v28Bucket]{ptr: unsafe.Pointer(aligned)}, backing
+}
+
+//go:nosplit
+func v28HashParts(hash uintptr, intKey bool, mask uintptr) (uint8, uintptr) {
+	var tag uint8
+	if intKey {
+		tag = h2(hash ^ (hash >> 16))
+	} else {
+		tag = h2(hash)
+	}
+	if tag < 2 {
+		tag += 2
+	}
+	if intKey {
+		return tag, (hash / v28SlotsPerBucket) & mask
+	}
+	return tag, h1(hash) & mask
+}
+
+//go:nosplit
+func v28CalcBucketLen(capacity int) uintptr {
+	if capacity <= 0 {
+		return v28MinBuckets
+	}
+	needSlots := uintptr(capacity+1) * v28LoadFactorDen / v28LoadFactorNum
+	needBuckets := (needSlots + v28SlotsPerBucket - 1) / v28SlotsPerBucket
+	return nextPowOf2(max(needBuckets, uintptr(v28MinBuckets)))
+}
+
+//go:nosplit
+func v28ResizeChunks(bucketLen, cpus uintptr) (chunks uint32, chunkSz uintptr) {
+	const overCpus = resizeOverPartition
+	want := min(bucketLen/v28MinBuckets, max(cpus*overCpus, 1))
+	if want <= 1 {
+		return 1, bucketLen
+	}
+	c := uint32(1) << (bits.Len32(uint32(want)) - 1)
+	return c, bucketLen >> bits.TrailingZeros32(c)
+}
+
+//go:nosplit
+func (table *v28Table[K, V]) bucketLen() uintptr {
+	return table.mask + 1
+}
+
+//go:nosplit
+func (table *v28Table[K, V]) entry(bucketIdx, lane uintptr) *v28Entry[K, V] {
+	return table.entries.At(bucketIdx*v28SlotsPerBucket + lane)
+}
+
+func (table *v28Table[K, V]) addOverflow(start uintptr, count uintptr) bool {
+	for probe := uintptr(0); probe < count; probe++ {
+		b := table.buckets.At((start + probe) & table.mask)
+		for {
+			ctrl := b.ctrl.Load()
+			if ctrl&v28FrozenMask != 0 {
+				return false
+			}
+			if ctrl&v28WritingMask != 0 {
+				return false
+			}
+			next := v28IncOverflow(ctrl)
+			if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
+				break
+			}
+		}
+	}
+	return true
+}
+
+func (table *v28Table[K, V]) addOverflowForCopyConcurrent(start uintptr, count uintptr) {
+	for probe := uintptr(0); probe < count; probe++ {
+		b := table.buckets.At((start + probe) & table.mask)
+		for {
+			ctrl := b.ctrl.Load()
+			if ctrl&v28WritingMask != 0 {
+				runtime.Gosched()
+				continue
+			}
+			next := v28IncOverflow(ctrl)
+			if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
+				break
+			}
+		}
+	}
+}
+
+func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintptr) uintptr {
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe <= table.mask; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+		ctrl, status := v28BeginWrite(b)
+		if status == v28Retry {
+			probe--
+			runtime.Gosched()
+			continue
+		}
+		if status != v28OK {
+			probe--
+			runtime.Gosched()
+			continue
+		}
+		words := v28LoadTagWords(b)
+		empty := v28EmptyBits(words)
+		if empty == 0 {
+			v28EndWriteUnchanged(b, ctrl)
+			continue
+		}
+		lane := uintptr(bits.TrailingZeros32(empty))
+		dst := table.entry(bi, lane)
+		dst.key = e.key
+		dst.val = e.val
+		if probe != 0 {
+			table.addOverflowForCopyConcurrent(start, probe)
+		}
+		v28StoreTag(b, lane, tag)
+		v28EndWriteModified(b, ctrl)
+		return probe
+	}
+	panic("cc: V28Map grow produced a full table")
+}
+
+func v28BeginWrite(b *v28Bucket) (uint32, v28Status) {
+	ctrl := b.ctrl.Load()
+	return v28BeginWriteWithCtrl(b, ctrl)
+}
+
+func v28BeginWriteWithCtrl(b *v28Bucket, ctrl uint32) (uint32, v28Status) {
+	if ctrl&v28FrozenMask != 0 {
+		return 0, v28Frozen
+	}
+	if ctrl&v28WritingMask != 0 {
+		return 0, v28Retry
+	}
+	if !b.ctrl.CompareAndSwap(ctrl, ctrl|v28WritingMask) {
+		return 0, v28Retry
+	}
+	return ctrl, v28OK
+}
+
+func v28EndWriteUnchanged(b *v28Bucket, ctrl uint32) {
+	b.ctrl.Store(ctrl &^ v28WritingMask)
+}
+
+func v28EndWriteModified(b *v28Bucket, ctrl uint32) {
+	b.ctrl.Store(v28BumpCtrl(ctrl))
+}
+
+func v28FreezeAndLoadTags(b *v28Bucket) archsimd.Uint8x32 {
+	for {
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return v28LoadTagWords(b)
+		}
+		if ctrl&v28WritingMask != 0 {
+			runtime.Gosched()
+			continue
+		}
+		if b.ctrl.CompareAndSwap(ctrl, ctrl|v28WritingMask) {
+			b.ctrl.Store(v28BumpCtrl(ctrl | v28FrozenMask | v28WritingMask))
+			return v28LoadTagWords(b)
+		}
+	}
+}
+
+//go:nosplit
+func v28BumpCtrl(ctrl uint32) uint32 {
+	return (ctrl &^ (v28VersionMask | v28WritingMask)) | ((ctrl + 1) & v28VersionMask)
+}
+
+//go:nosplit
+func v28Overflow(ctrl uint32) uint16 {
+	return uint16((ctrl & v28OverflowMask) >> v28OverflowShift)
+}
+
+//go:nosplit
+func v28IncOverflow(ctrl uint32) uint32 {
+	if ctrl&v28OverflowMask == v28OverflowMask {
+		return ctrl
+	}
+	return ctrl + (1 << v28OverflowShift)
+}
+
+//go:nosplit
+func v28LoadTagWords(b *v28Bucket) archsimd.Uint8x32 {
+	return archsimd.LoadUint8x32((*[32]uint8)(unsafe.Pointer(&b.tags[0])))
+}
+
+//go:nosplit
+func v28StoreTag(b *v28Bucket, lane uintptr, tag uint8) {
+	b.tags[lane] = tag
+}
+
+//go:nosplit
+func v28MatchBits(words archsimd.Uint8x32, tag uint8) uint32 {
+	return words.Equal(archsimd.BroadcastUint8x32(tag)).ToBits() & v28LaneMask
+}
+
+//go:nosplit
+func v28EmptyBits(words archsimd.Uint8x32) uint32 {
+	return words.Equal(archsimd.BroadcastUint8x32(v28TagEmpty)).ToBits() & v28LaneMask
+}
+
+//go:nosplit
+func v28DeletedBits(words archsimd.Uint8x32) uint32 {
+	return words.Equal(archsimd.BroadcastUint8x32(v28TagDeleted)).ToBits() & v28LaneMask
+}
+
+//go:nosplit
+func v28FullBits(words archsimd.Uint8x32) uint32 {
+	return ^(v28EmptyBits(words) | v28DeletedBits(words)) & v28LaneMask
+}
