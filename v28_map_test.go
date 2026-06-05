@@ -144,6 +144,78 @@ func TestV28MapAutoWyhashKeepsFloatSemantics(t *testing.T) {
 	}
 }
 
+func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
+	var m V28Map[int, int]
+	const key = 42
+
+	m.Store(key, key)
+	table := m.table.Load()
+	if table == nil {
+		t.Fatal("table is nil")
+	}
+	keyCopy := key
+	_, start := v28HashParts(m.hashKey(&keyCopy), table.intKey, table.mask)
+	b := table.buckets.At(start)
+	ctrl := b.ctrl.Load()
+
+	if actual, loaded := m.LoadOrStore(key, 99); !loaded || actual != key {
+		t.Fatalf("LoadOrStore = (%d, %v), want (%d, true)", actual, loaded, key)
+	}
+	if got := b.ctrl.Load(); got != ctrl {
+		t.Fatalf("LoadOrStore bumped ctrl: got %#x, want %#x", got, ctrl)
+	}
+	if previous, loaded := m.LoadAndUpdate(key, key); !loaded || previous != key {
+		t.Fatalf("LoadAndUpdate = (%d, %v), want (%d, true)", previous, loaded, key)
+	}
+	if got := b.ctrl.Load(); got != ctrl {
+		t.Fatalf("LoadAndUpdate bumped ctrl: got %#x, want %#x", got, ctrl)
+	}
+	m.Store(key, key)
+	if got := b.ctrl.Load(); got != ctrl {
+		t.Fatalf("Store bumped ctrl: got %#x, want %#x", got, ctrl)
+	}
+	if m.CompareAndSwap(key, key+1, key+2) {
+		t.Fatal("CompareAndSwap with mismatched old succeeded")
+	}
+	if got := b.ctrl.Load(); got != ctrl {
+		t.Fatalf("failed CompareAndSwap bumped ctrl: got %#x, want %#x", got, ctrl)
+	}
+	if !m.CompareAndSwap(key, key, key) {
+		t.Fatal("CompareAndSwap with equal old/new failed")
+	}
+	if got := b.ctrl.Load(); got != ctrl {
+		t.Fatalf("same-value CompareAndSwap bumped ctrl: got %#x, want %#x", got, ctrl)
+	}
+	if m.CompareAndDelete(key, key+1) {
+		t.Fatal("CompareAndDelete with mismatched old succeeded")
+	}
+	if got := b.ctrl.Load(); got != ctrl {
+		t.Fatalf("failed CompareAndDelete bumped ctrl: got %#x, want %#x", got, ctrl)
+	}
+}
+
+func TestV28MapLoadAndUpdateDoesNotInsert(t *testing.T) {
+	var m V28Map[int, int]
+
+	if previous, loaded := m.LoadAndUpdate(1, 10); loaded || previous != 0 {
+		t.Fatalf("missing LoadAndUpdate = (%d, %v), want (0, false)", previous, loaded)
+	}
+	if _, ok := m.Load(1); ok {
+		t.Fatal("LoadAndUpdate inserted missing key")
+	}
+
+	m.Store(1, 1)
+	if previous, loaded := m.LoadAndDelete(1); !loaded || previous != 1 {
+		t.Fatalf("LoadAndDelete = (%d, %v), want (1, true)", previous, loaded)
+	}
+	if previous, loaded := m.LoadAndUpdate(1, 10); loaded || previous != 0 {
+		t.Fatalf("tombstone LoadAndUpdate = (%d, %v), want (0, false)", previous, loaded)
+	}
+	if _, ok := m.Load(1); ok {
+		t.Fatal("LoadAndUpdate revived deleted key")
+	}
+}
+
 func TestV28MapComputeInsertDelete(t *testing.T) {
 	m := NewV28Map[string, int]()
 

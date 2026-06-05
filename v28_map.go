@@ -563,17 +563,15 @@ func (m *V28Map[K, V]) storeIn(
 				goto retryBucket
 			}
 			if k == *key {
+				if onlyIfAbsent {
+					return v28OK, v, true, false
+				}
+				if v28EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(val))) {
+					return v28OK, v, true, false
+				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
 					return status, *new(V), false, false
-				}
-				if onlyIfAbsent {
-					v28EndWriteUnchanged(b, ctrl)
-					return v28OK, v, true, false
-				}
-				if v28EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
-					v28EndWriteUnchanged(b, ctrl)
-					return v28OK, e.val, true, false
 				}
 				e.val = *val
 				v28EndWriteModified(b, ctrl)
@@ -661,17 +659,15 @@ func (m *V28Map[K, V]) updateIn(
 				goto retryBucket
 			}
 			if k == *key {
-				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
-				if status != v28OK {
-					return status, *new(V), false, false
-				}
 				if onlyIfAbsent {
-					v28EndWriteUnchanged(b, ctrl)
 					return v28OK, previous, true, false
 				}
 				if v28EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&previous)), noescape(unsafe.Pointer(val))) {
-					v28EndWriteUnchanged(b, ctrl)
 					return v28OK, previous, true, false
+				}
+				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+				if status != v28OK {
+					return status, *new(V), false, false
 				}
 				e.val = *val
 				v28EndWriteModified(b, ctrl)
@@ -679,55 +675,17 @@ func (m *V28Map[K, V]) updateIn(
 			}
 			match &= match - 1
 		}
-		if v28EnableSameKeyTombstoneReuse {
-			deleted := v28DeletedBits(words)
-			for deleted != 0 {
-				lane := uintptr(bits.TrailingZeros32(deleted))
-				e := table.entry(bi, lane)
-				k := e.key
-				if ctrl != b.ctrl.Load() {
-					goto retryBucket
-				}
-				if k == *key {
-					ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
-					if status != v28OK {
-						return status, *new(V), false, false
-					}
-					e.val = *val
-					v28StoreTag(b, lane, tag)
-					v28EndWriteModified(b, ctrl)
-					m.size.Add(v28CntDeleted, ^uintptr(0))
-					return v28OK, *new(V), false, false
-				}
-				deleted &= deleted - 1
-			}
-		}
-		if empty := v28EmptyBits(words); empty != 0 {
+		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
-			if status != v28OK {
-				return status, *new(V), false, false
-			}
-			lane := uintptr(bits.TrailingZeros32(empty))
-			if probe != 0 && !table.addOverflow(start, probe) {
-				v28EndWriteUnchanged(b, ctrl)
-				return v28Retry, *new(V), false, false
-			}
-			e := table.entry(bi, lane)
-			e.key = *key
-			e.val = *val
-			v28StoreTag(b, lane, tag)
-			v28EndWriteModified(b, ctrl)
-			m.size.Add(v28CntUsed, 1)
-			return v28OK, *new(V), false, empty&(empty-1) == 0
+			return v28OK, *new(V), false, false
 		}
 		if ctrl != b.ctrl.Load() {
 			goto retryBucket
 		}
 	}
-	return v28Full, *new(V), false, false
+	return v28OK, *new(V), false, false
 }
 
 func (m *V28Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
@@ -849,13 +807,15 @@ func (m *V28Map[K, V]) compareAndSwapIn(
 				goto retryBucket
 			}
 			if k == *key {
+				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+					return v28OK, false
+				}
+				if m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(new))) {
+					return v28OK, true
+				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
 					return status, false
-				}
-				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
-					v28EndWriteUnchanged(b, ctrl)
-					return v28OK, false
 				}
 				e.val = *new
 				v28EndWriteModified(b, ctrl)
@@ -904,13 +864,12 @@ func (m *V28Map[K, V]) compareAndDeleteIn(
 				goto retryBucket
 			}
 			if k == *key {
+				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+					return v28OK, false
+				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
 					return status, false
-				}
-				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
-					v28EndWriteUnchanged(b, ctrl)
-					return v28OK, false
 				}
 				if !v28EnableSameKeyTombstoneReuse {
 					e.key = *new(K)
