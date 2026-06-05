@@ -3,6 +3,7 @@
 package cc
 
 import (
+	"math"
 	"strconv"
 	"sync"
 	"testing"
@@ -106,6 +107,43 @@ func TestV28MapBasicOperations(t *testing.T) {
 	}
 }
 
+type v28AutoWyhashRawKey struct {
+	A uint64
+	B uint64
+}
+
+func TestV28MapAutoWyhashSelection(t *testing.T) {
+	if v28AutoWyHash[string]() == nil {
+		t.Fatal("string key did not select auto wyhash")
+	}
+	if v28AutoWyHash[v28AutoWyhashRawKey]() == nil {
+		t.Fatal("regular-memory key did not select auto wyhash")
+	}
+	if v28AutoWyHash[float64]() != nil {
+		t.Fatal("float64 key selected raw wyhash and would break +0/-0 hash semantics")
+	}
+}
+
+func TestV28MapAutoWyhashStringSemantics(t *testing.T) {
+	var m V28Map[string, int]
+	stored := string([]byte("same-content"))
+	lookup := string([]byte("same-content"))
+
+	m.Store(stored, 7)
+	if v, ok := m.Load(lookup); !ok || v != 7 {
+		t.Fatalf("Load(equal string) = (%d, %v), want (7, true)", v, ok)
+	}
+}
+
+func TestV28MapAutoWyhashKeepsFloatSemantics(t *testing.T) {
+	var m V28Map[float64, int]
+
+	m.Store(0.0, 9)
+	if v, ok := m.Load(math.Copysign(0, -1)); !ok || v != 9 {
+		t.Fatalf("Load(-0) = (%d, %v), want (9, true)", v, ok)
+	}
+}
+
 func TestV28MapComputeInsertDelete(t *testing.T) {
 	m := NewV28Map[string, int]()
 
@@ -184,6 +222,9 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 }
 
 func TestV28MapOverflowHint(t *testing.T) {
+	if v28OverflowMode == v28OverflowNone {
+		t.Skip("overflow hints disabled")
+	}
 	m := NewV28Map[int, int](
 		WithCapacity(8),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),

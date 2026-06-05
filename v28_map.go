@@ -12,15 +12,6 @@ import (
 )
 
 const (
-	v28MinBuckets      = 8
-	v28SlotsPerBucket  = 28
-	v28LoadFactorNum   = 15
-	v28LoadFactorDen   = 16
-	v28MaxProbeBuckets = 8
-	v28LaneMask        = uint32(1)<<v28SlotsPerBucket - 1
-)
-
-const (
 	// v28EnableIntKey enables the specialized integer hash/start path.
 	v28EnableIntKey = true
 	// v28EnableDedupVal skips publishing an update when the new value equals
@@ -38,6 +29,31 @@ const (
 	// the same key. When disabled, deletes clear both key and value while the
 	// tombstone remains as a probe-continuation marker until resize compaction.
 	v28EnableSameKeyTombstoneReuse = true
+	// v28EnableFastFullBits computes full lanes with one unsigned byte compare
+	// (tag > deleted) instead of two equality compares (empty/deleted).
+	v28EnableFastFullBits = true
+	// v28OverflowMode controls the probe-chain overflow hint. V28 keeps
+	// deletes as tombstones, so empty lanes do not reappear before resize; this
+	// makes the hint a performance experiment rather than a required invariant.
+	v28OverflowMode = v28OverflowNone
+	// v28EnableAutoWyHash replaces Go's built-in hasher for safe non-integer
+	// key shapes where wyHash preserves == semantics.
+	v28EnableAutoWyHash = true
+)
+
+const (
+	v28OverflowExact = iota
+	v28OverflowHome
+	v28OverflowNone
+)
+
+const (
+	v28MinBuckets      = 8
+	v28SlotsPerBucket  = 28
+	v28LoadFactorNum   = 15
+	v28LoadFactorDen   = 16
+	v28MaxProbeBuckets = 8
+	v28LaneMask        = uint32(1)<<v28SlotsPerBucket - 1
 )
 
 const (
@@ -83,10 +99,12 @@ const (
 // Reads use a bucket version snapshot; writes publish through a short
 // per-bucket writing window, and resize freezes old buckets cooperatively.
 //
-// WARNING: integer keys use the fast integer hash path. For other key types,
-// especially string keys, the default Go built-in/maphash-style hashers may
-// contend with the SIMD probing path on some CPUs. Use [WithKeyHasherUnsafe]
-// with a fast non-AES hash such as wyhash or xxh3 when measuring throughput.
+// Integer keys use the fast integer hash path. For string keys and key types
+// that Go marks as regular memory, V28Map automatically uses an internal
+// wyhash-based hasher to avoid the AES-heavy built-in hash path contending
+// with SIMD probing on some CPUs. Other comparable key shapes keep Go's
+// built-in hasher to preserve == semantics. Use [WithKeyHasherUnsafe] to
+// supply a faster non-AES hasher such as wyhash or xxh3 for custom key types.
 type V28Map[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[v28Table[K, V]]
@@ -152,6 +170,10 @@ func (m *V28Map[K, V]) init(cfg *MapConfig) {
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
 		m.intKey = false
+	} else if !m.intKey {
+		if keyHash := v28AutoWyHash[K](); keyHash != nil {
+			m.keyHash = keyHash
+		}
 	}
 	if cfg.valEqual != nil {
 		m.valEqual = cfg.valEqual
@@ -1188,6 +1210,22 @@ func (m *V28Map[K, V]) hashKey(key *K) uintptr {
 	return m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 }
 
+func v28AutoWyHash[K comparable]() HashFunc {
+	if !v28EnableAutoWyHash {
+		return nil
+	}
+	keyType := iTypeOf((map[K]struct{})(nil)).MapType().Key
+	if keyType.Kind_&v28KindMask == v28KindString {
+		return wyHashStr
+	}
+	if keyType.TFlag&v28TFlagRegularMem != 0 {
+		return func(ptr unsafe.Pointer, seed uintptr) uintptr {
+			return wyHashMem(ptr, unsafe.Sizeof(*new(K)), seed)
+		}
+	}
+	return nil
+}
+
 func newV28Table[K comparable, V any](bucketLen uintptr, intKey bool) *v28Table[K, V] {
 	bucketLen = nextPowOf2(max(bucketLen, uintptr(v28MinBuckets)))
 	slotLen := bucketLen * v28SlotsPerBucket
@@ -1271,38 +1309,68 @@ func (table *v28Table[K, V]) entry(bucketIdx, lane uintptr) *v28Entry[K, V] {
 }
 
 func (table *v28Table[K, V]) addOverflow(start uintptr, count uintptr) bool {
-	for probe := uintptr(0); probe < count; probe++ {
-		b := table.buckets.At((start + probe) & table.mask)
-		for {
-			ctrl := b.ctrl.Load()
-			if ctrl&v28FrozenMask != 0 {
+	switch v28OverflowMode {
+	case v28OverflowNone:
+		return true
+	case v28OverflowHome:
+		if count == 0 {
+			return true
+		}
+		return table.addOverflowAt(start)
+	default:
+		for probe := uintptr(0); probe < count; probe++ {
+			if !table.addOverflowAt((start + probe) & table.mask) {
 				return false
-			}
-			if ctrl&v28WritingMask != 0 {
-				return false
-			}
-			next := v28IncOverflow(ctrl)
-			if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
-				break
 			}
 		}
+		return true
 	}
-	return true
+}
+
+func (table *v28Table[K, V]) addOverflowAt(bucketIdx uintptr) bool {
+	b := table.buckets.At(bucketIdx)
+	for {
+		ctrl := b.ctrl.Load()
+		if ctrl&v28FrozenMask != 0 {
+			return false
+		}
+		if ctrl&v28WritingMask != 0 {
+			return false
+		}
+		next := v28IncOverflow(ctrl)
+		if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
+			return true
+		}
+	}
 }
 
 func (table *v28Table[K, V]) addOverflowForCopyConcurrent(start uintptr, count uintptr) {
-	for probe := uintptr(0); probe < count; probe++ {
-		b := table.buckets.At((start + probe) & table.mask)
-		for {
-			ctrl := b.ctrl.Load()
-			if ctrl&v28WritingMask != 0 {
-				runtime.Gosched()
-				continue
-			}
-			next := v28IncOverflow(ctrl)
-			if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
-				break
-			}
+	switch v28OverflowMode {
+	case v28OverflowNone:
+		return
+	case v28OverflowHome:
+		if count != 0 {
+			table.addOverflowAtForCopyConcurrent(start)
+		}
+		return
+	default:
+		for probe := uintptr(0); probe < count; probe++ {
+			table.addOverflowAtForCopyConcurrent((start + probe) & table.mask)
+		}
+	}
+}
+
+func (table *v28Table[K, V]) addOverflowAtForCopyConcurrent(bucketIdx uintptr) {
+	b := table.buckets.At(bucketIdx)
+	for {
+		ctrl := b.ctrl.Load()
+		if ctrl&v28WritingMask != 0 {
+			runtime.Gosched()
+			continue
+		}
+		next := v28IncOverflow(ctrl)
+		if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
+			return
 		}
 	}
 }
@@ -1431,5 +1499,135 @@ func v28DeletedBits(words archsimd.Uint8x32) uint32 {
 
 //go:nosplit
 func v28FullBits(words archsimd.Uint8x32) uint32 {
+	if v28EnableFastFullBits {
+		return words.Greater(archsimd.BroadcastUint8x32(v28TagDeleted)).ToBits() & v28LaneMask
+	}
 	return ^(v28EmptyBits(words) | v28DeletedBits(words)) & v28LaneMask
+}
+
+// ============================================================================
+// v28 Hash Utilities
+// ============================================================================
+
+const (
+	v28KindMask        = iKind(0x1f)
+	v28KindString      = iKind(24)
+	v28TFlagRegularMem = iTFlag(1 << 3)
+)
+
+const (
+	wyP0 = uint64(0xa0761d6478bd642f)
+	wyP1 = uint64(0xe7037ed1a0b428db)
+	wyP2 = uint64(0x8ebc6af09c88c6e3)
+	wyP3 = uint64(0x589965cc75374cc3)
+	wyP4 = uint64(0x1d8e4e27c47d124f)
+)
+
+//go:nosplit
+func wyHashStr(ptr unsafe.Pointer, seed uintptr) uintptr {
+	return uintptr(wyHashPtr(noEscape(unsafe.StringData(*(*string)(ptr))), len(*(*string)(ptr)), uint64(seed)))
+}
+
+//go:nosplit
+func wyHashMem(ptr unsafe.Pointer, size uintptr, seed uintptr) uintptr {
+	return uintptr(wyHashPtr((*byte)(noescape(ptr)), int(size), uint64(seed)))
+}
+
+//go:nosplit
+func wyHashPtr(ptr *byte, n int, seed uint64) uint64 {
+	if n == 0 {
+		return seed
+	}
+
+	switch {
+	case n < 4:
+		return wyMul(wyMul(wyRead3(ptr, n)^seed^wyP0, seed^wyP1)^seed, uint64(n)^wyP4)
+	case n <= 8:
+		return wyMul(wyMul(uint64(wyRead32(ptr, 0))^seed^wyP0, uint64(wyRead32(ptr, n-4))^seed^wyP1)^seed, uint64(n)^wyP4)
+	case n <= 16:
+		return wyMul(wyMul(wyRead8Mix(ptr, 0)^seed^wyP0, wyRead8Mix(ptr, n-8)^seed^wyP1)^seed, uint64(n)^wyP4)
+	case n <= 24:
+		return wyMul(wyMul(wyRead8Mix(ptr, 0)^seed^wyP0, wyRead8Mix(ptr, 8)^seed^wyP1)^wyMul(wyRead8Mix(ptr, n-8)^seed^wyP2, seed^wyP3), uint64(n)^wyP4)
+	case n <= 32:
+		return wyMul(wyMul(wyRead8Mix(ptr, 0)^seed^wyP0, wyRead8Mix(ptr, 8)^seed^wyP1)^wyMul(wyRead8Mix(ptr, 16)^seed^wyP2, wyRead8Mix(ptr, n-8)^seed^wyP3), uint64(n)^wyP4)
+	}
+
+	see1 := seed
+	i := 0
+	for n-i > 256 {
+		seed = wyMul(wyRead64(ptr, i)^seed^wyP0, wyRead64(ptr, i+8)^seed^wyP1) ^
+			wyMul(wyRead64(ptr, i+16)^seed^wyP2, wyRead64(ptr, i+24)^seed^wyP3)
+		see1 = wyMul(wyRead64(ptr, i+32)^see1^wyP1, wyRead64(ptr, i+40)^see1^wyP2) ^
+			wyMul(wyRead64(ptr, i+48)^see1^wyP3, wyRead64(ptr, i+56)^see1^wyP0)
+		seed = wyMul(wyRead64(ptr, i+64)^seed^wyP0, wyRead64(ptr, i+72)^seed^wyP1) ^
+			wyMul(wyRead64(ptr, i+80)^seed^wyP2, wyRead64(ptr, i+88)^seed^wyP3)
+		see1 = wyMul(wyRead64(ptr, i+96)^see1^wyP1, wyRead64(ptr, i+104)^see1^wyP2) ^
+			wyMul(wyRead64(ptr, i+112)^see1^wyP3, wyRead64(ptr, i+120)^see1^wyP0)
+		seed = wyMul(wyRead64(ptr, i+128)^seed^wyP0, wyRead64(ptr, i+136)^seed^wyP1) ^
+			wyMul(wyRead64(ptr, i+144)^seed^wyP2, wyRead64(ptr, i+152)^seed^wyP3)
+		see1 = wyMul(wyRead64(ptr, i+160)^see1^wyP1, wyRead64(ptr, i+168)^see1^wyP2) ^
+			wyMul(wyRead64(ptr, i+176)^see1^wyP3, wyRead64(ptr, i+184)^see1^wyP0)
+		seed = wyMul(wyRead64(ptr, i+192)^seed^wyP0, wyRead64(ptr, i+200)^seed^wyP1) ^
+			wyMul(wyRead64(ptr, i+208)^seed^wyP2, wyRead64(ptr, i+216)^seed^wyP3)
+		see1 = wyMul(wyRead64(ptr, i+224)^see1^wyP1, wyRead64(ptr, i+232)^see1^wyP2) ^
+			wyMul(wyRead64(ptr, i+240)^see1^wyP3, wyRead64(ptr, i+248)^see1^wyP0)
+		i += 256
+	}
+
+	for n-i > 32 {
+		seed = wyMul(wyRead64(ptr, i)^seed^wyP0, wyRead64(ptr, i+8)^seed^wyP1)
+		see1 = wyMul(wyRead64(ptr, i+16)^see1^wyP2, wyRead64(ptr, i+24)^see1^wyP3)
+		i += 32
+	}
+
+	tail := n - i
+	switch {
+	case tail < 4:
+		seed = wyMul(wyRead3At(ptr, i, tail)^seed^wyP0, seed^wyP1)
+	case tail <= 8:
+		seed = wyMul(uint64(wyRead32(ptr, i))^seed^wyP0, uint64(wyRead32(ptr, n-4))^seed^wyP1)
+	case tail <= 16:
+		seed = wyMul(wyRead8Mix(ptr, i)^seed^wyP0, wyRead8Mix(ptr, n-8)^seed^wyP1)
+	case tail <= 24:
+		seed = wyMul(wyRead8Mix(ptr, i)^seed^wyP0, wyRead8Mix(ptr, i+8)^seed^wyP1)
+		see1 = wyMul(wyRead8Mix(ptr, n-8)^see1^wyP2, see1^wyP3)
+	default:
+		seed = wyMul(wyRead8Mix(ptr, i)^seed^wyP0, wyRead8Mix(ptr, i+8)^seed^wyP1)
+		see1 = wyMul(wyRead8Mix(ptr, i+16)^see1^wyP2, wyRead8Mix(ptr, n-8)^see1^wyP3)
+	}
+
+	return wyMul(seed^see1, uint64(n)^wyP4)
+}
+
+//go:nosplit
+func wyMul(a, b uint64) uint64 {
+	hi, lo := bits.Mul64(a, b)
+	return hi ^ lo
+}
+
+//go:nosplit
+func wyRead3(ptr *byte, n int) uint64 {
+	return wyRead3At(ptr, 0, n)
+}
+
+//go:nosplit
+func wyRead3At(ptr *byte, i int, n int) uint64 {
+	return uint64(*(*byte)(unsafe.Add(unsafe.Pointer(ptr), i)))<<16 |
+		uint64(*(*byte)(unsafe.Add(unsafe.Pointer(ptr), i+(n>>1))))<<8 |
+		uint64(*(*byte)(unsafe.Add(unsafe.Pointer(ptr), i+n-1)))
+}
+
+//go:nosplit
+func wyRead8Mix(ptr *byte, i int) uint64 {
+	return uint64(wyRead32(ptr, i))<<32 | uint64(wyRead32(ptr, i+4))
+}
+
+//go:nosplit
+func wyRead64(ptr *byte, i int) uint64 {
+	return *(*uint64)(unsafe.Add(unsafe.Pointer(ptr), i))
+}
+
+//go:nosplit
+func wyRead32(ptr *byte, i int) uint32 {
+	return *(*uint32)(unsafe.Add(unsafe.Pointer(ptr), i))
 }
