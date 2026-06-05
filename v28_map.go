@@ -21,7 +21,22 @@ const (
 )
 
 const (
-	v28EnableAggressiveGrow        = true
+	// v28EnableIntKey enables the specialized integer hash/start path.
+	v28EnableIntKey = true
+	// v28EnableDedupVal skips publishing an update when the new value equals
+	// the existing value and a value equality function is available.
+	v28EnableDedupVal = true
+	// v28EnableStoreInGrow lets writers keep retrying against the old table
+	// while a resize leader is allocating/publishing the next table. Keep it
+	// off by default so writers join cooperative resize instead of extending
+	// contention on old buckets.
+	v28EnableStoreInGrow = false
+	// v28EnableAggressiveGrow adds one extra size class on probe-limit resize
+	// or observed concurrent insert pressure during table allocation.
+	v28EnableAggressiveGrow = true
+	// v28EnableSameKeyTombstoneReuse lets a Store revive a tombstone left by
+	// the same key. When disabled, deletes clear both key and value while the
+	// tombstone remains as a probe-continuation marker until resize compaction.
 	v28EnableSameKeyTombstoneReuse = true
 )
 
@@ -92,14 +107,14 @@ type v28Table[K comparable, V any] struct {
 	stripeCap     int
 	growCap       int
 	intKey        bool
-	nextTable     atomic.Pointer[v28Table[K, V]]
+	chunks        uint32
+	chunkSz       uintptr
 	allocating    atomic.Uint32
 	copyIdx       atomic.Uint32
 	copyDone      atomic.Uint32
 	copyMaxProbe  atomic.Uintptr
-	chunks        uint32
-	chunkSz       uintptr
-	bucketBacking []byte
+	nextTable     atomic.Pointer[v28Table[K, V]]
+	bucketBacking unsafe.Pointer
 }
 
 type v28Bucket struct {
@@ -133,6 +148,7 @@ func (m *V28Map[K, V]) init(cfg *MapConfig) {
 		cfg.valEqual = parseValueInterface[V]()
 	}
 	m.keyHash, m.valEqual, m.intKey = defaultHasher[K, V]()
+	m.intKey = v28EnableIntKey && m.intKey
 	if cfg.keyHash != nil {
 		m.keyHash = cfg.keyHash
 		m.intKey = false
@@ -533,7 +549,7 @@ func (m *V28Map[K, V]) storeIn(
 					v28EndWriteUnchanged(b, ctrl)
 					return v28OK, v, true, false
 				}
-				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
+				if v28EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
 					v28EndWriteUnchanged(b, ctrl)
 					return v28OK, e.val, true, false
 				}
@@ -631,7 +647,7 @@ func (m *V28Map[K, V]) updateIn(
 					v28EndWriteUnchanged(b, ctrl)
 					return v28OK, previous, true, false
 				}
-				if m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&previous)), noescape(unsafe.Pointer(val))) {
+				if v28EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&previous)), noescape(unsafe.Pointer(val))) {
 					v28EndWriteUnchanged(b, ctrl)
 					return v28OK, previous, true, false
 				}
@@ -1029,11 +1045,20 @@ func (m *V28Map[K, V]) resizeIfNeeded(table *v28Table[K, V]) {
 		m.tryResize(table, used, v28ResizeNormal)
 		return
 	}
-	deleted := int(m.size.Value(v28CntDeleted))
-	live := used - deleted
-	if deleted > v28SlotsPerBucket && deleted > live/4 {
-		m.tryResize(table, used, v28ResizeCompact)
-	}
+
+	// Keep resize frequency low on write-heavy workloads. Tombstones remain
+	// physical occupancy and are compacted when normal grow or probe-limit
+	// resize happens; tryResize sizes the next table from live entries.
+	//
+	// The old eager compact threshold is intentionally disabled for now. It can
+	// reduce miss-path tombstone drag, but it may trigger full-table copy long
+	// before physical occupancy reaches growCap.
+	//
+	// deleted := int(m.size.Value(v28CntDeleted))
+	// live := used - deleted
+	// if deleted > v28SlotsPerBucket && deleted > live/4 {
+	// 	m.tryResize(table, used, v28ResizeCompact)
+	// }
 }
 
 func (m *V28Map[K, V]) tryResize(old *v28Table[K, V], used int, hint v28ResizeHint) *v28Table[K, V] {
@@ -1059,6 +1084,9 @@ func (m *V28Map[K, V]) tryResize(old *v28Table[K, V], used int, hint v28ResizeHi
 			next = newV28Table[K, V](nextLen, old.intKey)
 			old.nextTable.Store(next)
 		} else {
+			if v28EnableStoreInGrow {
+				return old
+			}
 			for next == nil {
 				runtime.Gosched()
 				next = old.nextTable.Load()
@@ -1184,13 +1212,14 @@ func newV28Table[K comparable, V any](bucketLen uintptr, intKey bool) *v28Table[
 	}
 }
 
-func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], []byte) {
+func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], unsafe.Pointer) {
 	stride := unsafe.Sizeof(v28Bucket{})
-	const align = cacheLineSize
+	align := stride // cacheLineSize
 	backing := make([]byte, bucketLen*stride+align-1)
-	base := uintptr(unsafe.Pointer(unsafe.SliceData(backing)))
+	basePtr := unsafe.Pointer(unsafe.SliceData(backing))
+	base := uintptr(basePtr)
 	aligned := (base + align - 1) &^ (align - 1)
-	return unsafeSlice[v28Bucket]{ptr: unsafe.Pointer(aligned)}, backing
+	return unsafeSlice[v28Bucket]{ptr: unsafe.Pointer(aligned)}, basePtr
 }
 
 //go:nosplit
