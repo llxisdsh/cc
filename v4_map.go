@@ -29,11 +29,11 @@ const (
 )
 
 const (
-	v4MinBuckets      = 8
+	v4MinBuckets      = 32
 	v4SlotsPerBucket  = 4
-	v4LoadFactorNum   = 15
+	v4LoadFactorNum   = 12
 	v4LoadFactorDen   = 16
-	v4MaxProbeBuckets = 8
+	v4MaxProbeBuckets = 32
 	v4LaneMarkerMask  = uint32(0x80808080)
 )
 
@@ -1144,13 +1144,20 @@ func newV4Table[K comparable, V any](bucketLen uintptr, intKey bool) *v4Table[K,
 //go:nosplit
 func v4HashParts(hash uintptr, intKey bool, mask uintptr) (uint8, uintptr) {
 	if intKey {
-		tag := h2(hash ^ (hash >> 16))
+		// if bitSize == 32 {
+		// 	mixed := uint32(hash) * uint32(0x9e3779b9)
+		// 	tag := uint8(mixed >> 24)
+		// 	if tag < 2 {
+		// 		tag += 2
+		// 	}
+		// 	return tag, uintptr(mixed) & mask
+		// }
+		mixed := uint64(hash) * uint64(0x9e3779b97f4a7c15)
+		tag := uint8(mixed >> 56)
 		if tag < 2 {
 			tag += 2
 		}
-		group := hash / v4SlotsPerBucket
-		group ^= group >> bits.Len(uint(mask))
-		return tag, group & mask
+		return tag, uintptr(mixed>>32) & mask
 	}
 	tag := h2(hash)
 	if tag < 2 {
