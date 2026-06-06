@@ -437,19 +437,21 @@ func TestV28MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
 }
 
 func TestV28MapBucketAndEntryAlignment(t *testing.T) {
-	if size := unsafe.Sizeof(v28Bucket{}); size != 32 {
+	size := unsafe.Sizeof(v28Bucket{})
+	if size != 32 {
 		t.Fatalf("bucket size = %d, want 32", size)
 	}
 	table := newV28Table[int, int](v28MinBuckets, true)
 	bucketBase := uintptr(unsafe.Pointer(table.buckets.At(0)))
-	if bucketBase&(uintptr(cacheLineSize)-1) != 0 {
-		t.Fatalf("bucket base = %#x, want %d-byte aligned", bucketBase, cacheLineSize)
+	align := size
+	if bucketBase&(uintptr(align)-1) != 0 {
+		t.Fatalf("bucket base = %#x, want %d-byte aligned", bucketBase, align)
 	}
-	if uintptr(unsafe.Pointer(table.buckets.At(1)))-bucketBase != unsafe.Sizeof(v28Bucket{}) {
+	if uintptr(unsafe.Pointer(table.buckets.At(1)))-bucketBase != size {
 		t.Fatal("bucket stride mismatch")
 	}
-	// entryBase := uintptr(unsafe.Pointer(table.entries.At(0)))
-	// if entryBase&(uintptr(cacheLineSize)-1) != 0 {
-	// 	t.Fatalf("entry base = %#x, want %d-byte aligned", entryBase, cacheLineSize)
-	// }
+	entryBase := uintptr(unsafe.Pointer(table.entries.At(0)))
+	if entryBase&(uintptr(align)-1) != 0 {
+		t.Fatalf("entry base = %#x, want %d-byte aligned", entryBase, align)
+	}
 }
