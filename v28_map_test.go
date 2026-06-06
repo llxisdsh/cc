@@ -293,6 +293,33 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 	}
 }
 
+func TestV28MapRangeSnapshotDoesNotRepeatBucketAfterMutation(t *testing.T) {
+	m := NewV28Map[int, int](
+		WithCapacity(8),
+		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
+	)
+	for i := 0; i < 3; i++ {
+		m.Store(i, i)
+	}
+
+	seen := map[int]int{}
+	mutated := false
+	m.Range(func(k, v int) bool {
+		seen[k]++
+		if !mutated {
+			mutated = true
+			m.Store(2, 20)
+		}
+		return true
+	})
+
+	for i := 0; i < 3; i++ {
+		if seen[i] != 1 {
+			t.Fatalf("Range yielded key %d %d times, want once; seen=%v", i, seen[i], seen)
+		}
+	}
+}
+
 func TestV28MapOverflowHint(t *testing.T) {
 	if v28OverflowMode == v28OverflowNone {
 		t.Skip("overflow hints disabled")

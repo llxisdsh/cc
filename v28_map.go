@@ -184,53 +184,43 @@ func (m *V28Map[K, V]) init(cfg *MapConfig) {
 }
 
 func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
-	for {
-		table := m.table.Load()
-		if table == nil {
-			return *new(V), false
-		}
-		hash := m.hashKey(noEscape(&key))
-		tag, start := v28HashParts(hash, table.intKey, table.mask)
-		for probe := uintptr(0); probe < table.probeLimit; probe++ {
-			bi := (start + probe) & table.mask
-			b := table.buckets.At(bi)
-		retryBucket:
-			ctrl := b.ctrl.Load()
-			if ctrl&v28WritingMask != 0 {
-				goto retryBucket
-			}
-			words := v28LoadTagWords(b)
-			match := v28MatchBits(words, tag)
-			for match != 0 {
-				lane := uintptr(bits.TrailingZeros32(match))
-				e := table.entry(bi, lane)
-				k, v := e.key, e.val
-				ctrl2 := b.ctrl.Load()
-				if ctrl != ctrl2 || ctrl2&v28WritingMask != 0 {
-					goto retryBucket
-				}
-				if k == key {
-					return v, true
-				}
-				match &= match - 1
-			}
-			if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
-				if ctrl != b.ctrl.Load() {
-					goto retryBucket
-				}
-				if next := table.nextTable.Load(); next != nil {
-					m.helpResizeInto(table, next)
-					break
-				}
-				return *new(V), false
-			}
-		}
-		if next := table.nextTable.Load(); next != nil {
-			m.helpResizeInto(table, next)
-			continue
-		}
+	table := m.table.Load()
+	if table == nil {
 		return *new(V), false
 	}
+	hash := m.hashKey(noEscape(&key))
+	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28WritingMask != 0 {
+			goto retryBucket
+		}
+		words := v28LoadTagWords(b)
+		match := v28MatchBits(words, tag)
+		for match != 0 {
+			lane := uintptr(bits.TrailingZeros32(match))
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			ctrl2 := b.ctrl.Load()
+			if ctrl != ctrl2 || ctrl2&v28WritingMask != 0 {
+				goto retryBucket
+			}
+			if k == key {
+				return v, true
+			}
+			match &= match - 1
+		}
+		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return *new(V), false
+		}
+	}
+	return *new(V), false
 }
 
 func (m *V28Map[K, V]) Store(key K, value V) {
@@ -350,38 +340,43 @@ func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loa
 }
 
 func (m *V28Map[K, V]) Range(yield func(K, V) bool) {
-	for {
-		table := m.table.Load()
-		if table == nil {
-			return
-		}
-		for i := uintptr(0); i <= table.mask; i++ {
-			b := table.buckets.At(i)
-		retry:
-			ctrl := b.ctrl.Load()
-			if ctrl&v28WritingMask != 0 {
-				goto retry
-			}
-			words := v28LoadTagWords(b)
-			full := v28FullBits(words)
-			for full != 0 {
-				lane := uintptr(bits.TrailingZeros32(full))
-				e := table.entry(i, lane)
-				k, v := e.key, e.val
-				if ctrl != b.ctrl.Load() {
-					goto retry
-				}
-				if !yield(k, v) {
-					return
-				}
-				full &= full - 1
-			}
-		}
-		if next := table.nextTable.Load(); next != nil {
-			m.helpResizeInto(table, next)
-			continue
-		}
+	table := m.table.Load()
+	if table == nil {
 		return
+	}
+
+	type rangeEntry[K comparable, V any] struct {
+		key K
+		val V
+	}
+
+	var cache [v28SlotsPerBucket]rangeEntry[K, V]
+	for i := uintptr(0); i <= table.mask; i++ {
+		b := table.buckets.At(i)
+	retry:
+		ctrl := b.ctrl.Load()
+		if ctrl&v28WritingMask != 0 {
+			goto retry
+		}
+		words := v28LoadTagWords(b)
+		full := v28FullBits(words)
+		cacheCount := 0
+		for full != 0 {
+			lane := uintptr(bits.TrailingZeros32(full))
+			e := table.entry(i, lane)
+			cache[cacheCount] = rangeEntry[K, V]{key: e.key, val: e.val}
+			cacheCount++
+			full &= full - 1
+		}
+		ctrl2 := b.ctrl.Load()
+		if ctrl != ctrl2 || ctrl2&v28WritingMask != 0 {
+			goto retry
+		}
+		for j := 0; j < cacheCount; j++ {
+			if !yield(cache[j].key, cache[j].val) {
+				return
+			}
+		}
 	}
 }
 
