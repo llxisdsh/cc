@@ -1,0 +1,1322 @@
+package cc
+
+import (
+	"math/bits"
+	"math/rand/v2"
+	"runtime"
+	"sync/atomic"
+	"unsafe"
+)
+
+const (
+	// v4EnableIntKey enables the specialized integer hash/start path.
+	v4EnableIntKey = true
+	// v4EnableDedupVal skips publishing an update when the new value equals
+	// the existing value and a value equality function is available.
+	v4EnableDedupVal = true
+	// v4EnableStoreInGrow lets writers keep retrying against the old table
+	// while a resize leader is allocating/publishing the next table. Keep it
+	// off by default so writers join cooperative resize instead of extending
+	// contention on old buckets.
+	v4EnableStoreInGrow = false
+	// v4EnableAggressiveGrow adds one extra size class on probe-limit resize
+	// or observed concurrent insert pressure during table allocation.
+	v4EnableAggressiveGrow = true
+	// v4EnableSameKeyTombstoneReuse lets a Store revive a tombstone left by
+	// the same key. When disabled, deletes clear both key and value while the
+	// tombstone remains as a probe-continuation marker until resize compaction.
+	v4EnableSameKeyTombstoneReuse = true
+)
+
+const (
+	v4MinBuckets      = 8
+	v4SlotsPerBucket  = 4
+	v4LoadFactorNum   = 15
+	v4LoadFactorDen   = 16
+	v4MaxProbeBuckets = 8
+	v4LaneMarkerMask  = uint32(0x80808080)
+)
+
+const (
+	v4TagEmpty   = uint8(0)
+	v4TagDeleted = uint8(1)
+)
+
+const (
+	// Keep ctrl for version/frozen/writing only. If miss-heavy workloads need a
+	// probe-continuation hint, prefer a side structure so displaced inserts do not
+	// have to update shared bucket metadata.
+	v4VersionMask = uint32(0x3fffffff)
+	v4FrozenMask  = uint32(1) << 30
+	v4WritingMask = uint32(1) << 31
+)
+
+const (
+	v4CntUsed = iota
+	v4CntDeleted
+)
+
+type v4Status uint8
+
+const (
+	v4OK v4Status = iota
+	v4Full
+	v4Retry
+	v4Frozen
+)
+
+type v4ResizeHint uint8
+
+const (
+	v4ResizeNormal v4ResizeHint = iota
+	v4ResizeProbeLimit
+	v4ResizeCompact
+)
+
+// V4Map is an experimental SWAR-probed open-addressed map.
+//
+// Each bucket stores four one-byte tags plus a compact control word. Entries
+// are kept in a separate flat array and addressed by bucket/lane, so probing
+// stays compact while key/value storage remains contiguous. Reads use a bucket
+// version snapshot; writes publish through a short per-bucket writing window,
+// and resize freezes old buckets cooperatively.
+//
+// Integer keys use the fast integer hash path. Other comparable key shapes
+// keep Go's built-in hasher to preserve == semantics. Use [WithKeyHasherUnsafe]
+// to supply a custom hasher for custom key types.
+type V4Map[K comparable, V any] struct {
+	_         noCopy
+	table     atomic.Pointer[v4Table[K, V]]
+	initState atomic.Uint32
+	intKey    bool
+	seed      uintptr
+	keyHash   HashFunc
+	valEqual  EqualFunc
+	minLen    uintptr
+	size      PLocalCounterN
+}
+
+type v4Table[K comparable, V any] struct {
+	buckets      unsafeSlice[v4Bucket]
+	entries      unsafeSlice[v4Entry[K, V]]
+	mask         uintptr
+	probeLimit   uintptr
+	stripeCap    int
+	growCap      int
+	intKey       bool
+	chunks       uint32
+	chunkSz      uintptr
+	allocating   atomic.Uint32
+	copyIdx      atomic.Uint32
+	copyDone     atomic.Uint32
+	copyMaxProbe atomic.Uintptr
+	nextTable    atomic.Pointer[v4Table[K, V]]
+}
+
+type v4Bucket struct {
+	tags [4]byte
+	ctrl atomic.Uint32
+}
+
+type v4Entry[K comparable, V any] struct {
+	key K
+	val V
+}
+
+func NewV4Map[K comparable, V any](options ...func(*MapConfig)) *V4Map[K, V] {
+	var cfg MapConfig
+	for _, o := range options {
+		o(noEscape(&cfg))
+	}
+	m := &V4Map[K, V]{}
+	m.init(noEscape(&cfg))
+	return m
+}
+
+func (m *V4Map[K, V]) init(cfg *MapConfig) {
+	if cfg.keyHash == nil {
+		cfg.keyHash = parseKeyInterface[K]()
+	}
+	if cfg.valEqual == nil {
+		cfg.valEqual = parseValueInterface[V]()
+	}
+	m.keyHash, m.valEqual, m.intKey = defaultHasher[K, V]()
+	m.intKey = v4EnableIntKey && m.intKey
+	if cfg.keyHash != nil {
+		m.keyHash = cfg.keyHash
+		m.intKey = false
+	}
+	if cfg.valEqual != nil {
+		m.valEqual = cfg.valEqual
+	}
+	m.seed = uintptr(rand.Uint64())
+	m.minLen = v4CalcBucketLen(cfg.capacity)
+	m.table.Store(newV4Table[K, V](m.minLen, m.intKey))
+}
+
+func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
+	table := m.table.Load()
+	if table == nil {
+		return *new(V), false
+	}
+	hash := m.hashKey(noEscape(&key))
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4WritingMask != 0 {
+			goto retryBucket
+		}
+		words := v4LoadTagWords(b)
+		match := v4MatchBits(words, tag)
+		for match != 0 {
+			lane := v4FirstMarkedLane(match)
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			ctrl2 := b.ctrl.Load()
+			if ctrl != ctrl2 || ctrl2&v4WritingMask != 0 {
+				goto retryBucket
+			}
+			if k == key {
+				return v, true
+			}
+			match &= match - 1
+		}
+		if v4EmptyBits(words) != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return *new(V), false
+		}
+	}
+	return *new(V), false
+}
+
+func (m *V4Map[K, V]) Store(key K, value V) {
+	m.store(noEscape(&key), noEscape(&value), false)
+}
+
+func (m *V4Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+	return m.store(noEscape(&key), noEscape(&value), true)
+}
+
+func (m *V4Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
+	return m.update(noEscape(&key), noEscape(&value), false)
+}
+
+func (m *V4Map[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
+	return m.delete(noEscape(&key), true)
+}
+
+func (m *V4Map[K, V]) Delete(key K) {
+	_, _ = m.delete(noEscape(&key), false)
+}
+
+func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
+	table := m.table.Load()
+	if table == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("cc: value is not comparable; use WithValueEqual")
+	}
+	hash := m.hashKey(noEscape(&key))
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return false
+			}
+			hash = m.hashKey(noEscape(&key))
+			continue
+		}
+		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), noEscape(&new))
+		switch status {
+		case v4OK:
+			return swapped
+		case v4Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(noEscape(&key))
+		case v4Retry:
+			runtime.Gosched()
+		case v4Full:
+			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			hash = m.hashKey(noEscape(&key))
+		}
+	}
+}
+
+func (m *V4Map[K, V]) CompareAndDelete(key K, old V) bool {
+	table := m.table.Load()
+	if table == nil {
+		return false
+	}
+	if m.valEqual == nil {
+		panic("cc: value is not comparable; use WithValueEqual")
+	}
+	hash := m.hashKey(noEscape(&key))
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return false
+			}
+			hash = m.hashKey(noEscape(&key))
+			continue
+		}
+		status, deleted := m.compareAndDeleteIn(table, noEscape(&key), hash, noEscape(&old))
+		switch status {
+		case v4OK:
+			return deleted
+		case v4Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(noEscape(&key))
+		case v4Retry:
+			runtime.Gosched()
+		case v4Full:
+			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			hash = m.hashKey(noEscape(&key))
+		}
+	}
+}
+
+func (m *V4Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loaded bool) {
+	table := m.ensureTable()
+	hash := m.hashKey(noEscape(&key))
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			hash = m.hashKey(noEscape(&key))
+			continue
+		}
+		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
+		switch status {
+		case v4OK:
+			if !loaded && shouldCheckResize && int(m.size.Get(v4CntUsed)) >= table.stripeCap {
+				m.resizeIfNeeded(table)
+			}
+			return actual, loaded
+		case v4Full:
+			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			hash = m.hashKey(noEscape(&key))
+		case v4Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(noEscape(&key))
+		case v4Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V4Map[K, V]) Range(yield func(K, V) bool) {
+	table := m.table.Load()
+	if table == nil {
+		return
+	}
+
+	type rangeEntry[K comparable, V any] struct {
+		key K
+		val V
+	}
+
+	var cache [v4SlotsPerBucket]rangeEntry[K, V]
+	for i := uintptr(0); i <= table.mask; i++ {
+		b := table.buckets.At(i)
+	retry:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4WritingMask != 0 {
+			goto retry
+		}
+		words := v4LoadTagWords(b)
+		full := v4FullBits(words)
+		cacheCount := 0
+		for full != 0 {
+			lane := v4FirstMarkedLane(full)
+			e := table.entry(i, lane)
+			cache[cacheCount] = rangeEntry[K, V]{key: e.key, val: e.val}
+			cacheCount++
+			full &= full - 1
+		}
+		ctrl2 := b.ctrl.Load()
+		if ctrl != ctrl2 || ctrl2&v4WritingMask != 0 {
+			goto retry
+		}
+		for j := 0; j < cacheCount; j++ {
+			if !yield(cache[j].key, cache[j].val) {
+				return
+			}
+		}
+	}
+}
+
+func (m *V4Map[K, V]) All() func(yield func(K, V) bool) {
+	return m.Range
+}
+
+type V4MapStats struct {
+	Buckets        uintptr
+	Capacity       uintptr
+	Live           uintptr
+	Used           uintptr
+	Deleted        uintptr
+	FullBuckets    uintptr
+	FullLanes      uintptr
+	EmptyLanes     uintptr
+	TombstoneLanes uintptr
+	MaxProbe       uintptr
+	ProbeTotal     uintptr
+	ProbeSamples   uintptr
+}
+
+func (m *V4Map[K, V]) Stats() V4MapStats {
+	table := m.table.Load()
+	used := m.size.Value(v4CntUsed)
+	deleted := m.size.Value(v4CntDeleted)
+	stats := V4MapStats{
+		Live:    used - deleted,
+		Used:    used,
+		Deleted: deleted,
+	}
+	if table == nil {
+		return stats
+	}
+	stats.Buckets = table.bucketLen()
+	stats.Capacity = stats.Buckets * v4SlotsPerBucket
+	for i := uintptr(0); i <= table.mask; i++ {
+		b := table.buckets.At(i)
+		words := v4LoadTagWords(b)
+		full := v4FullBits(words)
+		empty := v4EmptyBits(words)
+		deleted := v4DeletedBits(words)
+		fullCount := uintptr(bits.OnesCount32(full))
+		stats.FullLanes += fullCount
+		stats.EmptyLanes += uintptr(bits.OnesCount32(empty))
+		stats.TombstoneLanes += uintptr(bits.OnesCount32(deleted))
+		if fullCount == v4SlotsPerBucket {
+			stats.FullBuckets++
+		}
+		fullScan := full
+		for fullScan != 0 {
+			lane := v4FirstMarkedLane(fullScan)
+			e := table.entry(i, lane)
+			hash := m.hashKey(noEscape(&e.key))
+			_, start := v4HashParts(hash, table.intKey, table.mask)
+			probe := (i - start) & table.mask
+			stats.ProbeTotal += probe
+			stats.ProbeSamples++
+			if probe > stats.MaxProbe {
+				stats.MaxProbe = probe
+			}
+			fullScan &= fullScan - 1
+		}
+	}
+	return stats
+}
+
+func (m *V4Map[K, V]) Size() int {
+	used := int(m.size.Value(v4CntUsed))
+	deleted := int(m.size.Value(v4CntDeleted))
+	return max(used-deleted, 0)
+}
+
+func (m *V4Map[K, V]) Clear() {
+	if m.table.Load() == nil {
+		return
+	}
+	m.size.Clear()
+	m.table.Store(newV4Table[K, V](m.minLen, m.intKey))
+}
+
+func (m *V4Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
+	table := m.ensureTable()
+	hash := m.hashKey(key)
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			hash = m.hashKey(key)
+			continue
+		}
+		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
+		switch status {
+		case v4OK:
+			if !loaded && shouldCheckResize && int(m.size.Get(v4CntUsed)) >= table.stripeCap {
+				m.resizeIfNeeded(table)
+			}
+			return actual, loaded
+		case v4Full:
+			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			hash = m.hashKey(key)
+		case v4Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(key)
+		case v4Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V4Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loaded bool) {
+	table := m.table.Load()
+	if table == nil {
+		return *new(V), false
+	}
+	hash := m.hashKey(key)
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return *new(V), false
+			}
+			hash = m.hashKey(key)
+			continue
+		}
+		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
+		switch status {
+		case v4OK:
+			if !loaded && shouldCheckResize && int(m.size.Get(v4CntUsed)) >= table.stripeCap {
+				m.resizeIfNeeded(table)
+			}
+			return previous, loaded
+		case v4Full:
+			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			hash = m.hashKey(key)
+		case v4Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(key)
+		case v4Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V4Map[K, V]) storeIn(
+	table *v4Table[K, V],
+	key *K,
+	val *V,
+	hash uintptr,
+	onlyIfAbsent bool,
+) (v4Status, V, bool, bool) {
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4FrozenMask != 0 {
+			return v4Frozen, *new(V), false, false
+		}
+		if ctrl&v4WritingMask != 0 {
+			return v4Retry, *new(V), false, false
+		}
+		words := v4LoadTagWords(b)
+		match := v4MatchBits(words, tag)
+		for match != 0 {
+			lane := v4FirstMarkedLane(match)
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				if onlyIfAbsent {
+					return v4OK, v, true, false
+				}
+				if v4EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(val))) {
+					return v4OK, v, true, false
+				}
+				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+				if status != v4OK {
+					return status, *new(V), false, false
+				}
+				e.val = *val
+				v4EndWriteModified(b, ctrl)
+				return v4OK, *val, true, false
+			}
+			match &= match - 1
+		}
+		if v4EnableSameKeyTombstoneReuse {
+			deleted := v4DeletedBits(words)
+			for deleted != 0 {
+				lane := v4FirstMarkedLane(deleted)
+				e := table.entry(bi, lane)
+				k := e.key
+				if ctrl != b.ctrl.Load() {
+					goto retryBucket
+				}
+				if k == *key {
+					ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+					if status != v4OK {
+						return status, *new(V), false, false
+					}
+					e.val = *val
+					v4StoreTag(b, lane, tag)
+					v4EndWriteModified(b, ctrl)
+					m.size.Add(v4CntDeleted, ^uintptr(0))
+					return v4OK, *val, false, false
+				}
+				deleted &= deleted - 1
+			}
+		}
+		if empty := v4EmptyBits(words); empty != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+			if status != v4OK {
+				return status, *new(V), false, false
+			}
+			lane := v4FirstMarkedLane(empty)
+			e := table.entry(bi, lane)
+			e.key = *key
+			e.val = *val
+			v4StoreTag(b, lane, tag)
+			v4EndWriteModified(b, ctrl)
+			m.size.Add(v4CntUsed, 1)
+			return v4OK, *val, false, empty&(empty-1) == 0
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v4Full, *new(V), false, false
+}
+
+func (m *V4Map[K, V]) updateIn(
+	table *v4Table[K, V],
+	key *K,
+	val *V,
+	hash uintptr,
+	onlyIfAbsent bool,
+) (v4Status, V, bool, bool) {
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4FrozenMask != 0 {
+			return v4Frozen, *new(V), false, false
+		}
+		if ctrl&v4WritingMask != 0 {
+			return v4Retry, *new(V), false, false
+		}
+		words := v4LoadTagWords(b)
+		match := v4MatchBits(words, tag)
+		for match != 0 {
+			lane := v4FirstMarkedLane(match)
+			e := table.entry(bi, lane)
+			k, previous := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				if onlyIfAbsent {
+					return v4OK, previous, true, false
+				}
+				if v4EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&previous)), noescape(unsafe.Pointer(val))) {
+					return v4OK, previous, true, false
+				}
+				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+				if status != v4OK {
+					return status, *new(V), false, false
+				}
+				e.val = *val
+				v4EndWriteModified(b, ctrl)
+				return v4OK, previous, true, false
+			}
+			match &= match - 1
+		}
+		if v4EmptyBits(words) != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return v4OK, *new(V), false, false
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v4OK, *new(V), false, false
+}
+
+func (m *V4Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
+	table := m.table.Load()
+	if table == nil {
+		return *new(V), false
+	}
+	hash := m.hashKey(key)
+	for {
+		if next := table.nextTable.Load(); next != nil {
+			table = m.helpResizeInto(table, next)
+			if table == nil {
+				return *new(V), false
+			}
+			hash = m.hashKey(key)
+			continue
+		}
+		status, previous, loaded := m.deleteIn(table, key, hash, needValue)
+		switch status {
+		case v4OK:
+			return previous, loaded
+		case v4Full:
+			return *new(V), false
+		case v4Frozen:
+			table = m.helpResize(table)
+			hash = m.hashKey(key)
+		case v4Retry:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (m *V4Map[K, V]) deleteIn(
+	table *v4Table[K, V],
+	key *K,
+	hash uintptr,
+	needValue bool,
+) (v4Status, V, bool) {
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4FrozenMask != 0 {
+			return v4Frozen, *new(V), false
+		}
+		if ctrl&v4WritingMask != 0 {
+			return v4Retry, *new(V), false
+		}
+		words := v4LoadTagWords(b)
+		match := v4MatchBits(words, tag)
+		for match != 0 {
+			lane := v4FirstMarkedLane(match)
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+				if status != v4OK {
+					return status, *new(V), false
+				}
+				var prev V
+				if needValue {
+					prev = v
+				}
+				if !v4EnableSameKeyTombstoneReuse {
+					e.key = *new(K)
+				}
+				e.val = *new(V)
+				v4StoreTag(b, lane, v4TagDeleted)
+				v4EndWriteModified(b, ctrl)
+				m.size.Add(v4CntDeleted, 1)
+				return v4OK, prev, true
+			}
+			match &= match - 1
+		}
+		if v4EmptyBits(words) != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return v4OK, *new(V), false
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v4Full, *new(V), false
+}
+
+func (m *V4Map[K, V]) compareAndSwapIn(
+	table *v4Table[K, V],
+	key *K,
+	hash uintptr,
+	old *V,
+	new *V,
+) (v4Status, bool) {
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4FrozenMask != 0 {
+			return v4Frozen, false
+		}
+		if ctrl&v4WritingMask != 0 {
+			return v4Retry, false
+		}
+		words := v4LoadTagWords(b)
+		match := v4MatchBits(words, tag)
+		for match != 0 {
+			lane := v4FirstMarkedLane(match)
+			e := table.entry(bi, lane)
+			k, cur := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+					return v4OK, false
+				}
+				if m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(new))) {
+					return v4OK, true
+				}
+				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+				if status != v4OK {
+					return status, false
+				}
+				e.val = *new
+				v4EndWriteModified(b, ctrl)
+				return v4OK, true
+			}
+			match &= match - 1
+		}
+		if v4EmptyBits(words) != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return v4OK, false
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v4Full, false
+}
+
+func (m *V4Map[K, V]) compareAndDeleteIn(
+	table *v4Table[K, V],
+	key *K,
+	hash uintptr,
+	old *V,
+) (v4Status, bool) {
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4FrozenMask != 0 {
+			return v4Frozen, false
+		}
+		if ctrl&v4WritingMask != 0 {
+			return v4Retry, false
+		}
+		words := v4LoadTagWords(b)
+		match := v4MatchBits(words, tag)
+		for match != 0 {
+			lane := v4FirstMarkedLane(match)
+			e := table.entry(bi, lane)
+			k, cur := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+					return v4OK, false
+				}
+				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+				if status != v4OK {
+					return status, false
+				}
+				if !v4EnableSameKeyTombstoneReuse {
+					e.key = *new(K)
+				}
+				e.val = *new(V)
+				v4StoreTag(b, lane, v4TagDeleted)
+				v4EndWriteModified(b, ctrl)
+				m.size.Add(v4CntDeleted, 1)
+				return v4OK, true
+			}
+			match &= match - 1
+		}
+		if v4EmptyBits(words) != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			return v4OK, false
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v4Full, false
+}
+
+func (m *V4Map[K, V]) computeIn(
+	table *v4Table[K, V],
+	key *K,
+	hash uintptr,
+	fn func(e *MapEntry[K, V]),
+) (v4Status, V, bool, bool) {
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe < table.probeLimit; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+	retryBucket:
+		ctrl := b.ctrl.Load()
+		if ctrl&v4FrozenMask != 0 {
+			return v4Frozen, *new(V), false, false
+		}
+		if ctrl&v4WritingMask != 0 {
+			return v4Retry, *new(V), false, false
+		}
+		words := v4LoadTagWords(b)
+		match := v4MatchBits(words, tag)
+		for match != 0 {
+			lane := v4FirstMarkedLane(match)
+			e := table.entry(bi, lane)
+			k, v := e.key, e.val
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			if k == *key {
+				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+				if status != v4OK {
+					return status, *new(V), false, false
+				}
+				it := MapEntry[K, V]{
+					entry:  entry_[K, V]{hash: hash, key: *key, value: v},
+					loaded: true,
+				}
+				fn(noEscape(&it))
+				switch it.op {
+				case updateOp:
+					e.val = it.entry.value
+					v4EndWriteModified(b, ctrl)
+					return v4OK, it.entry.value, true, false
+				case deleteOp:
+					if !v4EnableSameKeyTombstoneReuse {
+						e.key = *new(K)
+					}
+					e.val = *new(V)
+					v4StoreTag(b, lane, v4TagDeleted)
+					v4EndWriteModified(b, ctrl)
+					m.size.Add(v4CntDeleted, 1)
+					return v4OK, it.entry.value, true, false
+				default:
+					v4EndWriteUnchanged(b, ctrl)
+					return v4OK, it.entry.value, true, false
+				}
+			}
+			match &= match - 1
+		}
+		if v4EnableSameKeyTombstoneReuse {
+			deleted := v4DeletedBits(words)
+			for deleted != 0 {
+				lane := v4FirstMarkedLane(deleted)
+				e := table.entry(bi, lane)
+				k := e.key
+				if ctrl != b.ctrl.Load() {
+					goto retryBucket
+				}
+				if k == *key {
+					ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+					if status != v4OK {
+						return status, *new(V), false, false
+					}
+					it := MapEntry[K, V]{
+						entry: entry_[K, V]{hash: hash, key: *key},
+					}
+					fn(noEscape(&it))
+					if it.op != updateOp {
+						v4EndWriteUnchanged(b, ctrl)
+						return v4OK, *new(V), false, false
+					}
+					e.val = it.entry.value
+					v4StoreTag(b, lane, tag)
+					v4EndWriteModified(b, ctrl)
+					m.size.Add(v4CntDeleted, ^uintptr(0))
+					return v4OK, it.entry.value, false, false
+				}
+				deleted &= deleted - 1
+			}
+		}
+		if empty := v4EmptyBits(words); empty != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
+			if status != v4OK {
+				return status, *new(V), false, false
+			}
+			lane := v4FirstMarkedLane(empty)
+			it := MapEntry[K, V]{
+				entry: entry_[K, V]{hash: hash, key: *key},
+			}
+			fn(noEscape(&it))
+			if it.op != updateOp {
+				v4EndWriteUnchanged(b, ctrl)
+				return v4OK, *new(V), false, false
+			}
+			e := table.entry(bi, lane)
+			e.key = *key
+			e.val = it.entry.value
+			v4StoreTag(b, lane, tag)
+			v4EndWriteModified(b, ctrl)
+			m.size.Add(v4CntUsed, 1)
+			return v4OK, it.entry.value, false, empty&(empty-1) == 0
+		}
+		if ctrl != b.ctrl.Load() {
+			goto retryBucket
+		}
+	}
+	return v4Full, *new(V), false, false
+}
+
+func (m *V4Map[K, V]) resizeIfNeeded(table *v4Table[K, V]) {
+	used := int(m.size.Value(v4CntUsed))
+	if used >= table.growCap {
+		m.tryResize(table, used, v4ResizeNormal)
+		return
+	}
+
+	// Keep resize frequency low on write-heavy workloads. Tombstones remain
+	// physical occupancy and are compacted when normal grow or probe-limit
+	// resize happens; tryResize sizes the next table from live entries.
+	//
+	// The old eager compact threshold is intentionally disabled for now. It can
+	// reduce miss-path tombstone drag, but it may trigger full-table copy long
+	// before physical occupancy reaches growCap.
+	//
+	// deleted := int(m.size.Value(v4CntDeleted))
+	// live := used - deleted
+	// if deleted > v4SlotsPerBucket && deleted > live/4 {
+	// 	m.tryResize(table, used, v4ResizeCompact)
+	// }
+}
+
+func (m *V4Map[K, V]) tryResize(old *v4Table[K, V], used int, hint v4ResizeHint) *v4Table[K, V] {
+	if table := m.table.Load(); table != old {
+		return table
+	}
+	next := old.nextTable.Load()
+	if next == nil {
+		if old.allocating.CompareAndSwap(0, 1) {
+			deleted := int(m.size.Value(v4CntDeleted))
+			live := used - deleted
+			nextLen := v4CalcBucketLen(live)
+			nextLen = max(nextLen, m.minLen)
+			aggressive := hint == v4ResizeProbeLimit
+			if v4EnableAggressiveGrow {
+				curUsed := int(m.size.Value(v4CntUsed))
+				usedInResize := curUsed - used
+				aggressive = aggressive || usedInResize >= 2
+			}
+			if aggressive {
+				nextLen = min(nextLen<<1, old.bucketLen()<<2)
+			}
+			next = newV4Table[K, V](nextLen, old.intKey)
+			old.nextTable.Store(next)
+		} else {
+			if v4EnableStoreInGrow {
+				return old
+			}
+			for next == nil {
+				runtime.Gosched()
+				next = old.nextTable.Load()
+			}
+		}
+	}
+	return m.helpResizeInto(old, next)
+}
+
+func (m *V4Map[K, V]) helpResize(old *v4Table[K, V]) *v4Table[K, V] {
+	next := old.nextTable.Load()
+	if next == nil {
+		return m.tryResize(old, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+	}
+	return m.helpResizeInto(old, next)
+}
+
+func (m *V4Map[K, V]) helpResizeInto(old, next *v4Table[K, V]) *v4Table[K, V] {
+	for {
+		chunk := old.copyIdx.Add(1) - 1
+		if chunk >= old.chunks {
+			for {
+				table := m.table.Load()
+				if table != old {
+					return table
+				}
+				runtime.Gosched()
+			}
+		}
+		copyMaxProbe := uintptr(0)
+		start := uintptr(chunk) * old.chunkSz
+		end := min(start+old.chunkSz, old.bucketLen())
+		for i := start; i < end; i++ {
+			b := old.buckets.At(i)
+			words := v4FreezeAndLoadTags(b)
+			full := v4FullBits(words)
+			for full != 0 {
+				lane := v4FirstMarkedLane(full)
+				e := old.entry(i, lane)
+				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)))
+				if probe > copyMaxProbe {
+					copyMaxProbe = probe
+				}
+				full &= full - 1
+			}
+		}
+		for {
+			cur := next.copyMaxProbe.Load()
+			if copyMaxProbe <= cur {
+				break
+			}
+			if next.copyMaxProbe.CompareAndSwap(cur, copyMaxProbe) {
+				break
+			}
+		}
+		if old.copyDone.Add(1) == old.chunks {
+			observed := next.copyMaxProbe.Load() + 1
+			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, uintptr(v4MaxProbeBuckets))))
+			used := m.size.Reset(v4CntUsed)
+			deleted := m.size.Reset(v4CntDeleted)
+			m.size.Add(v4CntUsed, used-deleted)
+			m.table.CompareAndSwap(old, next)
+		}
+	}
+}
+
+func (m *V4Map[K, V]) ensureTable() *v4Table[K, V] {
+	if table := m.table.Load(); table != nil {
+		return table
+	}
+	return m.slowInit()
+}
+
+//go:noinline
+func (m *V4Map[K, V]) slowInit() *v4Table[K, V] {
+	for {
+		table := m.table.Load()
+		if table != nil {
+			return table
+		}
+		if m.initState.CompareAndSwap(0, 1) {
+			table = m.table.Load()
+			if table == nil {
+				var cfg MapConfig
+				m.init(noEscape(&cfg))
+				table = m.table.Load()
+			}
+			return table
+		}
+		runtime.Gosched()
+	}
+}
+
+//go:nosplit
+func (m *V4Map[K, V]) hashKey(key *K) uintptr {
+	if m.intKey {
+		return intHash[K](noescape(unsafe.Pointer(key)))
+	}
+	return m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+}
+
+func newV4Table[K comparable, V any](bucketLen uintptr, intKey bool) *v4Table[K, V] {
+	bucketLen = nextPowOf2(max(bucketLen, uintptr(v4MinBuckets)))
+	slotLen := bucketLen * v4SlotsPerBucket
+	growCap := int(slotLen * v4LoadFactorNum / v4LoadFactorDen)
+	cpus := max(uintptr(runtime.GOMAXPROCS(0)), 1)
+	roundedSizeLen := nextPowOf2(cpus)
+	stripeCap := int(uintptr(growCap) >> bits.TrailingZeros(uint(roundedSizeLen)))
+	chunks, chunkSz := v4ResizeChunks(bucketLen, cpus)
+	buckets := makeUnsafeSlice[v4Bucket](bucketLen)
+	entries := makeUnsafeSlice[v4Entry[K, V]](slotLen)
+	return &v4Table[K, V]{
+		buckets:    buckets,
+		entries:    entries,
+		mask:       bucketLen - 1,
+		probeLimit: min(bucketLen, uintptr(v4MaxProbeBuckets)),
+		stripeCap:  stripeCap,
+		growCap:    growCap,
+		intKey:     intKey,
+		chunks:     chunks,
+		chunkSz:    chunkSz,
+	}
+}
+
+//go:nosplit
+func v4HashParts(hash uintptr, intKey bool, mask uintptr) (uint8, uintptr) {
+	if intKey {
+		tag := h2(hash ^ (hash >> 16))
+		if tag < 2 {
+			tag += 2
+		}
+		group := hash / v4SlotsPerBucket
+		group ^= group >> bits.Len(uint(mask))
+		return tag, group & mask
+	}
+	tag := h2(hash)
+	if tag < 2 {
+		tag += 2
+	}
+	return tag, h1(hash) & mask
+}
+
+//go:nosplit
+func v4CalcBucketLen(capacity int) uintptr {
+	if capacity <= 0 {
+		return v4MinBuckets
+	}
+	needSlots := uintptr(capacity+1) * v4LoadFactorDen / v4LoadFactorNum
+	needBuckets := (needSlots + v4SlotsPerBucket - 1) / v4SlotsPerBucket
+	return nextPowOf2(max(needBuckets, uintptr(v4MinBuckets)))
+}
+
+//go:nosplit
+func v4ResizeChunks(bucketLen, cpus uintptr) (chunks uint32, chunkSz uintptr) {
+	const overCpus = resizeOverPartition
+	want := min(bucketLen/v4MinBuckets, max(cpus*overCpus, 1))
+	if want <= 1 {
+		return 1, bucketLen
+	}
+	c := uint32(1) << (bits.Len32(uint32(want)) - 1)
+	return c, bucketLen >> bits.TrailingZeros32(c)
+}
+
+//go:nosplit
+func (table *v4Table[K, V]) bucketLen() uintptr {
+	return table.mask + 1
+}
+
+//go:nosplit
+func (table *v4Table[K, V]) entry(bucketIdx, lane uintptr) *v4Entry[K, V] {
+	return table.entries.At(bucketIdx*v4SlotsPerBucket + lane)
+}
+
+func (table *v4Table[K, V]) copyInsertConcurrent(e *v4Entry[K, V], hash uintptr) uintptr {
+	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	for probe := uintptr(0); probe <= table.mask; probe++ {
+		bi := (start + probe) & table.mask
+		b := table.buckets.At(bi)
+		ctrl, status := v4BeginWrite(b)
+		if status == v4Retry {
+			probe--
+			runtime.Gosched()
+			continue
+		}
+		if status != v4OK {
+			probe--
+			runtime.Gosched()
+			continue
+		}
+		words := v4LoadTagWords(b)
+		empty := v4EmptyBits(words)
+		if empty == 0 {
+			v4EndWriteUnchanged(b, ctrl)
+			continue
+		}
+		lane := v4FirstMarkedLane(empty)
+		dst := table.entry(bi, lane)
+		dst.key = e.key
+		dst.val = e.val
+		v4StoreTag(b, lane, tag)
+		v4EndWriteModified(b, ctrl)
+		return probe
+	}
+	panic("cc: V4Map grow produced a full table")
+}
+
+func v4BeginWrite(b *v4Bucket) (uint32, v4Status) {
+	ctrl := b.ctrl.Load()
+	return v4BeginWriteWithCtrl(b, ctrl)
+}
+
+func v4BeginWriteWithCtrl(b *v4Bucket, ctrl uint32) (uint32, v4Status) {
+	if ctrl&v4FrozenMask != 0 {
+		return 0, v4Frozen
+	}
+	if ctrl&v4WritingMask != 0 {
+		return 0, v4Retry
+	}
+	if !b.ctrl.CompareAndSwap(ctrl, ctrl|v4WritingMask) {
+		return 0, v4Retry
+	}
+	return ctrl, v4OK
+}
+
+func v4EndWriteUnchanged(b *v4Bucket, ctrl uint32) {
+	b.ctrl.Store(ctrl &^ v4WritingMask)
+}
+
+func v4EndWriteModified(b *v4Bucket, ctrl uint32) {
+	b.ctrl.Store(v4BumpCtrl(ctrl))
+}
+
+func v4FreezeAndLoadTags(b *v4Bucket) uint32 {
+	for {
+		ctrl := b.ctrl.Load()
+		if ctrl&v4FrozenMask != 0 {
+			return v4LoadTagWords(b)
+		}
+		if ctrl&v4WritingMask != 0 {
+			runtime.Gosched()
+			continue
+		}
+		if b.ctrl.CompareAndSwap(ctrl, ctrl|v4WritingMask) {
+			b.ctrl.Store(v4BumpCtrl(ctrl | v4FrozenMask | v4WritingMask))
+			return v4LoadTagWords(b)
+		}
+	}
+}
+
+//go:nosplit
+func v4BumpCtrl(ctrl uint32) uint32 {
+	return (ctrl &^ (v4VersionMask | v4WritingMask)) | ((ctrl + 1) & v4VersionMask)
+}
+
+//go:nosplit
+func v4LoadTagWords(b *v4Bucket) uint32 {
+	return uint32(b.tags[0]) |
+		uint32(b.tags[1])<<8 |
+		uint32(b.tags[2])<<16 |
+		uint32(b.tags[3])<<24
+}
+
+//go:nosplit
+func v4StoreTag(b *v4Bucket, lane uintptr, tag uint8) {
+	b.tags[lane] = tag
+}
+
+//go:nosplit
+func v4MatchBits(words uint32, tag uint8) uint32 {
+	return v4ZeroByteBits(words ^ v4BroadcastTag(tag))
+}
+
+//go:nosplit
+func v4EmptyBits(words uint32) uint32 {
+	return v4ZeroByteBits(words)
+}
+
+//go:nosplit
+func v4DeletedBits(words uint32) uint32 {
+	return v4ZeroByteBits(words ^ v4BroadcastTag(v4TagDeleted))
+}
+
+//go:nosplit
+func v4FullBits(words uint32) uint32 {
+	// Full lanes are encoded as tags >= 2; empty is 0 and deleted is 1.
+	return ^(v4EmptyBits(words) | v4DeletedBits(words)) & v4LaneMarkerMask
+}
+
+//go:nosplit
+func v4BroadcastTag(tag uint8) uint32 {
+	return uint32(tag) * 0x01010101
+}
+
+//go:nosplit
+func v4ZeroByteBits(words uint32) uint32 {
+	const lowBits = uint32(0x7f7f7f7f)
+	return ^(((words & lowBits) + lowBits) | words | lowBits) & v4LaneMarkerMask
+}
+
+//go:nosplit
+func v4FirstMarkedLane(marked uint32) uintptr {
+	return uintptr(bits.TrailingZeros32(marked)) >> 3
+}

@@ -1189,17 +1189,18 @@ func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], unsafe.Pointer) 
 
 //go:nosplit
 func v28HashParts(hash uintptr, intKey bool, mask uintptr) (uint8, uintptr) {
-	var tag uint8
 	if intKey {
-		tag = h2(hash ^ (hash >> 16))
-	} else {
-		tag = h2(hash)
+		tag := h2(hash ^ (hash >> 16))
+		if tag < 2 {
+			tag += 2
+		}
+		group := hash / v28SlotsPerBucket
+		group ^= group >> bits.Len(uint(mask))
+		return tag, group & mask
 	}
+	tag := h2(hash)
 	if tag < 2 {
 		tag += 2
-	}
-	if intKey {
-		return tag, (hash / v28SlotsPerBucket) & mask
 	}
 	return tag, h1(hash) & mask
 }

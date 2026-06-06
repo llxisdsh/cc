@@ -1,5 +1,3 @@
-//go:build !race && amd64 && goexperiment.simd
-
 package cc
 
 import (
@@ -10,8 +8,8 @@ import (
 	"unsafe"
 )
 
-func TestV28MapZeroValue(t *testing.T) {
-	var m V28Map[string, int]
+func TestV4MapZeroValue(t *testing.T) {
+	var m V4Map[string, int]
 
 	if _, ok := m.Load("missing"); ok {
 		t.Fatal("zero-value Load hit")
@@ -54,7 +52,7 @@ func TestV28MapZeroValue(t *testing.T) {
 		t.Fatal("Clear did not remove zero-value initialized key")
 	}
 
-	var c V28Map[string, int]
+	var c V4Map[string, int]
 	actual, loaded := c.Compute("k", func(e *MapEntry[string, int]) {
 		if e.Loaded() {
 			t.Fatal("zero-value Compute insert reported loaded")
@@ -66,8 +64,8 @@ func TestV28MapZeroValue(t *testing.T) {
 	}
 }
 
-func TestV28MapBasicOperations(t *testing.T) {
-	m := NewV28Map[string, int](WithCapacity(8))
+func TestV4MapBasicOperations(t *testing.T) {
+	m := NewV4Map[string, int](WithCapacity(8))
 
 	if _, ok := m.Load("missing"); ok {
 		t.Fatal("unexpected hit for missing key")
@@ -107,25 +105,8 @@ func TestV28MapBasicOperations(t *testing.T) {
 	}
 }
 
-type v28AutoWyhashRawKey struct {
-	A uint64
-	B uint64
-}
-
-func TestV28MapAutoWyhashSelection(t *testing.T) {
-	if v28AutoWyHash[string]() == nil {
-		t.Fatal("string key did not select auto wyhash")
-	}
-	if v28AutoWyHash[v28AutoWyhashRawKey]() == nil {
-		t.Fatal("regular-memory key did not select auto wyhash")
-	}
-	if v28AutoWyHash[float64]() != nil {
-		t.Fatal("float64 key selected raw wyhash and would break +0/-0 hash semantics")
-	}
-}
-
-func TestV28MapAutoWyhashStringSemantics(t *testing.T) {
-	var m V28Map[string, int]
+func TestV4MapStringSemantics(t *testing.T) {
+	var m V4Map[string, int]
 	stored := string([]byte("same-content"))
 	lookup := string([]byte("same-content"))
 
@@ -135,8 +116,8 @@ func TestV28MapAutoWyhashStringSemantics(t *testing.T) {
 	}
 }
 
-func TestV28MapAutoWyhashKeepsFloatSemantics(t *testing.T) {
-	var m V28Map[float64, int]
+func TestV4MapBuiltInHasherKeepsFloatSemantics(t *testing.T) {
+	var m V4Map[float64, int]
 
 	m.Store(0.0, 9)
 	if v, ok := m.Load(math.Copysign(0, -1)); !ok || v != 9 {
@@ -144,12 +125,11 @@ func TestV28MapAutoWyhashKeepsFloatSemantics(t *testing.T) {
 	}
 }
 
-func TestV28MapIntHashPartsAvoidsPowerOfTwoStrideClustering(t *testing.T) {
+func TestV4MapIntHashPartsAvoidsPowerOfTwoStrideClustering(t *testing.T) {
 	const buckets = uintptr(1024)
-	const samplesPerBucket = uintptr(4)
 	counts := make([]int, buckets)
-	for i := uintptr(0); i < buckets*samplesPerBucket; i++ {
-		_, start := v28HashParts(i*v28SlotsPerBucket*buckets, true, buckets-1)
+	for i := uintptr(0); i < buckets*v4SlotsPerBucket; i++ {
+		_, start := v4HashParts(i*v4SlotsPerBucket*buckets, true, buckets-1)
 		counts[start]++
 	}
 	nonEmpty := 0
@@ -167,8 +147,8 @@ func TestV28MapIntHashPartsAvoidsPowerOfTwoStrideClustering(t *testing.T) {
 	}
 }
 
-func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
-	var m V28Map[int, int]
+func TestV4MapNoOpWritesDoNotPublish(t *testing.T) {
+	var m V4Map[int, int]
 	const key = 42
 
 	m.Store(key, key)
@@ -177,7 +157,7 @@ func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
 		t.Fatal("table is nil")
 	}
 	keyCopy := key
-	_, start := v28HashParts(m.hashKey(&keyCopy), table.intKey, table.mask)
+	_, start := v4HashParts(m.hashKey(&keyCopy), table.intKey, table.mask)
 	b := table.buckets.At(start)
 	ctrl := b.ctrl.Load()
 
@@ -217,8 +197,8 @@ func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
 	}
 }
 
-func TestV28MapLoadAndUpdateDoesNotInsert(t *testing.T) {
-	var m V28Map[int, int]
+func TestV4MapLoadAndUpdateDoesNotInsert(t *testing.T) {
+	var m V4Map[int, int]
 
 	if previous, loaded := m.LoadAndUpdate(1, 10); loaded || previous != 0 {
 		t.Fatalf("missing LoadAndUpdate = (%d, %v), want (0, false)", previous, loaded)
@@ -239,8 +219,8 @@ func TestV28MapLoadAndUpdateDoesNotInsert(t *testing.T) {
 	}
 }
 
-func TestV28MapComputeInsertDelete(t *testing.T) {
-	m := NewV28Map[string, int]()
+func TestV4MapComputeInsertDelete(t *testing.T) {
+	m := NewV4Map[string, int]()
 
 	actual, loaded := m.Compute("k", func(e *MapEntry[string, int]) {
 		if e.Loaded() {
@@ -266,12 +246,12 @@ func TestV28MapComputeInsertDelete(t *testing.T) {
 	}
 }
 
-func TestV28MapDeleteCompactsOnResize(t *testing.T) {
-	m := NewV28Map[int, int](WithCapacity(64))
-	for i := 0; i < 64; i++ {
+func TestV4MapDeleteCompactsOnResize(t *testing.T) {
+	m := NewV4Map[int, int](WithCapacity(64))
+	for i := range 64 {
 		m.Store(i, i)
 	}
-	for i := 0; i < 48; i++ {
+	for i := range 48 {
 		m.Delete(i)
 	}
 	if stats := m.Stats(); stats.Live != 16 || stats.Deleted != 48 || stats.TombstoneLanes != 48 {
@@ -288,11 +268,11 @@ func TestV28MapDeleteCompactsOnResize(t *testing.T) {
 	}
 }
 
-func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
-	if !v28EnableSameKeyTombstoneReuse {
+func TestV4MapSameKeyTombstoneReuse(t *testing.T) {
+	if !v4EnableSameKeyTombstoneReuse {
 		t.Skip("same-key tombstone reuse disabled")
 	}
-	m := NewV28Map[int, int](
+	m := NewV4Map[int, int](
 		WithCapacity(8),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
 	)
@@ -316,12 +296,12 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 	}
 }
 
-func TestV28MapRangeSnapshotDoesNotRepeatBucketAfterMutation(t *testing.T) {
-	m := NewV28Map[int, int](
+func TestV4MapRangeSnapshotDoesNotRepeatBucketAfterMutation(t *testing.T) {
+	m := NewV4Map[int, int](
 		WithCapacity(8),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
 	)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		m.Store(i, i)
 	}
 
@@ -336,19 +316,19 @@ func TestV28MapRangeSnapshotDoesNotRepeatBucketAfterMutation(t *testing.T) {
 		return true
 	})
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if seen[i] != 1 {
 			t.Fatalf("Range yielded key %d %d times, want once; seen=%v", i, seen[i], seen)
 		}
 	}
 }
 
-func TestV28MapConcurrentInsertLoad(t *testing.T) {
+func TestV4MapConcurrentInsertLoad(t *testing.T) {
 	const n = 4096
-	m := NewV28Map[int, int](WithCapacity(n))
+	m := NewV4Map[int, int](WithCapacity(n))
 
 	var wg sync.WaitGroup
-	for g := 0; g < 8; g++ {
+	for g := range 8 {
 		start := g * (n / 8)
 		end := start + n/8
 		wg.Add(1)
@@ -364,7 +344,7 @@ func TestV28MapConcurrentInsertLoad(t *testing.T) {
 	if got := m.Size(); got != n {
 		t.Fatalf("Size = %d, want %d", got, n)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v, ok := m.Load(i)
 		if !ok || v != i+1 {
 			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i+1)
@@ -372,12 +352,12 @@ func TestV28MapConcurrentInsertLoad(t *testing.T) {
 	}
 }
 
-func TestV28MapConcurrentResize(t *testing.T) {
+func TestV4MapConcurrentResize(t *testing.T) {
 	const n = 8192
-	m := NewV28Map[int, int](WithCapacity(1))
+	m := NewV4Map[int, int](WithCapacity(1))
 
 	var wg sync.WaitGroup
-	for g := 0; g < 16; g++ {
+	for g := range 16 {
 		start := g * (n / 16)
 		end := start + n/16
 		wg.Add(1)
@@ -393,7 +373,7 @@ func TestV28MapConcurrentResize(t *testing.T) {
 	if got := m.Size(); got != n {
 		t.Fatalf("Size = %d, want %d", got, n)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v, ok := m.Load(i)
 		if !ok || v != i+1 {
 			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i+1)
@@ -401,13 +381,13 @@ func TestV28MapConcurrentResize(t *testing.T) {
 	}
 }
 
-func TestV28MapStringResize(t *testing.T) {
+func TestV4MapStringResize(t *testing.T) {
 	const n = 3000
-	m := NewV28Map[string, int]()
-	for i := 0; i < n; i++ {
+	m := NewV4Map[string, int]()
+	for i := range n {
 		m.Store(strconv.Itoa(i), i)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v, ok := m.Load(strconv.Itoa(i))
 		if !ok || v != i {
 			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i)
@@ -415,17 +395,17 @@ func TestV28MapStringResize(t *testing.T) {
 	}
 }
 
-func TestV28MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
-	const n = v28SlotsPerBucket*v28MaxProbeBuckets*3 + 1
-	m := NewV28Map[int, int](
+func TestV4MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
+	const n = v4SlotsPerBucket*v4MaxProbeBuckets*3 + 1
+	m := NewV4Map[int, int](
 		WithCapacity(1),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
 	)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m.Store(i, i+1)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v, ok := m.Load(i)
 		if !ok || v != i+1 {
 			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i+1)
@@ -436,26 +416,23 @@ func TestV28MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
 	if table == nil {
 		t.Fatal("table is nil")
 	}
-	if table.probeLimit <= uintptr(v28MaxProbeBuckets) {
-		t.Fatalf("probeLimit = %d, want > baseline %d", table.probeLimit, v28MaxProbeBuckets)
+	if table.probeLimit <= uintptr(v4MaxProbeBuckets) {
+		t.Fatalf("probeLimit = %d, want > baseline %d", table.probeLimit, v4MaxProbeBuckets)
 	}
 }
 
-func TestV28MapBucketAndEntryAlignment(t *testing.T) {
-	size := unsafe.Sizeof(v28Bucket{})
-	if size != 32 {
-		t.Fatalf("bucket size = %d, want 32", size)
+func TestV4MapBucketAndEntryLayout(t *testing.T) {
+	size := unsafe.Sizeof(v4Bucket{})
+	if size != 8 {
+		t.Fatalf("bucket size = %d, want 8", size)
 	}
-	table := newV28Table[int, int](v28MinBuckets, true)
+	table := newV4Table[int, int](v4MinBuckets, true)
 	bucketBase := uintptr(unsafe.Pointer(table.buckets.At(0)))
-	align := size
-	if bucketBase&(uintptr(align)-1) != 0 {
-		t.Fatalf("bucket base = %#x, want %d-byte aligned", bucketBase, align)
-	}
 	if uintptr(unsafe.Pointer(table.buckets.At(1)))-bucketBase != size {
 		t.Fatal("bucket stride mismatch")
 	}
 	entryBase := uintptr(unsafe.Pointer(table.entries.At(0)))
+	align := unsafe.Alignof(v4Entry[int, int]{})
 	if entryBase&(uintptr(align)-1) != 0 {
 		t.Fatalf("entry base = %#x, want %d-byte aligned", entryBase, align)
 	}
