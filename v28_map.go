@@ -101,10 +101,10 @@ const (
 //
 // Integer keys use the fast integer hash path. For string keys and key types
 // that Go marks as regular memory, V28Map automatically uses an internal
-// wyhash-based hasher to avoid the AES-heavy built-in hash path contending
-// with SIMD probing on some CPUs. Other comparable key shapes keep Go's
+// wyhash-based hasher to avoid Go's AES-based built-in hash path, which can
+// contend with SIMD probing on some CPUs. Other comparable key shapes keep Go's
 // built-in hasher to preserve == semantics. Use [WithKeyHasherUnsafe] to
-// supply a faster non-AES hasher such as wyhash or xxh3 for custom key types.
+// supply other non-AES hashers for custom key types.
 type V28Map[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[v28Table[K, V]]
