@@ -320,24 +320,6 @@ func TestV28MapRangeSnapshotDoesNotRepeatBucketAfterMutation(t *testing.T) {
 	}
 }
 
-func TestV28MapOverflowHint(t *testing.T) {
-	if v28OverflowMode == v28OverflowNone {
-		t.Skip("overflow hints disabled")
-	}
-	m := NewV28Map[int, int](
-		WithCapacity(8),
-		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
-	)
-	for i := 0; i < v28SlotsPerBucket+1; i++ {
-		m.Store(i, i)
-	}
-
-	table := m.table.Load()
-	if got := v28Overflow(table.buckets.At(0).ctrl.Load()); got == 0 {
-		t.Fatal("home bucket overflow hint was not set")
-	}
-}
-
 func TestV28MapConcurrentInsertLoad(t *testing.T) {
 	const n = 4096
 	m := NewV28Map[int, int](WithCapacity(n))

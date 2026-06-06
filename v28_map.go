@@ -29,22 +29,9 @@ const (
 	// the same key. When disabled, deletes clear both key and value while the
 	// tombstone remains as a probe-continuation marker until resize compaction.
 	v28EnableSameKeyTombstoneReuse = true
-	// v28EnableFastFullBits computes full lanes with one unsigned byte compare
-	// (tag > deleted) instead of two equality compares (empty/deleted).
-	v28EnableFastFullBits = true
-	// v28OverflowMode controls the probe-chain overflow hint. V28 keeps
-	// deletes as tombstones, so empty lanes do not reappear before resize; this
-	// makes the hint a performance experiment rather than a required invariant.
-	v28OverflowMode = v28OverflowNone
 	// v28EnableAutoWyHash replaces Go's built-in hasher for safe non-integer
 	// key shapes where wyHash preserves == semantics.
 	v28EnableAutoWyHash = true
-)
-
-const (
-	v28OverflowExact = iota
-	v28OverflowHome
-	v28OverflowNone
 )
 
 const (
@@ -62,11 +49,14 @@ const (
 )
 
 const (
-	v28VersionMask   = uint32(0x001fffff)
-	v28OverflowShift = 21
-	v28OverflowMask  = uint32(0x1ff) << v28OverflowShift
-	v28FrozenMask    = uint32(1) << 30
-	v28WritingMask   = uint32(1) << 31
+	// V28 previously experimented with an overflow/probe-continuation hint in
+	// ctrl. It helped some miss-heavy probes terminate earlier, but displaced
+	// inserts had to update shared bucket metadata, adding atomic writes and
+	// cache-line ownership traffic. Keep ctrl for version/frozen/writing only;
+	// if miss-heavy workloads need a hint again, prefer a side structure.
+	v28VersionMask = uint32(0x3fffffff)
+	v28FrozenMask  = uint32(1) << 30
+	v28WritingMask = uint32(1) << 31
 )
 
 const (
@@ -213,7 +203,7 @@ func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
 			}
 			match &= match - 1
 		}
-		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+		if v28EmptyBits(words) != 0 {
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
@@ -385,20 +375,18 @@ func (m *V28Map[K, V]) All() func(yield func(K, V) bool) {
 }
 
 type V28MapStats struct {
-	Buckets         uintptr
-	Capacity        uintptr
-	Live            uintptr
-	Used            uintptr
-	Deleted         uintptr
-	FullBuckets     uintptr
-	OverflowBuckets uintptr
-	FullLanes       uintptr
-	EmptyLanes      uintptr
-	TombstoneLanes  uintptr
-	MaxOverflow     uint16
-	MaxProbe        uintptr
-	ProbeTotal      uintptr
-	ProbeSamples    uintptr
+	Buckets        uintptr
+	Capacity       uintptr
+	Live           uintptr
+	Used           uintptr
+	Deleted        uintptr
+	FullBuckets    uintptr
+	FullLanes      uintptr
+	EmptyLanes     uintptr
+	TombstoneLanes uintptr
+	MaxProbe       uintptr
+	ProbeTotal     uintptr
+	ProbeSamples   uintptr
 }
 
 func (m *V28Map[K, V]) Stats() V28MapStats {
@@ -417,7 +405,6 @@ func (m *V28Map[K, V]) Stats() V28MapStats {
 	stats.Capacity = stats.Buckets * v28SlotsPerBucket
 	for i := uintptr(0); i <= table.mask; i++ {
 		b := table.buckets.At(i)
-		ctrl := b.ctrl.Load()
 		words := v28LoadTagWords(b)
 		full := v28FullBits(words)
 		empty := v28EmptyBits(words)
@@ -428,12 +415,6 @@ func (m *V28Map[K, V]) Stats() V28MapStats {
 		stats.TombstoneLanes += uintptr(bits.OnesCount32(deleted))
 		if fullCount == v28SlotsPerBucket {
 			stats.FullBuckets++
-		}
-		if overflow := v28Overflow(ctrl); overflow != 0 {
-			stats.OverflowBuckets++
-			if overflow > stats.MaxOverflow {
-				stats.MaxOverflow = overflow
-			}
 		}
 		fullScan := full
 		for fullScan != 0 {
@@ -606,10 +587,6 @@ func (m *V28Map[K, V]) storeIn(
 				return status, *new(V), false, false
 			}
 			lane := uintptr(bits.TrailingZeros32(empty))
-			if probe != 0 && !table.addOverflow(start, probe) {
-				v28EndWriteUnchanged(b, ctrl)
-				return v28Retry, *new(V), false, false
-			}
 			e := table.entry(bi, lane)
 			e.key = *key
 			e.val = *val
@@ -670,7 +647,7 @@ func (m *V28Map[K, V]) updateIn(
 			}
 			match &= match - 1
 		}
-		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+		if v28EmptyBits(words) != 0 {
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
@@ -760,7 +737,7 @@ func (m *V28Map[K, V]) deleteIn(
 			}
 			match &= match - 1
 		}
-		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+		if v28EmptyBits(words) != 0 {
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
@@ -818,7 +795,7 @@ func (m *V28Map[K, V]) compareAndSwapIn(
 			}
 			match &= match - 1
 		}
-		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+		if v28EmptyBits(words) != 0 {
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
@@ -877,7 +854,7 @@ func (m *V28Map[K, V]) compareAndDeleteIn(
 			}
 			match &= match - 1
 		}
-		if v28EmptyBits(words) != 0 && v28Overflow(ctrl) == 0 {
+		if v28EmptyBits(words) != 0 {
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
@@ -995,10 +972,6 @@ func (m *V28Map[K, V]) computeIn(
 			if it.op != updateOp {
 				v28EndWriteUnchanged(b, ctrl)
 				return v28OK, *new(V), false, false
-			}
-			if probe != 0 && !table.addOverflow(start, probe) {
-				v28EndWriteUnchanged(b, ctrl)
-				return v28Retry, *new(V), false, false
 			}
 			e := table.entry(bi, lane)
 			e.key = *key
@@ -1262,73 +1235,6 @@ func (table *v28Table[K, V]) entry(bucketIdx, lane uintptr) *v28Entry[K, V] {
 	return table.entries.At(bucketIdx*v28SlotsPerBucket + lane)
 }
 
-func (table *v28Table[K, V]) addOverflow(start uintptr, count uintptr) bool {
-	switch v28OverflowMode {
-	case v28OverflowNone:
-		return true
-	case v28OverflowHome:
-		if count == 0 {
-			return true
-		}
-		return table.addOverflowAt(start)
-	default:
-		for probe := uintptr(0); probe < count; probe++ {
-			if !table.addOverflowAt((start + probe) & table.mask) {
-				return false
-			}
-		}
-		return true
-	}
-}
-
-func (table *v28Table[K, V]) addOverflowAt(bucketIdx uintptr) bool {
-	b := table.buckets.At(bucketIdx)
-	for {
-		ctrl := b.ctrl.Load()
-		if ctrl&v28FrozenMask != 0 {
-			return false
-		}
-		if ctrl&v28WritingMask != 0 {
-			return false
-		}
-		next := v28IncOverflow(ctrl)
-		if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
-			return true
-		}
-	}
-}
-
-func (table *v28Table[K, V]) addOverflowForCopyConcurrent(start uintptr, count uintptr) {
-	switch v28OverflowMode {
-	case v28OverflowNone:
-		return
-	case v28OverflowHome:
-		if count != 0 {
-			table.addOverflowAtForCopyConcurrent(start)
-		}
-		return
-	default:
-		for probe := uintptr(0); probe < count; probe++ {
-			table.addOverflowAtForCopyConcurrent((start + probe) & table.mask)
-		}
-	}
-}
-
-func (table *v28Table[K, V]) addOverflowAtForCopyConcurrent(bucketIdx uintptr) {
-	b := table.buckets.At(bucketIdx)
-	for {
-		ctrl := b.ctrl.Load()
-		if ctrl&v28WritingMask != 0 {
-			runtime.Gosched()
-			continue
-		}
-		next := v28IncOverflow(ctrl)
-		if next == ctrl || b.ctrl.CompareAndSwap(ctrl, v28BumpCtrl(next)) {
-			return
-		}
-	}
-}
-
 func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintptr) uintptr {
 	tag, start := v28HashParts(hash, table.intKey, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
@@ -1355,9 +1261,6 @@ func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintpt
 		dst := table.entry(bi, lane)
 		dst.key = e.key
 		dst.val = e.val
-		if probe != 0 {
-			table.addOverflowForCopyConcurrent(start, probe)
-		}
 		v28StoreTag(b, lane, tag)
 		v28EndWriteModified(b, ctrl)
 		return probe
@@ -1414,19 +1317,6 @@ func v28BumpCtrl(ctrl uint32) uint32 {
 }
 
 //go:nosplit
-func v28Overflow(ctrl uint32) uint16 {
-	return uint16((ctrl & v28OverflowMask) >> v28OverflowShift)
-}
-
-//go:nosplit
-func v28IncOverflow(ctrl uint32) uint32 {
-	if ctrl&v28OverflowMask == v28OverflowMask {
-		return ctrl
-	}
-	return ctrl + (1 << v28OverflowShift)
-}
-
-//go:nosplit
 func v28LoadTagWords(b *v28Bucket) archsimd.Uint8x32 {
 	return archsimd.LoadUint8x32((*[32]uint8)(unsafe.Pointer(&b.tags[0])))
 }
@@ -1453,10 +1343,8 @@ func v28DeletedBits(words archsimd.Uint8x32) uint32 {
 
 //go:nosplit
 func v28FullBits(words archsimd.Uint8x32) uint32 {
-	if v28EnableFastFullBits {
-		return words.Greater(archsimd.BroadcastUint8x32(v28TagDeleted)).ToBits() & v28LaneMask
-	}
-	return ^(v28EmptyBits(words) | v28DeletedBits(words)) & v28LaneMask
+	// Full lanes are encoded as tags >= 2; empty is 0 and deleted is 1.
+	return words.Greater(archsimd.BroadcastUint8x32(v28TagDeleted)).ToBits() & v28LaneMask
 }
 
 // ============================================================================
