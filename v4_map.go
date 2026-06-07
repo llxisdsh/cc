@@ -231,7 +231,6 @@ func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			if table == nil {
 				return false
 			}
-			hash = m.hashKey(noEscape(&key))
 			continue
 		}
 		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), noEscape(&new))
@@ -240,12 +239,10 @@ func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			return swapped
 		case v4Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(noEscape(&key))
 		case v4Retry:
 			runtime.Gosched()
 		case v4Full:
 			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
-			hash = m.hashKey(noEscape(&key))
 		}
 	}
 }
@@ -265,7 +262,6 @@ func (m *V4Map[K, V]) CompareAndDelete(key K, old V) bool {
 			if table == nil {
 				return false
 			}
-			hash = m.hashKey(noEscape(&key))
 			continue
 		}
 		status, deleted := m.compareAndDeleteIn(table, noEscape(&key), hash, noEscape(&old))
@@ -274,12 +270,10 @@ func (m *V4Map[K, V]) CompareAndDelete(key K, old V) bool {
 			return deleted
 		case v4Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(noEscape(&key))
 		case v4Retry:
 			runtime.Gosched()
 		case v4Full:
 			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
-			hash = m.hashKey(noEscape(&key))
 		}
 	}
 }
@@ -290,7 +284,6 @@ func (m *V4Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
-			hash = m.hashKey(noEscape(&key))
 			continue
 		}
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
@@ -302,10 +295,8 @@ func (m *V4Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 			return actual, loaded
 		case v4Full:
 			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
-			hash = m.hashKey(noEscape(&key))
 		case v4Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(noEscape(&key))
 		case v4Retry:
 			runtime.Gosched()
 		}
@@ -437,7 +428,6 @@ func (m *V4Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
-			hash = m.hashKey(key)
 			continue
 		}
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
@@ -449,10 +439,8 @@ func (m *V4Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 			return actual, loaded
 		case v4Full:
 			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
-			hash = m.hashKey(key)
 		case v4Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(key)
 		case v4Retry:
 			runtime.Gosched()
 		}
@@ -471,7 +459,6 @@ func (m *V4Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			if table == nil {
 				return *new(V), false
 			}
-			hash = m.hashKey(key)
 			continue
 		}
 		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
@@ -483,10 +470,8 @@ func (m *V4Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			return previous, loaded
 		case v4Full:
 			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
-			hash = m.hashKey(key)
 		case v4Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(key)
 		case v4Retry:
 			runtime.Gosched()
 		}
@@ -655,7 +640,6 @@ func (m *V4Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
 			if table == nil {
 				return *new(V), false
 			}
-			hash = m.hashKey(key)
 			continue
 		}
 		status, previous, loaded := m.deleteIn(table, key, hash, needValue)
@@ -666,7 +650,6 @@ func (m *V4Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
 			return *new(V), false
 		case v4Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(key)
 		case v4Retry:
 			runtime.Gosched()
 		}
@@ -1145,27 +1128,15 @@ func newV4Table[K comparable, V any](bucketLen uintptr, intKey bool) *v4Table[K,
 
 //go:nosplit
 func v4HashParts(hash uintptr, intKey bool, mask uintptr) (uint8, uintptr) {
+	// V4 uses h2-format tags: the high bit marks a full lane and the lower
+	// seven bits carry entropy. The lost tag bit buys a cheaper SWAR full-lane
+	// test: v4FullBits can be just a high-bit mask.
 	if intKey {
-		// if bitSize == 32 {
-		// 	mixed := uint32(hash) * uint32(0x9e3779b9)
-		// 	tag := uint8(mixed >> 24)
-		// 	if tag < 2 {
-		// 		tag += 2
-		// 	}
-		// 	return tag, uintptr(mixed) & mask
-		// }
 		mixed := uint64(hash) * uint64(0x9e3779b97f4a7c15)
-		tag := uint8(mixed >> 56)
-		if tag < 2 {
-			tag += 2
-		}
+		tag := h2(uintptr(mixed >> 56))
 		return tag, uintptr(mixed>>32) & mask
 	}
-	tag := h2(hash)
-	if tag < 2 {
-		tag += 2
-	}
-	return tag, h1(hash) & mask
+	return h2(hash), h1(hash) & mask
 }
 
 //go:nosplit
@@ -1294,7 +1265,11 @@ func v4StoreTag(b *v4Bucket, lane uintptr, tag uint8) {
 
 //go:nosplit
 func v4MatchBits(words uint32, tag uint8) uint32 {
-	return v4ZeroByteBits(words ^ v4BroadcastTag(tag))
+	// The match path verifies candidate lanes with the full key after taking a
+	// ctrl snapshot, so the fast SWAR zero check may return harmless false
+	// positives. Empty/deleted checks below need the exact variant because they
+	// control probe termination and tombstone reuse.
+	return v4MaybeZeroByteBits(words ^ v4BroadcastTag(tag))
 }
 
 //go:nosplit
@@ -1309,13 +1284,20 @@ func v4DeletedBits(words uint32) uint32 {
 
 //go:nosplit
 func v4FullBits(words uint32) uint32 {
-	// Full lanes are encoded as tags >= 2; empty is 0 and deleted is 1.
-	return ^(v4EmptyBits(words) | v4DeletedBits(words)) & v4LaneMarkerMask
+	// Full tags use the h2 byte format and always carry the high bit. Empty (0)
+	// and deleted (1) never do, so a high-bit mask is enough here.
+	return words & v4LaneMarkerMask
 }
 
 //go:nosplit
 func v4BroadcastTag(tag uint8) uint32 {
 	return uint32(tag) * 0x01010101
+}
+
+//go:nosplit
+func v4MaybeZeroByteBits(words uint32) uint32 {
+	const lowBits = uint32(0x01010101)
+	return (words - lowBits) &^ words & v4LaneMarkerMask
 }
 
 //go:nosplit

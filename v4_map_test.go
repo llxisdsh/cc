@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"unsafe"
 )
@@ -146,6 +147,20 @@ func TestV4MapIntHashPartsAvoidsPowerOfTwoStrideClustering(t *testing.T) {
 	if nonEmpty < int(buckets*3/4) || maxBucket > 8 {
 		t.Fatalf("stride distribution: nonEmpty=%d maxBucket=%d, want broad distribution",
 			nonEmpty, maxBucket)
+	}
+}
+
+func TestV4MapHashPartsFullTagsUseHighBit(t *testing.T) {
+	const mask = uintptr(1023)
+	for i := uintptr(0); i < 4096; i++ {
+		intTag, _ := v4HashParts(i, true, mask)
+		if intTag&0x80 == 0 {
+			t.Fatalf("int tag %#x for hash %d does not use high bit", intTag, i)
+		}
+		hashTag, _ := v4HashParts(i*0x9e3779b9, false, mask)
+		if hashTag&0x80 == 0 {
+			t.Fatalf("hash tag %#x for hash %d does not use high bit", hashTag, i)
+		}
 	}
 }
 
@@ -295,6 +310,32 @@ func TestV4MapSameKeyTombstoneReuse(t *testing.T) {
 	}
 	if stats := m.Stats(); stats.Live != 1 || stats.Used != before.Used || stats.Deleted != 0 {
 		t.Fatalf("stats after reuse = %+v, want live=1 used=%d deleted=0", stats, before.Used)
+	}
+}
+
+func TestV4MapStoreReusesHashAfterResizeHelp(t *testing.T) {
+	var hashCalls atomic.Int32
+	m := NewV4Map[int, int](
+		WithCapacity(1),
+		WithKeyHasher(func(key int, seed uintptr) uintptr {
+			hashCalls.Add(1)
+			return uintptr(key)
+		}),
+	)
+	old := m.table.Load()
+	if old == nil {
+		t.Fatal("table is nil")
+	}
+	old.nextTable.Store(newV4Table[int, int](old.bucketLen()<<1, old.intKey))
+
+	m.Store(7, 70)
+	if got := hashCalls.Load(); got != 1 {
+		t.Fatalf("Store hash calls after resize help = %d, want 1", got)
+	}
+
+	hashCalls.Store(0)
+	if v, ok := m.Load(7); !ok || v != 70 {
+		t.Fatalf("Load after resize help = (%d, %v), want (70, true)", v, ok)
 	}
 }
 

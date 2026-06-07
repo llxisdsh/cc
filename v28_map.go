@@ -248,7 +248,6 @@ func (m *V28Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			if table == nil {
 				return false
 			}
-			hash = m.hashKey(noEscape(&key))
 			continue
 		}
 		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), noEscape(&new))
@@ -257,12 +256,10 @@ func (m *V28Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			return swapped
 		case v28Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(noEscape(&key))
 		case v28Retry:
 			runtime.Gosched()
 		case v28Full:
 			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
-			hash = m.hashKey(noEscape(&key))
 		}
 	}
 }
@@ -282,7 +279,6 @@ func (m *V28Map[K, V]) CompareAndDelete(key K, old V) bool {
 			if table == nil {
 				return false
 			}
-			hash = m.hashKey(noEscape(&key))
 			continue
 		}
 		status, deleted := m.compareAndDeleteIn(table, noEscape(&key), hash, noEscape(&old))
@@ -291,12 +287,10 @@ func (m *V28Map[K, V]) CompareAndDelete(key K, old V) bool {
 			return deleted
 		case v28Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(noEscape(&key))
 		case v28Retry:
 			runtime.Gosched()
 		case v28Full:
 			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
-			hash = m.hashKey(noEscape(&key))
 		}
 	}
 }
@@ -307,7 +301,6 @@ func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loa
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
-			hash = m.hashKey(noEscape(&key))
 			continue
 		}
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
@@ -319,10 +312,8 @@ func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loa
 			return actual, loaded
 		case v28Full:
 			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
-			hash = m.hashKey(noEscape(&key))
 		case v28Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(noEscape(&key))
 		case v28Retry:
 			runtime.Gosched()
 		}
@@ -454,7 +445,6 @@ func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loade
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
-			hash = m.hashKey(key)
 			continue
 		}
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
@@ -466,10 +456,8 @@ func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loade
 			return actual, loaded
 		case v28Full:
 			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
-			hash = m.hashKey(key)
 		case v28Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(key)
 		case v28Retry:
 			runtime.Gosched()
 		}
@@ -488,7 +476,6 @@ func (m *V28Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, lo
 			if table == nil {
 				return *new(V), false
 			}
-			hash = m.hashKey(key)
 			continue
 		}
 		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
@@ -500,10 +487,8 @@ func (m *V28Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, lo
 			return previous, loaded
 		case v28Full:
 			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
-			hash = m.hashKey(key)
 		case v28Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(key)
 		case v28Retry:
 			runtime.Gosched()
 		}
@@ -672,7 +657,6 @@ func (m *V28Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) 
 			if table == nil {
 				return *new(V), false
 			}
-			hash = m.hashKey(key)
 			continue
 		}
 		status, previous, loaded := m.deleteIn(table, key, hash, needValue)
@@ -683,7 +667,6 @@ func (m *V28Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) 
 			return *new(V), false
 		case v28Frozen:
 			table = m.helpResize(table)
-			hash = m.hashKey(key)
 		case v28Retry:
 			runtime.Gosched()
 		}
@@ -1189,6 +1172,10 @@ func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], unsafe.Pointer) 
 
 //go:nosplit
 func v28HashParts(hash uintptr, intKey bool, mask uintptr) (uint8, uintptr) {
+	// V28 keeps separate SIMD tag bytes, so it does not need h2's high-bit full
+	// marker. Use an 8-bit-ish tag (excluding empty/deleted) to reduce false
+	// positives across 28 lanes. Non-integer starts use the next hash bits so
+	// tag and bucket selection do not overlap.
 	if intKey {
 		mixed := uint64(hash) * uint64(0x9e3779b97f4a7c15)
 		tag := uint8(mixed >> 56)
@@ -1197,11 +1184,11 @@ func v28HashParts(hash uintptr, intKey bool, mask uintptr) (uint8, uintptr) {
 		}
 		return tag, uintptr(mixed>>32) & mask
 	}
-	tag := h2(hash)
+	tag := uint8(hash)
 	if tag < 2 {
 		tag += 2
 	}
-	return tag, h1(hash) & mask
+	return tag, (hash >> 8) & mask
 }
 
 //go:nosplit

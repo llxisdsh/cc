@@ -167,6 +167,23 @@ func TestV28MapIntHashPartsAvoidsPowerOfTwoStrideClustering(t *testing.T) {
 	}
 }
 
+func TestV28MapHashPartsTagsAvoidReservedStates(t *testing.T) {
+	const mask = uintptr(1023)
+	for i := uintptr(0); i < 4096; i++ {
+		intTag, _ := v28HashParts(i, true, mask)
+		if intTag < 2 {
+			t.Fatalf("int tag %#x for hash %d uses reserved state", intTag, i)
+		}
+		hashTag, start := v28HashParts(i, false, mask)
+		if hashTag < 2 {
+			t.Fatalf("hash tag %#x for hash %d uses reserved state", hashTag, i)
+		}
+		if start != (i>>8)&mask {
+			t.Fatalf("hash start = %d, want %d", start, (i>>8)&mask)
+		}
+	}
+}
+
 func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
 	var m V28Map[int, int]
 	const key = 42
