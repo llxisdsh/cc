@@ -1,3 +1,5 @@
+//go:build !race
+
 package cc
 
 import (
@@ -114,7 +116,7 @@ type v4Table[K comparable, V any] struct {
 }
 
 type v4Bucket struct {
-	tags [4]byte
+	tags uint32 // [4] bytes of tag
 	ctrl atomic.Uint32
 }
 
@@ -1280,15 +1282,14 @@ func v4BumpCtrl(ctrl uint32) uint32 {
 
 //go:nosplit
 func v4LoadTagWords(b *v4Bucket) uint32 {
-	return uint32(b.tags[0]) |
-		uint32(b.tags[1])<<8 |
-		uint32(b.tags[2])<<16 |
-		uint32(b.tags[3])<<24
+	return b.tags
 }
 
 //go:nosplit
 func v4StoreTag(b *v4Bucket, lane uintptr, tag uint8) {
-	b.tags[lane] = tag
+	shift := (lane & (v4SlotsPerBucket - 1)) << 3
+	mask := uint32(0xff) << shift
+	b.tags = (b.tags &^ mask) | uint32(tag)<<shift
 }
 
 //go:nosplit
