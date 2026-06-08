@@ -291,7 +291,7 @@ func TestV28MapDeleteCompactsOnResize(t *testing.T) {
 	for i := 0; i < 48; i++ {
 		m.Delete(i)
 	}
-	if stats := m.Stats(); stats.Live != 16 || stats.Deleted != 48 || stats.TombstoneLanes != 48 {
+	if stats := m.stats(); stats.Live != 16 || stats.Deleted != 48 || stats.TombstoneLanes != 48 {
 		t.Fatalf("stats after delete = %+v, want live=16 deleted=48 tombstones=48", stats)
 	}
 	for i := 64; i < 160; i++ {
@@ -315,11 +315,11 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 	)
 
 	m.Store(1, 10)
-	before := m.Stats()
+	before := m.stats()
 	if prev, ok := m.LoadAndDelete(1); !ok || prev != 10 {
 		t.Fatalf("LoadAndDelete = (%d, %v), want (10, true)", prev, ok)
 	}
-	if stats := m.Stats(); stats.Live != 0 || stats.Used != before.Used || stats.Deleted != 1 {
+	if stats := m.stats(); stats.Live != 0 || stats.Used != before.Used || stats.Deleted != 1 {
 		t.Fatalf("stats after delete = %+v, want live=0 used=%d deleted=1", stats, before.Used)
 	}
 	if actual, loaded := m.LoadOrStore(1, 20); loaded || actual != 20 {
@@ -328,7 +328,7 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 	if v, ok := m.Load(1); !ok || v != 20 {
 		t.Fatalf("Load revived key = (%d, %v), want (20, true)", v, ok)
 	}
-	if stats := m.Stats(); stats.Live != 1 || stats.Used != before.Used || stats.Deleted != 0 {
+	if stats := m.stats(); stats.Live != 1 || stats.Used != before.Used || stats.Deleted != 0 {
 		t.Fatalf("stats after reuse = %+v, want live=1 used=%d deleted=0", stats, before.Used)
 	}
 }

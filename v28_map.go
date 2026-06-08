@@ -365,7 +365,7 @@ func (m *V28Map[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
-type V28MapStats struct {
+type v28MapStats struct {
 	Buckets        uintptr
 	Capacity       uintptr
 	Live           uintptr
@@ -380,11 +380,11 @@ type V28MapStats struct {
 	ProbeSamples   uintptr
 }
 
-func (m *V28Map[K, V]) Stats() V28MapStats {
+func (m *V28Map[K, V]) stats() v28MapStats {
 	table := m.table.Load()
 	used := m.size.Value(v28CntUsed)
 	deleted := m.size.Value(v28CntDeleted)
-	stats := V28MapStats{
+	stats := v28MapStats{
 		Live:    used - deleted,
 		Used:    used,
 		Deleted: deleted,

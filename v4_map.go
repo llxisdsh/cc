@@ -178,13 +178,12 @@ func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
 			e := table.entry(bi, lane).ReadUnfenced()
-			k, v := e.key, e.val
 			ctrl2 := b.ctrl.Load()
 			if ctrl != ctrl2 || ctrl2&v4WritingMask != 0 {
 				goto retryBucket
 			}
-			if k == key {
-				return v, true
+			if e.key == key {
+				return e.val, true
 			}
 			match &= match - 1
 		}
@@ -346,7 +345,7 @@ func (m *V4Map[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
-type V4MapStats struct {
+type v4MapStats struct {
 	Buckets        uintptr
 	Capacity       uintptr
 	Live           uintptr
@@ -361,11 +360,11 @@ type V4MapStats struct {
 	ProbeSamples   uintptr
 }
 
-func (m *V4Map[K, V]) Stats() V4MapStats {
+func (m *V4Map[K, V]) stats() v4MapStats {
 	table := m.table.Load()
 	used := m.size.Value(v4CntUsed)
 	deleted := m.size.Value(v4CntDeleted)
-	stats := V4MapStats{
+	stats := v4MapStats{
 		Live:    used - deleted,
 		Used:    used,
 		Deleted: deleted,
@@ -501,22 +500,22 @@ func (m *V4Map[K, V]) storeIn(
 			lane := v4FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
 			e := slot.ReadUnfenced()
-			k, v := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			if k == *key {
+			if e.key == *key {
 				if onlyIfAbsent {
-					return v4OK, v, true, false
+					return v4OK, e.val, true, false
 				}
-				if v4EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&v)), noescape(unsafe.Pointer(val))) {
-					return v4OK, v, true, false
+				if v4EnableDedupVal && m.valEqual != nil &&
+					m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
+					return v4OK, e.val, true, false
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
 					return status, *new(V), false, false
 				}
-				slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *val})
+				slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
 				v4EndWriteModified(b, ctrl)
 				return v4OK, *val, true, false
 			}
@@ -528,16 +527,15 @@ func (m *V4Map[K, V]) storeIn(
 				lane := v4FirstMarkedLane(deleted)
 				slot := table.entry(bi, lane)
 				e := slot.ReadUnfenced()
-				k := e.key
 				if ctrl != b.ctrl.Load() {
 					goto retryBucket
 				}
-				if k == *key {
+				if e.key == *key {
 					ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 					if status != v4OK {
 						return status, *new(V), false, false
 					}
-					slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *val})
+					slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
 					v4StoreTag(b, lane, tag)
 					v4EndWriteModified(b, ctrl)
 					m.size.Add(v4CntDeleted, ^uintptr(0))
@@ -593,24 +591,24 @@ func (m *V4Map[K, V]) updateIn(
 			lane := v4FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
 			e := slot.ReadUnfenced()
-			k, previous := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			if k == *key {
+			if e.key == *key {
 				if onlyIfAbsent {
-					return v4OK, previous, true, false
+					return v4OK, e.val, true, false
 				}
-				if v4EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&previous)), noescape(unsafe.Pointer(val))) {
-					return v4OK, previous, true, false
+				if v4EnableDedupVal && m.valEqual != nil &&
+					m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
+					return v4OK, e.val, true, false
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
 					return status, *new(V), false, false
 				}
-				slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *val})
+				slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
 				v4EndWriteModified(b, ctrl)
-				return v4OK, previous, true, false
+				return v4OK, e.val, true, false
 			}
 			match &= match - 1
 		}
@@ -679,23 +677,22 @@ func (m *V4Map[K, V]) deleteIn(
 			lane := v4FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
 			e := slot.ReadUnfenced()
-			k, v := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			if k == *key {
+			if e.key == *key {
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
 					return status, *new(V), false
 				}
 				var prev V
 				if needValue {
-					prev = v
+					prev = e.val
 				}
 				if !v4EnableSameKeyTombstoneReuse {
 					slot.WriteUnfenced(v4Entry[K, V]{})
 				} else {
-					slot.WriteUnfenced(v4Entry[K, V]{key: k})
+					slot.WriteUnfenced(v4Entry[K, V]{key: e.key})
 				}
 				v4StoreTag(b, lane, v4TagDeleted)
 				v4EndWriteModified(b, ctrl)
@@ -742,22 +739,21 @@ func (m *V4Map[K, V]) compareAndSwapIn(
 			lane := v4FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
 			e := slot.ReadUnfenced()
-			k, cur := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			if k == *key {
-				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+			if e.key == *key {
+				if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
 					return v4OK, false
 				}
-				if m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(new))) {
+				if m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(new))) {
 					return v4OK, true
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
 					return status, false
 				}
-				slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *new})
+				slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *new})
 				v4EndWriteModified(b, ctrl)
 				return v4OK, true
 			}
@@ -800,12 +796,11 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 			lane := v4FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
 			e := slot.ReadUnfenced()
-			k, cur := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			if k == *key {
-				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
+			if e.key == *key {
+				if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
 					return v4OK, false
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
@@ -815,7 +810,7 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 				if !v4EnableSameKeyTombstoneReuse {
 					slot.WriteUnfenced(v4Entry[K, V]{})
 				} else {
-					slot.WriteUnfenced(v4Entry[K, V]{key: k})
+					slot.WriteUnfenced(v4Entry[K, V]{key: e.key})
 				}
 				v4StoreTag(b, lane, v4TagDeleted)
 				v4EndWriteModified(b, ctrl)
@@ -861,30 +856,29 @@ func (m *V4Map[K, V]) computeIn(
 			lane := v4FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
 			e := slot.ReadUnfenced()
-			k, v := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			if k == *key {
+			if e.key == *key {
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
 					return status, *new(V), false, false
 				}
 				it := MapEntry[K, V]{
-					entry:  entry_[K, V]{hash: hash, key: *key, value: v},
+					entry:  entry_[K, V]{hash: hash, key: *key, value: e.val},
 					loaded: true,
 				}
 				fn(noEscape(&it))
 				switch it.op {
 				case updateOp:
-					slot.WriteUnfenced(v4Entry[K, V]{key: k, val: it.entry.value})
+					slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: it.entry.value})
 					v4EndWriteModified(b, ctrl)
 					return v4OK, it.entry.value, true, false
 				case deleteOp:
 					if !v4EnableSameKeyTombstoneReuse {
 						slot.WriteUnfenced(v4Entry[K, V]{})
 					} else {
-						slot.WriteUnfenced(v4Entry[K, V]{key: k})
+						slot.WriteUnfenced(v4Entry[K, V]{key: e.key})
 					}
 					v4StoreTag(b, lane, v4TagDeleted)
 					v4EndWriteModified(b, ctrl)
@@ -903,11 +897,10 @@ func (m *V4Map[K, V]) computeIn(
 				lane := v4FirstMarkedLane(deleted)
 				slot := table.entry(bi, lane)
 				e := slot.ReadUnfenced()
-				k := e.key
 				if ctrl != b.ctrl.Load() {
 					goto retryBucket
 				}
-				if k == *key {
+				if e.key == *key {
 					ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 					if status != v4OK {
 						return status, *new(V), false, false
@@ -920,7 +913,7 @@ func (m *V4Map[K, V]) computeIn(
 						v4EndWriteUnchanged(b, ctrl)
 						return v4OK, *new(V), false, false
 					}
-					slot.WriteUnfenced(v4Entry[K, V]{key: k, val: it.entry.value})
+					slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: it.entry.value})
 					v4StoreTag(b, lane, tag)
 					v4EndWriteModified(b, ctrl)
 					m.size.Add(v4CntDeleted, ^uintptr(0))
