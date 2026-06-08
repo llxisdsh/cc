@@ -40,7 +40,6 @@ func TestIntThroughputStable(t *testing.T) {
 		stableLoadOrStoreFactory("xsync.Map", func(capHint int) *xsync.Map[int, int] {
 			return xsync.NewMap[int, int](xsync.WithPresize(capHint))
 		}),
-		// stableHaxFactory[int]("alphadose.haxmap"),
 		stableCSMapFactory[int]("concurrent-swiss-map"),
 		stableDLHTFactory[int]("dlht.Map"),
 		stableLoadOrStoreFactory("cc.Map", func(capHint int) *cc.Map[int, int] {
@@ -67,6 +66,9 @@ func TestIntThroughputStable(t *testing.T) {
 		// }),
 		stableLoadOrStoreFactory("cc.V4Map", func(capHint int) *cc.V4Map[int, int] {
 			return cc.NewV4Map[int, int](cc.WithCapacity(capHint))
+		}),
+		stableLoadOrStoreFactory("cc.V8Map", func(capHint int) *cc.V8Map[int, int] {
+			return cc.NewV8Map[int, int](cc.WithCapacity(capHint))
 		}),
 	}
 
@@ -246,7 +248,6 @@ func TestIntThroughputStable(t *testing.T) {
 		})
 	}
 
-	t.Log("===== final summary (total-based, sorted by insert throughput) =====")
 	for _, mode := range modes {
 		rows := make([]summaryRow, 0, len(factories))
 		for _, r := range finalSummary {
@@ -255,10 +256,10 @@ func TestIntThroughputStable(t *testing.T) {
 			}
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].insertMops > rows[j].insertMops })
-		t.Logf("mode=%s", mode.name)
+		fmt.Printf("===== mode %s final summary (total-based, sorted by insert throughput) =====\n", mode.name)
 		for _, r := range rows {
-			t.Logf(
-				"%s | throughput(mops): insert=%.2f [%.2f..%.2f], load=%.2f [%.2f..%.2f], delete=%.2f [%.2f..%.2f] | memory(total n=%d): retained=%.2f MiB (%.1f B/entry), allocated=%.2f MiB (%.1f B/entry)",
+			fmt.Printf(
+				"%s \n throughput(mops): insert=%.2f [%.2f..%.2f], load=%.2f [%.2f..%.2f], delete=%.2f [%.2f..%.2f] \n memory(total n=%d): retained=%.2f MiB (%.1f B/entry), allocated=%.2f MiB (%.1f B/entry)\n",
 				r.name,
 				r.insertMops, r.insertMin, r.insertMax,
 				r.loadMops, r.loadMin, r.loadMax,

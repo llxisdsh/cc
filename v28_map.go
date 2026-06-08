@@ -1167,7 +1167,7 @@ func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], unsafe.Pointer) 
 	basePtr := unsafe.Pointer(unsafe.SliceData(backing))
 	base := uintptr(basePtr)
 	aligned := (base + align - 1) &^ (align - 1)
-	return unsafeSlice[v28Bucket]{ptr: unsafe.Pointer(aligned)}, basePtr
+	return unsafeSlice[v28Bucket]{ptr: unsafe.Pointer(aligned)}, basePtr //nolint:all
 }
 
 //go:nosplit
