@@ -6,85 +6,13 @@ import (
 	"runtime"
 	"slices"
 	"sort"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/jeremiah-masters/dlht"
 	"github.com/llxisdsh/cc"
+	"github.com/llxisdsh/pb"
 	"github.com/puzpuzpuz/xsync/v4"
 )
-
-type stableIntMap interface {
-	Insert(k int, v int)
-	Load(k int) (int, bool)
-	Delete(k int)
-	Size() int
-}
-
-type stableIntMapFactory struct {
-	name string
-	new  func(capHint int) stableIntMap
-}
-type stableIntSyncMapAdapter struct{ m *sync.Map }
-
-func (a *stableIntSyncMapAdapter) Insert(k int, v int)    { a.m.LoadOrStore(k, v) }
-func (a *stableIntSyncMapAdapter) Load(k int) (int, bool) { v, ok := a.m.Load(k); return v.(int), ok }
-func (a *stableIntSyncMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntSyncMapAdapter) Size() int {
-	size := 0
-	a.m.Range(func(key, value any) bool { size++; return true })
-	return size
-}
-
-type stableIntCCMapAdapter struct{ m *cc.Map[int, int] }
-
-func (a *stableIntCCMapAdapter) Insert(k int, v int)    { a.m.LoadOrStore(k, v) }
-func (a *stableIntCCMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
-func (a *stableIntCCMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntCCMapAdapter) Size() int              { return a.m.Size() }
-
-type stableIntCCFlatMapAdapter struct{ m *cc.FlatMap[int, int] }
-
-func (a *stableIntCCFlatMapAdapter) Insert(k int, v int)    { a.m.LoadOrStore(k, v) }
-func (a *stableIntCCFlatMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
-func (a *stableIntCCFlatMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntCCFlatMapAdapter) Size() int              { return a.m.Size() }
-
-type stableIntCCFunnelMapAdapter struct{ m *cc.FunnelMap[int, int] }
-
-func (a *stableIntCCFunnelMapAdapter) Insert(k int, v int)    { a.m.LoadOrStore(k, v) }
-func (a *stableIntCCFunnelMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
-func (a *stableIntCCFunnelMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntCCFunnelMapAdapter) Size() int              { return a.m.Size() }
-
-type stableIntCCOFHTMapAdapter struct{ m *cc.OFHTMap[int, int] }
-
-func (a *stableIntCCOFHTMapAdapter) Insert(k int, v int)    { a.m.LoadOrStore(k, v) }
-func (a *stableIntCCOFHTMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
-func (a *stableIntCCOFHTMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntCCOFHTMapAdapter) Size() int              { return a.m.Size() }
-
-type stableIntCCDWHTMapAdapter struct{ m *cc.DWHTMap[int, int] }
-
-func (a *stableIntCCDWHTMapAdapter) Insert(k int, v int)    { a.m.LoadOrStore(k, v) }
-func (a *stableIntCCDWHTMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
-func (a *stableIntCCDWHTMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntCCDWHTMapAdapter) Size() int              { return a.m.Size() }
-
-type stableIntXsyncMapAdapter struct{ m *xsync.Map[int, int] }
-
-func (a *stableIntXsyncMapAdapter) Insert(k int, v int)    { a.m.LoadOrStore(k, v) }
-func (a *stableIntXsyncMapAdapter) Load(k int) (int, bool) { return a.m.Load(k) }
-func (a *stableIntXsyncMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntXsyncMapAdapter) Size() int              { return a.m.Size() }
-
-type stableIntDLHTMapAdapter struct{ m *dlht.Map[int, int] }
-
-func (a *stableIntDLHTMapAdapter) Insert(k int, v int)    { a.m.Insert(k, v) }
-func (a *stableIntDLHTMapAdapter) Load(k int) (int, bool) { return a.m.Get(k) }
-func (a *stableIntDLHTMapAdapter) Delete(k int)           { a.m.Delete(k) }
-func (a *stableIntDLHTMapAdapter) Size() int              { return int(a.m.Size()) }
 
 // TestIntThroughputStable uses one shared harness for int-key throughput.
 func TestIntThroughputStable(t *testing.T) {
@@ -104,55 +32,42 @@ func TestIntThroughputStable(t *testing.T) {
 	scales := buildLadderScales(base, maxCenter, centerCount, ratios)
 	detail := os.Getenv("CC_THROUGHPUT_DETAIL") == "1"
 
-	factories := []stableIntMapFactory{
-		{
-			name: "sync.Map",
-			new: func(capHint int) stableIntMap {
-				return &stableIntSyncMapAdapter{m: &sync.Map{}}
-			},
-		},
-		{
-			name: "cc.Map",
-			new: func(capHint int) stableIntMap {
-				return &stableIntCCMapAdapter{m: cc.NewMap[int, int](cc.WithCapacity(capHint))}
-			},
-		},
-		{
-			name: "cc.FlatMap",
-			new: func(capHint int) stableIntMap {
-				return &stableIntCCFlatMapAdapter{m: cc.NewFlatMap[int, int](cc.WithCapacity(capHint))}
-			},
-		},
-		{
-			name: "cc.FunnelMap",
-			new: func(capHint int) stableIntMap {
-				return &stableIntCCFunnelMapAdapter{m: cc.NewFunnelMap[int, int](cc.WithCapacity(capHint))}
-			},
-		},
-		{
-			name: "cc.OFHTMap",
-			new: func(capHint int) stableIntMap {
-				return &stableIntCCOFHTMapAdapter{m: cc.NewOFHTMap[int, int](cc.WithCapacity(capHint))}
-			},
-		},
-		{
-			name: "cc.DWHTMap",
-			new: func(capHint int) stableIntMap {
-				return &stableIntCCDWHTMapAdapter{m: cc.NewDWHTMap[int, int](cc.WithCapacity(capHint))}
-			},
-		},
-		{
-			name: "xsync.Map",
-			new: func(capHint int) stableIntMap {
-				return &stableIntXsyncMapAdapter{m: xsync.NewMap[int, int](xsync.WithPresize(capHint))}
-			},
-		},
-		{
-			name: "dlht.Map",
-			new: func(capHint int) stableIntMap {
-				return &stableIntDLHTMapAdapter{m: dlht.New[int, int](dlht.Options{InitialSize: uint64(capHint)})}
-			},
-		},
+	factories := []stableFactory[int]{
+		stableSyncMapFactory[int]("sync.Map"),
+		stableLoadOrStoreFactory("pb.HashTrieMap", func(capHint int) *pb.HashTrieMap[int, int] {
+			return &pb.HashTrieMap[int, int]{}
+		}),
+		stableLoadOrStoreFactory("xsync.Map", func(capHint int) *xsync.Map[int, int] {
+			return xsync.NewMap[int, int](xsync.WithPresize(capHint))
+		}),
+		// stableHaxFactory[int]("alphadose.haxmap"),
+		stableCSMapFactory[int]("concurrent-swiss-map"),
+		stableDLHTFactory[int]("dlht.Map"),
+		stableLoadOrStoreFactory("cc.Map", func(capHint int) *cc.Map[int, int] {
+			return cc.NewMap[int, int](cc.WithCapacity(capHint))
+		}),
+		stableLoadOrStoreFactory("cc.FlatMap", func(capHint int) *cc.FlatMap[int, int] {
+			return cc.NewFlatMap[int, int](cc.WithCapacity(capHint))
+		}),
+		stableLoadOrStoreFactory("cc.FunnelMap", func(capHint int) *cc.FunnelMap[int, int] {
+			return cc.NewFunnelMap[int, int](cc.WithCapacity(capHint))
+		}),
+		stableLoadOrStoreFactory("cc.SkipMap", func(capHint int) *cc.SkipMap[int, int] {
+			return cc.NewSkipMap[int, int]()
+		}),
+		stableLoadOrStoreFactory("cc.OFHTMap", func(capHint int) *cc.OFHTMap[int, int] {
+			return cc.NewOFHTMap[int, int](cc.WithCapacity(capHint))
+		}),
+		stableLoadOrStoreFactory("cc.DWHTMap", func(capHint int) *cc.DWHTMap[int, int] {
+			return cc.NewDWHTMap[int, int](cc.WithCapacity(capHint))
+		}),
+		// // Requires goexperiment.simd
+		// stableLoadOrStoreFactory("cc.V28Map", func(capHint int) *cc.V28Map[int, int] {
+		// 	return cc.NewV28Map[int, int](cc.WithCapacity(capHint))
+		// }),
+		stableLoadOrStoreFactory("cc.V4Map", func(capHint int) *cc.V4Map[int, int] {
+			return cc.NewV4Map[int, int](cc.WithCapacity(capHint))
+		}),
 	}
 
 	modes := []struct {
@@ -163,16 +78,22 @@ func TestIntThroughputStable(t *testing.T) {
 		{name: "pre_size", preCap: true},
 	}
 	type summaryRow struct {
-		mode      string
-		name      string
-		insertMed float64
-		loadMed   float64
-		delMed    float64
-		memMiB    float64
-		memBPE    float64
-		insertJit float64
-		loadJit   float64
-		delJit    float64
+		mode         string
+		name         string
+		insertMops   float64
+		loadMops     float64
+		delMops      float64
+		retainedMiB  float64
+		retainedBPE  float64
+		allocatedMiB float64
+		allocatedBPE float64
+		memoryN      int64
+		insertMin    float64
+		insertMax    float64
+		loadMin      float64
+		loadMax      float64
+		delMin       float64
+		delMax       float64
 	}
 	finalSummary := make([]summaryRow, 0, len(modes)*len(factories))
 
@@ -180,11 +101,13 @@ func TestIntThroughputStable(t *testing.T) {
 		mode := mode
 		t.Run(mode.name, func(t *testing.T) {
 			type mapSummary struct {
-				insert   []float64
-				load     []float64
-				del      []float64
-				memMiB   []float64
-				memBytes []float64
+				insert      []float64
+				load        []float64
+				del         []float64
+				insertTotal stableThroughputTotal
+				loadTotal   stableThroughputTotal
+				delTotal    stableThroughputTotal
+				memory      stableMemoryTotal
 			}
 			modeSummary := make(map[string]*mapSummary, len(factories))
 			for _, f := range factories {
@@ -208,14 +131,13 @@ func TestIntThroughputStable(t *testing.T) {
 							insertTP := make([]float64, 0, rounds)
 							loadTP := make([]float64, 0, rounds)
 							deleteTP := make([]float64, 0, rounds)
-							memoryMiB := make([]float64, 0, rounds)
-							memoryBPE := make([]float64, 0, rounds)
+							var memory stableMemoryTotal
 							capHint := 0
 							if mode.preCap {
 								capHint = total
 							}
 
-							for round := 0; round < rounds; round++ {
+							for range rounds {
 								runtime.GC()
 								var memBefore runtime.MemStats
 								runtime.ReadMemStats(&memBefore)
@@ -229,10 +151,14 @@ func TestIntThroughputStable(t *testing.T) {
 								if got := m.Size(); got != total {
 									t.Fatalf("insert size mismatch: want=%d got=%d", total, got)
 								}
-								var memAfter runtime.MemStats
-								runtime.ReadMemStats(&memAfter)
-								memBytes := allocDeltaBytes(memBefore.Alloc, memAfter.Alloc)
-								memBytesPerEntry := memBytes / float64(total)
+								var memAfterInsert runtime.MemStats
+								runtime.ReadMemStats(&memAfterInsert)
+								allocatedBytes := allocDeltaBytes(memBefore.TotalAlloc, memAfterInsert.TotalAlloc)
+
+								runtime.GC()
+								var memAfterGC runtime.MemStats
+								runtime.ReadMemStats(&memAfterGC)
+								retainedBytes := allocDeltaBytes(memBefore.Alloc, memAfterGC.Alloc)
 
 								loadDur := runParallel(total, workers, func(start, end int) {
 									for i := start; i < end; i++ {
@@ -255,11 +181,11 @@ func TestIntThroughputStable(t *testing.T) {
 								insertTP = append(insertTP, throughputMops(total, insertDur, minMeasure))
 								loadTP = append(loadTP, throughputMops(total, loadDur, minMeasure))
 								deleteTP = append(deleteTP, throughputMops(total, deleteDur, minMeasure))
-								memMiB := memBytes / (1024 * 1024)
-								memoryMiB = append(memoryMiB, memMiB)
-								memoryBPE = append(memoryBPE, memBytesPerEntry)
-								sum.memMiB = append(sum.memMiB, memMiB)
-								sum.memBytes = append(sum.memBytes, memBytesPerEntry)
+								sum.insertTotal.add(total, insertDur, minMeasure)
+								sum.loadTotal.add(total, loadDur, minMeasure)
+								sum.delTotal.add(total, deleteDur, minMeasure)
+								memory.add(total, retainedBytes, allocatedBytes)
+								sum.memory.add(total, retainedBytes, allocatedBytes)
 							}
 
 							if detail {
@@ -276,8 +202,12 @@ func TestIntThroughputStable(t *testing.T) {
 									median(deleteTP), slices.Min(deleteTP), slices.Max(deleteTP),
 								)
 								t.Logf(
-									"memory: median=%.2f MiB median=%.1f B/entry",
-									median(memoryMiB), median(memoryBPE),
+									"retained total: %.2f MiB (%.1f B/entry, n=%d)",
+									memory.retainedMiB(), memory.retainedBPE(), memory.entries,
+								)
+								t.Logf(
+									"allocated total: %.2f MiB (%.1f B/entry, n=%d)",
+									memory.allocatedMiB(), memory.allocatedBPE(), memory.entries,
 								)
 							}
 
@@ -291,31 +221,32 @@ func TestIntThroughputStable(t *testing.T) {
 
 			for _, f := range factories {
 				s := modeSummary[f.name]
-				if s == nil || len(s.insert) == 0 || len(s.load) == 0 || len(s.del) == 0 || len(s.memMiB) == 0 {
+				if s == nil || len(s.insert) == 0 || len(s.load) == 0 || len(s.del) == 0 || s.memory.entries == 0 {
 					continue
 				}
-				iMed, lMed, dMed := median(s.insert), median(s.load), median(s.del)
-				mMed, bMed := median(s.memMiB), median(s.memBytes)
-				iJit := slices.Max(s.insert) / max(slices.Min(s.insert), 1e-9)
-				lJit := slices.Max(s.load) / max(slices.Min(s.load), 1e-9)
-				dJit := slices.Max(s.del) / max(slices.Min(s.del), 1e-9)
 				finalSummary = append(finalSummary, summaryRow{
-					mode:      mode.name,
-					name:      f.name,
-					insertMed: iMed,
-					loadMed:   lMed,
-					delMed:    dMed,
-					memMiB:    mMed,
-					memBPE:    bMed,
-					insertJit: iJit,
-					loadJit:   lJit,
-					delJit:    dJit,
+					mode:         mode.name,
+					name:         f.name,
+					insertMops:   s.insertTotal.mops(),
+					loadMops:     s.loadTotal.mops(),
+					delMops:      s.delTotal.mops(),
+					retainedMiB:  s.memory.retainedMiB(),
+					retainedBPE:  s.memory.retainedBPE(),
+					allocatedMiB: s.memory.allocatedMiB(),
+					allocatedBPE: s.memory.allocatedBPE(),
+					memoryN:      s.memory.entries,
+					insertMin:    slices.Min(s.insert),
+					insertMax:    slices.Max(s.insert),
+					loadMin:      slices.Min(s.load),
+					loadMax:      slices.Max(s.load),
+					delMin:       slices.Min(s.del),
+					delMax:       slices.Max(s.del),
 				})
 			}
 		})
 	}
 
-	t.Log("===== final summary (sorted by insert median, high->low) =====")
+	t.Log("===== final summary (total-based, sorted by insert throughput) =====")
 	for _, mode := range modes {
 		rows := make([]summaryRow, 0, len(factories))
 		for _, r := range finalSummary {
@@ -323,12 +254,18 @@ func TestIntThroughputStable(t *testing.T) {
 				rows = append(rows, r)
 			}
 		}
-		sort.Slice(rows, func(i, j int) bool { return rows[i].insertMed > rows[j].insertMed })
+		sort.Slice(rows, func(i, j int) bool { return rows[i].insertMops > rows[j].insertMops })
 		t.Logf("mode=%s", mode.name)
 		for _, r := range rows {
 			t.Logf(
-				"%s | insert=%.2f load=%.2f delete=%.2f mops | mem=%.1f B/entry %.2f MiB | jitter i/l/d=%.2fx/%.2fx/%.2fx",
-				r.name, r.insertMed, r.loadMed, r.delMed, r.memBPE, r.memMiB, r.insertJit, r.loadJit, r.delJit,
+				"%s | throughput(mops): insert=%.2f [%.2f..%.2f], load=%.2f [%.2f..%.2f], delete=%.2f [%.2f..%.2f] | memory(total n=%d): retained=%.2f MiB (%.1f B/entry), allocated=%.2f MiB (%.1f B/entry)",
+				r.name,
+				r.insertMops, r.insertMin, r.insertMax,
+				r.loadMops, r.loadMin, r.loadMax,
+				r.delMops, r.delMin, r.delMax,
+				r.memoryN,
+				r.retainedMiB, r.retainedBPE,
+				r.allocatedMiB, r.allocatedBPE,
 			)
 		}
 	}
