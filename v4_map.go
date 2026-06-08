@@ -81,7 +81,9 @@ const (
 // are kept in a separate flat array and addressed by bucket/lane, so probing
 // stays compact while key/value storage remains contiguous. Reads use a bucket
 // version snapshot; writes publish through a short per-bucket writing window,
-// and resize freezes old buckets cooperatively.
+// and resize freezes old buckets cooperatively. Like [OFHTMap] and [FlatMap],
+// entry payloads are copied through SeqLockSlot so weak-memory architectures
+// do not move large key/value reads outside the version-checked window.
 //
 // Integer keys use the fast integer hash path. Other comparable key shapes
 // keep Go's built-in hasher to preserve == semantics. Use [WithKeyHasherUnsafe]
@@ -100,7 +102,7 @@ type V4Map[K comparable, V any] struct {
 
 type v4Table[K comparable, V any] struct {
 	buckets      unsafeSlice[v4Bucket]
-	entries      unsafeSlice[v4Entry[K, V]]
+	entries      unsafeSlice[SeqLockSlot[v4Entry[K, V]]]
 	mask         uintptr
 	probeLimit   uintptr
 	stripeCap    int
@@ -116,7 +118,7 @@ type v4Table[K comparable, V any] struct {
 }
 
 type v4Bucket struct {
-	tags uint32 // [4] bytes of tag
+	tags atomic.Uint32 // [4] bytes of tag
 	ctrl atomic.Uint32
 }
 
@@ -175,7 +177,7 @@ func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
 		match := v4MatchBits(words, tag)
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
-			e := table.entry(bi, lane)
+			e := table.entry(bi, lane).ReadUnfenced()
 			k, v := e.key, e.val
 			ctrl2 := b.ctrl.Load()
 			if ctrl != ctrl2 || ctrl2&v4WritingMask != 0 {
@@ -309,12 +311,8 @@ func (m *V4Map[K, V]) Range(yield func(K, V) bool) {
 		return
 	}
 
-	type rangeEntry[K comparable, V any] struct {
-		key K
-		val V
-	}
-
-	var cache [v4SlotsPerBucket]rangeEntry[K, V]
+	var cache [v4SlotsPerBucket]v4Entry[K, V]
+	unsafeCache := toUnsafeSlice(&cache[0])
 	for i := uintptr(0); i <= table.mask; i++ {
 		b := table.buckets.At(i)
 	retry:
@@ -324,11 +322,10 @@ func (m *V4Map[K, V]) Range(yield func(K, V) bool) {
 		}
 		words := v4LoadTagWords(b)
 		full := v4FullBits(words)
-		cacheCount := 0
+		var cacheCount uintptr
 		for full != 0 {
 			lane := v4FirstMarkedLane(full)
-			e := table.entry(i, lane)
-			cache[cacheCount] = rangeEntry[K, V]{key: e.key, val: e.val}
+			*unsafeCache.At(cacheCount) = table.entry(i, lane).ReadUnfenced()
 			cacheCount++
 			full &= full - 1
 		}
@@ -336,8 +333,9 @@ func (m *V4Map[K, V]) Range(yield func(K, V) bool) {
 		if ctrl != ctrl2 || ctrl2&v4WritingMask != 0 {
 			goto retry
 		}
-		for j := 0; j < cacheCount; j++ {
-			if !yield(cache[j].key, cache[j].val) {
+		for j := range cacheCount {
+			kv := unsafeCache.At(j)
+			if !yield(kv.key, kv.val) {
 				return
 			}
 		}
@@ -393,7 +391,7 @@ func (m *V4Map[K, V]) Stats() V4MapStats {
 		fullScan := full
 		for fullScan != 0 {
 			lane := v4FirstMarkedLane(fullScan)
-			e := table.entry(i, lane)
+			e := table.entry(i, lane).ReadUnfenced()
 			hash := m.hashKey(noEscape(&e.key))
 			_, start := v4HashParts(hash, table.intKey, table.mask)
 			probe := (i - start) & table.mask
@@ -501,7 +499,8 @@ func (m *V4Map[K, V]) storeIn(
 		match := v4MatchBits(words, tag)
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
-			e := table.entry(bi, lane)
+			slot := table.entry(bi, lane)
+			e := slot.ReadUnfenced()
 			k, v := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
@@ -517,7 +516,7 @@ func (m *V4Map[K, V]) storeIn(
 				if status != v4OK {
 					return status, *new(V), false, false
 				}
-				e.val = *val
+				slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *val})
 				v4EndWriteModified(b, ctrl)
 				return v4OK, *val, true, false
 			}
@@ -527,7 +526,8 @@ func (m *V4Map[K, V]) storeIn(
 			deleted := v4DeletedBits(words)
 			for deleted != 0 {
 				lane := v4FirstMarkedLane(deleted)
-				e := table.entry(bi, lane)
+				slot := table.entry(bi, lane)
+				e := slot.ReadUnfenced()
 				k := e.key
 				if ctrl != b.ctrl.Load() {
 					goto retryBucket
@@ -537,7 +537,7 @@ func (m *V4Map[K, V]) storeIn(
 					if status != v4OK {
 						return status, *new(V), false, false
 					}
-					e.val = *val
+					slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *val})
 					v4StoreTag(b, lane, tag)
 					v4EndWriteModified(b, ctrl)
 					m.size.Add(v4CntDeleted, ^uintptr(0))
@@ -555,9 +555,7 @@ func (m *V4Map[K, V]) storeIn(
 				return status, *new(V), false, false
 			}
 			lane := v4FirstMarkedLane(empty)
-			e := table.entry(bi, lane)
-			e.key = *key
-			e.val = *val
+			table.entry(bi, lane).WriteUnfenced(v4Entry[K, V]{key: *key, val: *val})
 			v4StoreTag(b, lane, tag)
 			v4EndWriteModified(b, ctrl)
 			m.size.Add(v4CntUsed, 1)
@@ -593,7 +591,8 @@ func (m *V4Map[K, V]) updateIn(
 		match := v4MatchBits(words, tag)
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
-			e := table.entry(bi, lane)
+			slot := table.entry(bi, lane)
+			e := slot.ReadUnfenced()
 			k, previous := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
@@ -609,7 +608,7 @@ func (m *V4Map[K, V]) updateIn(
 				if status != v4OK {
 					return status, *new(V), false, false
 				}
-				e.val = *val
+				slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *val})
 				v4EndWriteModified(b, ctrl)
 				return v4OK, previous, true, false
 			}
@@ -678,7 +677,8 @@ func (m *V4Map[K, V]) deleteIn(
 		match := v4MatchBits(words, tag)
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
-			e := table.entry(bi, lane)
+			slot := table.entry(bi, lane)
+			e := slot.ReadUnfenced()
 			k, v := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
@@ -693,9 +693,10 @@ func (m *V4Map[K, V]) deleteIn(
 					prev = v
 				}
 				if !v4EnableSameKeyTombstoneReuse {
-					e.key = *new(K)
+					slot.WriteUnfenced(v4Entry[K, V]{})
+				} else {
+					slot.WriteUnfenced(v4Entry[K, V]{key: k})
 				}
-				e.val = *new(V)
 				v4StoreTag(b, lane, v4TagDeleted)
 				v4EndWriteModified(b, ctrl)
 				m.size.Add(v4CntDeleted, 1)
@@ -739,7 +740,8 @@ func (m *V4Map[K, V]) compareAndSwapIn(
 		match := v4MatchBits(words, tag)
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
-			e := table.entry(bi, lane)
+			slot := table.entry(bi, lane)
+			e := slot.ReadUnfenced()
 			k, cur := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
@@ -755,7 +757,7 @@ func (m *V4Map[K, V]) compareAndSwapIn(
 				if status != v4OK {
 					return status, false
 				}
-				e.val = *new
+				slot.WriteUnfenced(v4Entry[K, V]{key: k, val: *new})
 				v4EndWriteModified(b, ctrl)
 				return v4OK, true
 			}
@@ -796,7 +798,8 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 		match := v4MatchBits(words, tag)
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
-			e := table.entry(bi, lane)
+			slot := table.entry(bi, lane)
+			e := slot.ReadUnfenced()
 			k, cur := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
@@ -810,9 +813,10 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 					return status, false
 				}
 				if !v4EnableSameKeyTombstoneReuse {
-					e.key = *new(K)
+					slot.WriteUnfenced(v4Entry[K, V]{})
+				} else {
+					slot.WriteUnfenced(v4Entry[K, V]{key: k})
 				}
-				e.val = *new(V)
 				v4StoreTag(b, lane, v4TagDeleted)
 				v4EndWriteModified(b, ctrl)
 				m.size.Add(v4CntDeleted, 1)
@@ -855,7 +859,8 @@ func (m *V4Map[K, V]) computeIn(
 		match := v4MatchBits(words, tag)
 		for match != 0 {
 			lane := v4FirstMarkedLane(match)
-			e := table.entry(bi, lane)
+			slot := table.entry(bi, lane)
+			e := slot.ReadUnfenced()
 			k, v := e.key, e.val
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
@@ -872,14 +877,15 @@ func (m *V4Map[K, V]) computeIn(
 				fn(noEscape(&it))
 				switch it.op {
 				case updateOp:
-					e.val = it.entry.value
+					slot.WriteUnfenced(v4Entry[K, V]{key: k, val: it.entry.value})
 					v4EndWriteModified(b, ctrl)
 					return v4OK, it.entry.value, true, false
 				case deleteOp:
 					if !v4EnableSameKeyTombstoneReuse {
-						e.key = *new(K)
+						slot.WriteUnfenced(v4Entry[K, V]{})
+					} else {
+						slot.WriteUnfenced(v4Entry[K, V]{key: k})
 					}
-					e.val = *new(V)
 					v4StoreTag(b, lane, v4TagDeleted)
 					v4EndWriteModified(b, ctrl)
 					m.size.Add(v4CntDeleted, 1)
@@ -895,7 +901,8 @@ func (m *V4Map[K, V]) computeIn(
 			deleted := v4DeletedBits(words)
 			for deleted != 0 {
 				lane := v4FirstMarkedLane(deleted)
-				e := table.entry(bi, lane)
+				slot := table.entry(bi, lane)
+				e := slot.ReadUnfenced()
 				k := e.key
 				if ctrl != b.ctrl.Load() {
 					goto retryBucket
@@ -913,7 +920,7 @@ func (m *V4Map[K, V]) computeIn(
 						v4EndWriteUnchanged(b, ctrl)
 						return v4OK, *new(V), false, false
 					}
-					e.val = it.entry.value
+					slot.WriteUnfenced(v4Entry[K, V]{key: k, val: it.entry.value})
 					v4StoreTag(b, lane, tag)
 					v4EndWriteModified(b, ctrl)
 					m.size.Add(v4CntDeleted, ^uintptr(0))
@@ -939,9 +946,7 @@ func (m *V4Map[K, V]) computeIn(
 				v4EndWriteUnchanged(b, ctrl)
 				return v4OK, *new(V), false, false
 			}
-			e := table.entry(bi, lane)
-			e.key = *key
-			e.val = it.entry.value
+			table.entry(bi, lane).WriteUnfenced(v4Entry[K, V]{key: *key, val: it.entry.value})
 			v4StoreTag(b, lane, tag)
 			v4EndWriteModified(b, ctrl)
 			m.size.Add(v4CntUsed, 1)
@@ -1040,7 +1045,7 @@ func (m *V4Map[K, V]) helpResizeInto(old, next *v4Table[K, V]) *v4Table[K, V] {
 			full := v4FullBits(words)
 			for full != 0 {
 				lane := v4FirstMarkedLane(full)
-				e := old.entry(i, lane)
+				e := old.entry(i, lane).ReadUnfenced()
 				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)))
 				if probe > copyMaxProbe {
 					copyMaxProbe = probe
@@ -1112,7 +1117,7 @@ func newV4Table[K comparable, V any](bucketLen uintptr, intKey bool) *v4Table[K,
 	stripeCap := int(uintptr(growCap) >> bits.TrailingZeros(uint(roundedSizeLen)))
 	chunks, chunkSz := v4ResizeChunks(bucketLen, cpus)
 	buckets := makeUnsafeSlice[v4Bucket](bucketLen)
-	entries := makeUnsafeSlice[v4Entry[K, V]](slotLen)
+	entries := makeUnsafeSlice[SeqLockSlot[v4Entry[K, V]]](slotLen)
 	return &v4Table[K, V]{
 		buckets:    buckets,
 		entries:    entries,
@@ -1166,11 +1171,11 @@ func (table *v4Table[K, V]) bucketLen() uintptr {
 }
 
 //go:nosplit
-func (table *v4Table[K, V]) entry(bucketIdx, lane uintptr) *v4Entry[K, V] {
+func (table *v4Table[K, V]) entry(bucketIdx, lane uintptr) *SeqLockSlot[v4Entry[K, V]] {
 	return table.entries.At(bucketIdx*v4SlotsPerBucket + lane)
 }
 
-func (table *v4Table[K, V]) copyInsertConcurrent(e *v4Entry[K, V], hash uintptr) uintptr {
+func (table *v4Table[K, V]) copyInsertConcurrent(e v4Entry[K, V], hash uintptr) uintptr {
 	tag, start := v4HashParts(hash, table.intKey, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		bi := (start + probe) & table.mask
@@ -1194,8 +1199,7 @@ func (table *v4Table[K, V]) copyInsertConcurrent(e *v4Entry[K, V], hash uintptr)
 		}
 		lane := v4FirstMarkedLane(empty)
 		dst := table.entry(bi, lane)
-		dst.key = e.key
-		dst.val = e.val
+		dst.WriteUnfenced(e)
 		v4StoreTag(b, lane, tag)
 		v4EndWriteModified(b, ctrl)
 		return probe
@@ -1253,14 +1257,14 @@ func v4BumpCtrl(ctrl uint32) uint32 {
 
 //go:nosplit
 func v4LoadTagWords(b *v4Bucket) uint32 {
-	return b.tags
+	return b.tags.Load()
 }
 
 //go:nosplit
 func v4StoreTag(b *v4Bucket, lane uintptr, tag uint8) {
 	shift := (lane & (v4SlotsPerBucket - 1)) << 3
 	mask := uint32(0xff) << shift
-	b.tags = (b.tags &^ mask) | uint32(tag)<<shift
+	b.tags.Store((b.tags.Load() &^ mask) | uint32(tag)<<shift)
 }
 
 //go:nosplit
