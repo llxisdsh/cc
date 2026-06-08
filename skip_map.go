@@ -332,9 +332,8 @@ func (s *SkipMap[K, V]) Load(key K) (value V, ok bool) {
 }
 
 // Delete eliminates a mapping without returning it.
-func (s *SkipMap[K, V]) Delete(key K) bool {
-	_, loaded := s.LoadAndDelete(key)
-	return loaded
+func (s *SkipMap[K, V]) Delete(key K) {
+	s.LoadAndDelete(key)
 }
 
 // LoadAndDelete ensures the removal of a mapping and returns it.

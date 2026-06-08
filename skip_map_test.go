@@ -22,14 +22,12 @@ func TestSkipMap_Basic(t *testing.T) {
 	}
 
 	// Test Delete
-	if !m.Delete(1) {
-		t.Fatalf("expected delete to return true")
-	}
+	m.Delete(1)
 	if _, ok := m.Load(1); ok {
 		t.Fatalf("expected 1 to be deleted")
 	}
-	if m.Delete(1) {
-		t.Fatalf("expected delete of missing key to return false")
+	if _, ok := m.LoadAndDelete(1); ok {
+		t.Fatalf("expected LoadAndDelete of missing key to return false")
 	}
 
 	// Test LoadAndDelete
@@ -59,9 +57,7 @@ func TestSkipMap_ZeroValue(t *testing.T) {
 	if v, ok := m.Load(1); ok || v != "" {
 		t.Fatalf("expected missing zero value, got %q: %v", v, ok)
 	}
-	if m.Delete(1) {
-		t.Fatalf("expected delete on zero-value map to return false")
-	}
+	m.Delete(1)
 	m.Range(func(key int, value string) bool {
 		t.Fatalf("empty zero-value map should not iterate")
 		return true
@@ -271,9 +267,7 @@ func TestSkipMap_UpdateExisting(t *testing.T) {
 
 func TestSkipMap_DeleteNonExistent(t *testing.T) {
 	m := NewSkipMap[int, string]()
-	if deleted := m.Delete(100); deleted {
-		t.Fatalf("expected false when deleting non-existent key")
-	}
+	m.Delete(100)
 	if _, loaded := m.LoadAndDelete(100); loaded {
 		t.Fatalf("expected false when LoadAndDelete non-existent key")
 	}
@@ -352,22 +346,15 @@ func TestSkipMap_ConcurrentDelete(t *testing.T) {
 
 	m.Store(key, 100)
 
-	var deleteCount int32
-
 	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if m.Delete(key) {
-				atomic.AddInt32(&deleteCount, 1)
-			}
+			m.Delete(key)
 		}()
 	}
 	wg.Wait()
 
-	if deleteCount != 1 {
-		t.Fatalf("expected exactly 1 successful delete, got %d", deleteCount)
-	}
 	if m.Size() != 0 {
 		t.Fatalf("expected size 0, got %d", m.Size())
 	}

@@ -213,7 +213,7 @@ func (m *V4Map[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 }
 
 func (m *V4Map[K, V]) Delete(key K) {
-	_, _ = m.delete(noEscape(&key), false)
+	m.delete(noEscape(&key), false)
 }
 
 func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
