@@ -31,9 +31,9 @@ const (
 )
 
 const (
-	v8MinBuckets      = 16
+	v8MinBuckets      = 32
 	v8SlotsPerBucket  = 8
-	v8LoadFactorNum   = 14
+	v8LoadFactorNum   = 13
 	v8LoadFactorDen   = 16
 	v8MaxProbeBuckets = 32
 	v8LaneMarkerMask  = uint64(0x8080808080808080)
@@ -118,6 +118,20 @@ type v8Table[K comparable, V any] struct {
 	bucketBacking unsafe.Pointer
 }
 
+// v8Bucket stores the tags and control word for a bucket.
+// Layout: 8 bytes for 8 slots of tags, 4 bytes for control metadata.
+// Total useful data: 12 bytes.
+// Alignment: 8-byte aligned (due to atomic.Uint64).
+// Padding: 4 bytes of implicit padding at the end to satisfy the 8-byte
+// alignment, bringing the total struct size to 16 bytes.
+//
+// ┌───────────────────────────────────────────────────────────────────┐
+// │                    8 × 8-bit h2 tags (64 bits)                    │
+// │                             bytes 0-7                             │
+// ├───────┬──────┬──────────────────┬─────────────────────────────────┤
+// │writing│frozen│ version (30 bits)│         padding (4 bytes)       │
+// │bit 31 │bit 30│    bits 29-0     │             bytes 12-15         │
+// └───────┴──────┴──────────────────┴─────────────────────────────────┘
 type v8Bucket struct {
 	tags atomic.Uint64 // [8] bytes of tag
 	ctrl atomic.Uint32

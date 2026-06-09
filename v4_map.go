@@ -117,6 +117,19 @@ type v4Table[K comparable, V any] struct {
 	nextTable    atomic.Pointer[v4Table[K, V]]
 }
 
+// v4Bucket stores the tags and control word for a bucket.
+// Layout: 4 bytes for 4 slots of tags, 4 bytes for control metadata.
+// Total 8 bytes.
+// Alignment: 4-byte aligned (due to atomic.Uint32).
+// Padding: Perfectly packed, 0 bytes of padding.
+//
+// ┌─────────────────────────────────┐
+// │   4 × 8-bit h2 tags (32 bits)   │
+// │            bytes 0-3            │
+// ├───────┬──────┬──────────────────┤
+// │writing│frozen│ version (30 bits)│
+// │bit 31 │bit 30│    bits 29-0     │
+// └───────┴──────┴──────────────────┘
 type v4Bucket struct {
 	tags atomic.Uint32 // [4] bytes of tag
 	ctrl atomic.Uint32

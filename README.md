@@ -16,16 +16,16 @@ go get github.com/llxisdsh/cc
 
 State-of-the-art concurrent map implementations, delivering extreme performance in a lightweight package.
 
-| Component       | Description                                                                      | Ideal Use Case                                                          |
-|-----------------|----------------------------------------------------------------------------------|-------------------------------------------------------------------------|
-| [**Map**](./map.go)       | **Lock-free reads**, fine-grained write locking. Drop-in `sync.Map` replacement. | General purpose, mixed R/W workloads.                                   |
-| [**FlatMap**](./flat_map.go)   | **Seqlock-based**, inline open-addressing. Heavily optimized for cold starts.    | Cache-sensitive, extremely low tail latency.                            |
-| [**SkipMap**](./skip_map.go)   | **Ordered map**, providing lock-free concurrent lookups, reads, and iteration.   | Highly concurrent ordered data access.                                  |
-| [**FunnelMap**](./funnel_map.go) | **Highly robust**, utilizes SkipMap for collisions and PLocal for size tracking. | Extreme resilience against poor hash distributions without degradation. |
-| [**OFHTMap**](./ofht_map.go)   | **Experimental**, optimistic open-addressing with inline key/value storage.      | Lowest GC overhead for allocation-sensitive workloads.                  |
-| [**DWHTMap**](./dwht_map.go)   | **Experimental**, fully lock-free open-addressing with DWCAS slot publication.   | Low-latency reads and writes under high concurrency.                    |
-| [**V28Map**](./v28_map.go)     | **Experimental**, AVX2/SIMD-probed open-addressing with separate flat entries.   | Minimal GC pressure, high load factor, and compact memory use on supported CPUs. |
-| [**V8Map**](./v8_map.go)       | **Experimental**, SWAR-probed open-addressing with compact 8-slot buckets.       | Low-GC flat storage with portable fast probing and moderate load factor. |
+| Component                        | Description                                                                      | Ideal Use Case                                                                   |
+| -------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [**Map**](./map.go)              | **Lock-free reads**, fine-grained write locking. Drop-in `sync.Map` replacement. | General purpose, mixed R/W workloads.                                            |
+| [**FlatMap**](./flat_map.go)     | **Seqlock-based**, inline open-addressing. Heavily optimized for cold starts.    | Cache-sensitive, extremely low tail latency.                                     |
+| [**SkipMap**](./skip_map.go)     | **Ordered map**, providing lock-free concurrent lookups, reads, and iteration.   | Highly concurrent ordered data access.                                           |
+| [**FunnelMap**](./funnel_map.go) | **Highly robust**, utilizes SkipMap for collisions and PLocal for size tracking. | Extreme resilience against poor hash distributions without degradation.          |
+| [**OFHTMap**](./ofht_map.go)     | **Experimental**, optimistic open-addressing with inline key/value storage.      | Lowest GC overhead for allocation-sensitive workloads.                           |
+| [**DWHTMap**](./dwht_map.go)     | **Experimental**, fully lock-free open-addressing with DWCAS slot publication.   | Low-latency reads and writes under high concurrency.                             |
+| [**V28Map**](./v28_map.go)       | **Experimental**, AVX2/SIMD-probed open-addressing with separate flat entries.   | Minimal GC pressure, high load factor, and compact memory use on supported CPUs. |
+| [**V6Map**](./v6_map.go)         | **Experimental**, SWAR-probed open-addressing with compact 6-slot buckets.       | Low-GC flat storage with portable fast probing and moderate load factor.         |
 
 > **Note**: `Map` and `FlatMap` are streamlined versions of the high-performance [llxisdsh/pb](https://github.com/llxisdsh/pb) project. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [benchmark](./benchmark) directory or the upstream repository.
 
@@ -44,22 +44,22 @@ Tools to manage task execution and flow.
 
 Atomic, low-overhead coordination tools built on runtime semaphores.
 
-| Primitive             | Metaphor            | Behavior                                                                 | Key Usage                               |
-|:----------------------|:--------------------|:-------------------------------------------------------------------------|:----------------------------------------|
-| [**Latch**](./latch.go)           | **One-time Door**   | Starts closed. Once `Open()`, stays open forever.                        | Initialization, Shutdown signal.        |
-| [**Gate**](./gate.go)            | **Manual Door**     | `Open()`/`Close()`/`Pulse()`. Supports broadcast wakeups.                | Pausing/Resuming, Cond-like signals.    |
-| [**Rally**](./rally.go)           | **Meeting Point**   | `Meet(n)` waits until n parties arrive, then releases all.               | CyclicBarrier, MapReduce stages.        |
-| [**Phaser**](./phaser.go)          | **Dynamic Barrier** | Dynamic party registration with split-phase `Arrive()`/`AwaitAdvance()`. | Java-style Phaser, Pipeline stages.     |
-| [**Epoch**](./epoch.go)           | **Milestone**       | `WaitAtLeast(n)` blocks until counter reaches n. No thundering herd.     | Phase coordination, Version gates.      |
-| [**Barter**](./barter.go)          | **Exchanger**       | Two goroutines swap values at a sync point.                              | Producer-Consumer handoff.              |
-| [**RWLock**](./rw_lock.go)          | **Read-Write Lock** | Spin-based R/W lock, writer-preferred.                                   | Low-latency, writer-priority.           |
-| [**TicketLock**](./ticket_lock.go)      | **Ticket Queue**    | FIFO spin-lock with ticket algorithm.                                    | Fair mutex, Latency-sensitive paths.    |
-| [**BitLock**](./bit_lock.go)         | **Bit Lock**        | Spins on a specific bit mask.                                            | Fine-grained, memory-constrained locks. |
-| [**SeqLock**](./seq_lock.go)         | **Sequence Lock**   | Optimistic reads with version counting.                                  | Tear-free snapshots, Read-heavy.        |
-| [**FairSemaphore**](./fair_semaphore.go)   | **FIFO Queue**      | Strict FIFO ordering for permit acquisition.                             | Anti-starvation scenarios.              |
+| Primitive                                     | Metaphor            | Behavior                                                                 | Key Usage                               |
+| :-------------------------------------------- | :------------------ | :----------------------------------------------------------------------- | :-------------------------------------- |
+| [**Latch**](./latch.go)                       | **One-time Door**   | Starts closed. Once `Open()`, stays open forever.                        | Initialization, Shutdown signal.        |
+| [**Gate**](./gate.go)                         | **Manual Door**     | `Open()`/`Close()`/`Pulse()`. Supports broadcast wakeups.                | Pausing/Resuming, Cond-like signals.    |
+| [**Rally**](./rally.go)                       | **Meeting Point**   | `Meet(n)` waits until n parties arrive, then releases all.               | CyclicBarrier, MapReduce stages.        |
+| [**Phaser**](./phaser.go)                     | **Dynamic Barrier** | Dynamic party registration with split-phase `Arrive()`/`AwaitAdvance()`. | Java-style Phaser, Pipeline stages.     |
+| [**Epoch**](./epoch.go)                       | **Milestone**       | `WaitAtLeast(n)` blocks until counter reaches n. No thundering herd.     | Phase coordination, Version gates.      |
+| [**Barter**](./barter.go)                     | **Exchanger**       | Two goroutines swap values at a sync point.                              | Producer-Consumer handoff.              |
+| [**RWLock**](./rw_lock.go)                    | **Read-Write Lock** | Spin-based R/W lock, writer-preferred.                                   | Low-latency, writer-priority.           |
+| [**TicketLock**](./ticket_lock.go)            | **Ticket Queue**    | FIFO spin-lock with ticket algorithm.                                    | Fair mutex, Latency-sensitive paths.    |
+| [**BitLock**](./bit_lock.go)                  | **Bit Lock**        | Spins on a specific bit mask.                                            | Fine-grained, memory-constrained locks. |
+| [**SeqLock**](./seq_lock.go)                  | **Sequence Lock**   | Optimistic reads with version counting.                                  | Tear-free snapshots, Read-heavy.        |
+| [**FairSemaphore**](./fair_semaphore.go)      | **FIFO Queue**      | Strict FIFO ordering for permit acquisition.                             | Anti-starvation scenarios.              |
 | [**TicketLockGroup**](./ticket_lock_group.go) | **Keyed Lock**      | Per-key locking with auto-cleanup.                                       | User/Resource isolation.                |
-| [**RWLockGroup**](./rw_lock_group.go)     | **Keyed R/W Lock**  | Per-key R/W locking with auto-cleanup.                                   | Config/Data partitioning.               |
-| [**WaitGroup**](./wait_group.go)       | **Reusable WG**     | Supports `TryWait()` & `Waiters()`. Reusable immediately.                | Batch processing.                       |
+| [**RWLockGroup**](./rw_lock_group.go)         | **Keyed R/W Lock**  | Per-key R/W locking with auto-cleanup.                                   | Config/Data partitioning.               |
+| [**WaitGroup**](./wait_group.go)              | **Reusable WG**     | Supports `TryWait()` & `Waiters()`. Reusable immediately.                | Batch processing.                       |
 
 > **Design Philosophy**: Minimal footprint, direct `runtime_semacquire` integration. Most primitives are zero-alloc on hot paths.
 

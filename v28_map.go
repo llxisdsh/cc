@@ -125,6 +125,20 @@ type v28Table[K comparable, V any] struct {
 	bucketBacking unsafe.Pointer
 }
 
+// v28Bucket stores the tags and control word for a bucket.
+// Layout: 28 bytes for 28 slots of tags, 4 bytes for control metadata.
+// Total 32 bytes.
+// Alignment: 4-byte aligned (due to atomic.Uint32).
+// Padding: Perfectly packed to exactly 32 bytes, which aligns optimally with
+// AVX2 vector registers and cache line half-blocks. 0 bytes of padding.
+//
+// ┌───────────────────────────────────────────────────────────────────┐
+// │                   28 × 8-bit h2 tags (224 bits)                   │
+// │                            bytes 0-27                             │
+// ├───────┬──────┬────────────────────────────────────────────────────┤
+// │writing│frozen│                 version (30 bits)                  │
+// │bit 31 │bit 30│                     bits 29-0                      │
+// └───────┴──────┴────────────────────────────────────────────────────┘
 type v28Bucket struct {
 	tags [28]byte
 	ctrl atomic.Uint32
