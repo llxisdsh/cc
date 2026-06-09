@@ -128,7 +128,7 @@ type v28Table[K comparable, V any] struct {
 // v28Bucket stores the tags and control word for a bucket.
 // Layout: 28 bytes for 28 slots of tags, 4 bytes for control metadata.
 // Total 32 bytes.
-// Alignment: 4-byte aligned (due to atomic.Uint32).
+// Alignment: 32-byte aligned (manually aligned via makeV28Buckets function).
 // Padding: Perfectly packed to exactly 32 bytes, which aligns optimally with
 // AVX2 vector registers and cache line half-blocks. 0 bytes of padding.
 //
@@ -1176,7 +1176,7 @@ func newV28Table[K comparable, V any](bucketLen uintptr, intKey bool) *v28Table[
 
 func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], unsafe.Pointer) {
 	stride := unsafe.Sizeof(v28Bucket{})
-	align := stride // cacheLineSize
+	align := stride
 	backing := make([]byte, bucketLen*stride+align-1)
 	basePtr := unsafe.Pointer(unsafe.SliceData(backing))
 	base := uintptr(basePtr)
