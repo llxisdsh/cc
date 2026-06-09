@@ -54,9 +54,10 @@ const (
 	// inserts had to update shared bucket metadata, adding atomic writes and
 	// cache-line ownership traffic. Keep ctrl for version/frozen/writing only;
 	// if miss-heavy workloads need a hint again, prefer a side structure.
-	v28VersionMask = uint32(0x3fffffff)
-	v28FrozenMask  = uint32(1) << 30
-	v28WritingMask = uint32(1) << 31
+	v28WritingMask = uint32(1) << 0
+	v28FrozenMask  = uint32(1) << 1
+	v28VersionMask = uint32(0xFFFFFFFC)
+	v28VersionInc  = uint32(1) << 2
 )
 
 const (
@@ -135,10 +136,10 @@ type v28Table[K comparable, V any] struct {
 // ┌───────────────────────────────────────────────────────────────────┐
 // │                   28 × 8-bit h2 tags (224 bits)                   │
 // │                            bytes 0-27                             │
-// ├───────┬──────┬────────────────────────────────────────────────────┤
-// │writing│frozen│                 version (30 bits)                  │
-// │bit 31 │bit 30│                     bits 29-0                      │
-// └───────┴──────┴────────────────────────────────────────────────────┘
+// ├──────────────────────────────────────────────┬──────┬─────────────┤
+// │              version (30 bits)               │frozen│   writing   │
+// │                  bits 31-2                   │bit 1 │    bit 0    │
+// └──────────────────────────────────────────────┴──────┴─────────────┘
 type v28Bucket struct {
 	tags [28]byte
 	ctrl atomic.Uint32
@@ -1288,7 +1289,7 @@ func v28BeginWriteWithCtrl(b *v28Bucket, ctrl uint32) (uint32, v28Status) {
 }
 
 func v28EndWriteUnchanged(b *v28Bucket, ctrl uint32) {
-	b.ctrl.Store(ctrl &^ v28WritingMask)
+	b.ctrl.Store(ctrl)
 }
 
 func v28EndWriteModified(b *v28Bucket, ctrl uint32) {
@@ -1306,15 +1307,20 @@ func v28FreezeAndLoadTags(b *v28Bucket) archsimd.Uint8x32 {
 			continue
 		}
 		if b.ctrl.CompareAndSwap(ctrl, ctrl|v28WritingMask) {
-			b.ctrl.Store(v28BumpCtrl(ctrl | v28FrozenMask | v28WritingMask))
+			b.ctrl.Store(v28BumpCtrl(ctrl | v28FrozenMask))
 			return v28LoadTagWords(b)
 		}
 	}
 }
 
+// v28BumpCtrl increments the version portion of the control word.
+// Note: We do not need to clear v28WritingMask here because the returned
+// ctrl from beginWrite does not have the writing mask set, and we just
+// add v28VersionInc to it.
+//
 //go:nosplit
 func v28BumpCtrl(ctrl uint32) uint32 {
-	return (ctrl &^ (v28VersionMask | v28WritingMask)) | ((ctrl + 1) & v28VersionMask)
+	return ctrl + v28VersionInc
 }
 
 //go:nosplit

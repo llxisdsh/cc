@@ -48,9 +48,10 @@ const (
 	// Keep ctrl for version/frozen/writing only. If miss-heavy workloads need a
 	// probe-continuation hint, prefer a side structure so displaced inserts do not
 	// have to update shared bucket metadata.
-	v4VersionMask = uint32(0x3fffffff)
-	v4FrozenMask  = uint32(1) << 30
-	v4WritingMask = uint32(1) << 31
+	v4WritingMask = uint32(1) << 0
+	v4FrozenMask  = uint32(1) << 1
+	v4VersionMask = uint32(0xFFFFFFFC)
+	v4VersionInc  = uint32(1) << 2
 )
 
 const (
@@ -123,13 +124,13 @@ type v4Table[K comparable, V any] struct {
 // Alignment: 4-byte aligned (due to atomic.Uint32).
 // Padding: Perfectly packed, 0 bytes of padding.
 //
-// ┌─────────────────────────────────┐
-// │   4 × 8-bit h2 tags (32 bits)   │
-// │            bytes 0-3            │
-// ├───────┬──────┬──────────────────┤
-// │writing│frozen│ version (30 bits)│
-// │bit 31 │bit 30│    bits 29-0     │
-// └───────┴──────┴──────────────────┘
+// ┌───────────────────────────────────────────────────────────────────┐
+// │                    4 × 8-bit h2 tags (32 bits)                    │
+// │                             bytes 0-3                             │
+// ├──────────────────────────────────────────────┬──────┬─────────────┤
+// │              version (30 bits)               │frozen│   writing   │
+// │                  bits 31-2                   │bit 1 │    bit 0    │
+// └──────────────────────────────────────────────┴──────┴─────────────┘
 type v4Bucket struct {
 	tags atomic.Uint32 // [4] bytes of tag
 	ctrl atomic.Uint32
@@ -1232,7 +1233,7 @@ func v4BeginWriteWithCtrl(b *v4Bucket, ctrl uint32) (uint32, v4Status) {
 }
 
 func v4EndWriteUnchanged(b *v4Bucket, ctrl uint32) {
-	b.ctrl.Store(ctrl &^ v4WritingMask)
+	b.ctrl.Store(ctrl)
 }
 
 func v4EndWriteModified(b *v4Bucket, ctrl uint32) {
@@ -1250,15 +1251,20 @@ func v4FreezeAndLoadTags(b *v4Bucket) uint32 {
 			continue
 		}
 		if b.ctrl.CompareAndSwap(ctrl, ctrl|v4WritingMask) {
-			b.ctrl.Store(v4BumpCtrl(ctrl | v4FrozenMask | v4WritingMask))
+			b.ctrl.Store(v4BumpCtrl(ctrl | v4FrozenMask))
 			return v4LoadTagWords(b)
 		}
 	}
 }
 
+// v4BumpCtrl increments the version portion of the control word.
+// Note: We do not need to clear v4WritingMask here because the returned
+// ctrl from beginWrite does not have the writing mask set, and we just
+// add v4VersionInc to it.
+//
 //go:nosplit
 func v4BumpCtrl(ctrl uint32) uint32 {
-	return (ctrl &^ (v4VersionMask | v4WritingMask)) | ((ctrl + 1) & v4VersionMask)
+	return ctrl + v4VersionInc
 }
 
 //go:nosplit

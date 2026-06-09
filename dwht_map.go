@@ -174,17 +174,18 @@ const (
 	dwhtH2Mask  = uint64(0xFFFFFFFF)
 
 	// ctrl layout:
-	//   bits 0..1:   slot state
-	//   bits 2..33:  32-bit hash fragment
-	//   bits 34..62: sequence, bumped on every slot transition
-	//   bit 63:      frozen during resize
-	// The sequence is part of the DWCAS expected ctrl word, so stale CAS
+	// ┌────────────────────────┬──────┬──────────────────────────┬────────┐
+	// │   version (29 bits)    │frozen│ hash fragment (32 bits)  │ state  │
+	// │       bits 63-35       │bit 34│        bits 33-2         │bits 1-0│
+	// └────────────────────────┴──────┴──────────────────────────┴────────┘
+	// The version is part of the DWCAS expected ctrl word, so stale CAS
 	// attempts are rejected after a delete/revive/update cycle unless the
-	// per-slot sequence wraps back to the same value.
-	dwhtSeqShift = 34
-	dwhtSeqInc   = uint64(1) << dwhtSeqShift
-
-	dwhtFrozen = uint64(1) << 63
+	// per-slot version wraps back to the same value.
+	// Placing the version at the absolute highest bits allows natural uint64
+	// arithmetic overflow without corrupting the frozen bit or other flags.
+	dwhtFrozen       = uint64(1) << 34
+	dwhtVersionShift = 35
+	dwhtVersionInc   = uint64(1) << dwhtVersionShift
 )
 
 type dwhtStoreStatus uint8
@@ -1149,17 +1150,21 @@ func dwhtCtrlH2(ctrl uint64) uint32 {
 func dwhtCtrlInsert(ctrl uint64, h2v uint32) uint64 {
 	c := (ctrl &^ dwhtStateMask) | dwhtStateFull
 	c = (c &^ (dwhtH2Mask << dwhtH2Shift)) | (uint64(h2v) << dwhtH2Shift)
-	return c + dwhtSeqInc
+	return c + dwhtVersionInc
 }
 
+// dwhtCtrlUpdate increments the version number.
+// Since version is at the top bits, addition naturally drops overflow without
+// corrupting lower flags. ctrl already has FULL state, so we just add versionInc.
+//
 //go:nosplit
 func dwhtCtrlUpdate(ctrl uint64) uint64 {
-	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateFull
+	return ctrl + dwhtVersionInc
 }
 
 //go:nosplit
 func dwhtCtrlDelete(ctrl uint64) uint64 {
-	return (ctrl+dwhtSeqInc)&^dwhtStateMask | dwhtStateDeleted
+	return (ctrl + dwhtVersionInc) ^ (dwhtStateFull ^ dwhtStateDeleted)
 }
 
 //go:nosplit

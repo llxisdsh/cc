@@ -191,8 +191,7 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 		if ctrl&v6WritingMask != 0 {
 			goto retryBucket
 		}
-		words := v6LoadTagWords(b)
-		match := v6MatchBits(words, tag)
+		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
 			lane := v6FirstMarkedLane(match)
 			e := table.entry(bi, lane).ReadUnfenced()
@@ -205,7 +204,7 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 			}
 			match &= match - 1
 		}
-		if v6EmptyBits(words) != 0 {
+		if v6EmptyBits(ctrl) != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
@@ -337,8 +336,7 @@ func (m *V6Map[K, V]) Range(yield func(K, V) bool) {
 		if ctrl&v6WritingMask != 0 {
 			goto retry
 		}
-		words := v6LoadTagWords(b)
-		full := v6FullBits(words)
+		full := v6FullBits(ctrl)
 		var cacheCount uintptr
 		for full != 0 {
 			lane := v6FirstMarkedLane(full)
@@ -394,10 +392,10 @@ func (m *V6Map[K, V]) stats() v6MapStats {
 	stats.Capacity = stats.Buckets * v6SlotsPerBucket
 	for i := uintptr(0); i <= table.mask; i++ {
 		b := table.buckets.At(i)
-		words := v6LoadTagWords(b)
-		full := v6FullBits(words)
-		empty := v6EmptyBits(words)
-		deleted := v6DeletedBits(words)
+		ctrl := b.state.Load()
+		full := v6FullBits(ctrl)
+		empty := v6EmptyBits(ctrl)
+		deleted := v6DeletedBits(ctrl)
 		fullCount := uintptr(bits.OnesCount64(full))
 		stats.FullLanes += fullCount
 		stats.EmptyLanes += uintptr(bits.OnesCount64(empty))
@@ -512,8 +510,7 @@ func (m *V6Map[K, V]) storeIn(
 		if ctrl&v6WritingMask != 0 {
 			return v6Retry, *new(V), false, false
 		}
-		words := v6LoadTagWords(b)
-		match := v6MatchBits(words, tag)
+		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
 			lane := v6FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
@@ -540,7 +537,7 @@ func (m *V6Map[K, V]) storeIn(
 			match &= match - 1
 		}
 		if v6EnableSameKeyTombstoneReuse {
-			deleted := v6DeletedBits(words)
+			deleted := v6DeletedBits(ctrl)
 			for deleted != 0 {
 				lane := v6FirstMarkedLane(deleted)
 				slot := table.entry(bi, lane)
@@ -562,7 +559,7 @@ func (m *V6Map[K, V]) storeIn(
 				deleted &= deleted - 1
 			}
 		}
-		if empty := v6EmptyBits(words); empty != 0 {
+		if empty := v6EmptyBits(ctrl); empty != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
@@ -603,8 +600,7 @@ func (m *V6Map[K, V]) updateIn(
 		if ctrl&v6WritingMask != 0 {
 			return v6Retry, *new(V), false, false
 		}
-		words := v6LoadTagWords(b)
-		match := v6MatchBits(words, tag)
+		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
 			lane := v6FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
@@ -630,7 +626,7 @@ func (m *V6Map[K, V]) updateIn(
 			}
 			match &= match - 1
 		}
-		if v6EmptyBits(words) != 0 {
+		if v6EmptyBits(ctrl) != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
@@ -689,8 +685,7 @@ func (m *V6Map[K, V]) deleteIn(
 		if ctrl&v6WritingMask != 0 {
 			return v6Retry, *new(V), false
 		}
-		words := v6LoadTagWords(b)
-		match := v6MatchBits(words, tag)
+		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
 			lane := v6FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
@@ -719,7 +714,7 @@ func (m *V6Map[K, V]) deleteIn(
 			}
 			match &= match - 1
 		}
-		if v6EmptyBits(words) != 0 {
+		if v6EmptyBits(ctrl) != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
@@ -751,8 +746,7 @@ func (m *V6Map[K, V]) compareAndSwapIn(
 		if ctrl&v6WritingMask != 0 {
 			return v6Retry, false
 		}
-		words := v6LoadTagWords(b)
-		match := v6MatchBits(words, tag)
+		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
 			lane := v6FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
@@ -777,7 +771,7 @@ func (m *V6Map[K, V]) compareAndSwapIn(
 			}
 			match &= match - 1
 		}
-		if v6EmptyBits(words) != 0 {
+		if v6EmptyBits(ctrl) != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
@@ -808,8 +802,7 @@ func (m *V6Map[K, V]) compareAndDeleteIn(
 		if ctrl&v6WritingMask != 0 {
 			return v6Retry, false
 		}
-		words := v6LoadTagWords(b)
-		match := v6MatchBits(words, tag)
+		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
 			lane := v6FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
@@ -837,7 +830,7 @@ func (m *V6Map[K, V]) compareAndDeleteIn(
 			}
 			match &= match - 1
 		}
-		if v6EmptyBits(words) != 0 {
+		if v6EmptyBits(ctrl) != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
@@ -868,8 +861,7 @@ func (m *V6Map[K, V]) computeIn(
 		if ctrl&v6WritingMask != 0 {
 			return v6Retry, *new(V), false, false
 		}
-		words := v6LoadTagWords(b)
-		match := v6MatchBits(words, tag)
+		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
 			lane := v6FirstMarkedLane(match)
 			slot := table.entry(bi, lane)
@@ -910,7 +902,7 @@ func (m *V6Map[K, V]) computeIn(
 			match &= match - 1
 		}
 		if v6EnableSameKeyTombstoneReuse {
-			deleted := v6DeletedBits(words)
+			deleted := v6DeletedBits(ctrl)
 			for deleted != 0 {
 				lane := v6FirstMarkedLane(deleted)
 				slot := table.entry(bi, lane)
@@ -940,7 +932,7 @@ func (m *V6Map[K, V]) computeIn(
 				deleted &= deleted - 1
 			}
 		}
-		if empty := v6EmptyBits(words); empty != 0 {
+		if empty := v6EmptyBits(ctrl); empty != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
@@ -1202,8 +1194,7 @@ func (table *v6Table[K, V]) copyInsertConcurrent(e v6Entry[K, V], hash uintptr) 
 			runtime.Gosched()
 			continue
 		}
-		words := v6LoadTagWords(b)
-		empty := v6EmptyBits(words)
+		empty := v6EmptyBits(ctrl)
 		if empty == 0 {
 			v6EndWriteUnchanged(b, ctrl)
 			continue
@@ -1237,7 +1228,7 @@ func v6BeginWriteWithCtrl(b *v6Bucket, ctrl uint64) (uint64, v6Status) {
 }
 
 func v6EndWriteUnchanged(b *v6Bucket, ctrl uint64) {
-	b.state.Store(ctrl &^ v6WritingMask)
+	b.state.Store(ctrl)
 }
 
 func v6EndWriteModified(b *v6Bucket, ctrl uint64) {
@@ -1248,27 +1239,27 @@ func v6FreezeAndLoadTags(b *v6Bucket) uint64 {
 	for {
 		ctrl := b.state.Load()
 		if ctrl&v6FrozenMask != 0 {
-			return v6LoadTagWords(b)
+			return ctrl
 		}
 		if ctrl&v6WritingMask != 0 {
 			runtime.Gosched()
 			continue
 		}
 		if b.state.CompareAndSwap(ctrl, ctrl|v6WritingMask) {
-			b.state.Store(v6BumpCtrl(ctrl | v6FrozenMask | v6WritingMask))
-			return v6LoadTagWords(b)
+			b.state.Store(v6BumpCtrl(ctrl | v6FrozenMask))
+			return ctrl
 		}
 	}
 }
 
+// v6BumpCtrl increments the version portion of the control word.
+// Note: We do not need to clear v6WritingMask here because the returned
+// ctrl from beginWrite does not have the writing mask set, and we just
+// add v6VersionInc to it.
+//
 //go:nosplit
 func v6BumpCtrl(ctrl uint64) uint64 {
-	return (ctrl &^ v6WritingMask) + v6VersionInc
-}
-
-//go:nosplit
-func v6LoadTagWords(b *v6Bucket) uint64 {
-	return b.state.Load()
+	return ctrl + v6VersionInc
 }
 
 //go:nosplit

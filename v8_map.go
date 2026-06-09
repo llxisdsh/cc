@@ -48,9 +48,10 @@ const (
 	// Keep ctrl for version/frozen/writing only. If miss-heavy workloads need a
 	// probe-continuation hint, prefer a side structure so displaced inserts do not
 	// have to update shared bucket metadata.
-	v8VersionMask = uint32(0x3fffffff)
-	v8FrozenMask  = uint32(1) << 30
-	v8WritingMask = uint32(1) << 31
+	v8WritingMask = uint32(1) << 0
+	v8FrozenMask  = uint32(1) << 1
+	v8VersionMask = uint32(0xFFFFFFFC)
+	v8VersionInc  = uint32(1) << 2
 )
 
 const (
@@ -128,10 +129,10 @@ type v8Table[K comparable, V any] struct {
 // ┌───────────────────────────────────────────────────────────────────┐
 // │                    8 × 8-bit h2 tags (64 bits)                    │
 // │                             bytes 0-7                             │
-// ├───────┬──────┬──────────────────┬─────────────────────────────────┤
-// │writing│frozen│ version (30 bits)│         padding (4 bytes)       │
-// │bit 31 │bit 30│    bits 29-0     │             bytes 12-15         │
-// └───────┴──────┴──────────────────┴─────────────────────────────────┘
+// ├───────────────────┬──────┬──────┬─────────────────────────────────┤
+// │ version (30 bits) │frozen│ write│         padding (4 bytes)       │
+// │     bits 31-2     │bit 1 │ bit 0│             bytes 12-15         │
+// └───────────────────┴──────┴──────┴─────────────────────────────────┘
 type v8Bucket struct {
 	tags atomic.Uint64 // [8] bytes of tag
 	ctrl atomic.Uint32
@@ -1245,7 +1246,7 @@ func v8BeginWriteWithCtrl(b *v8Bucket, ctrl uint32) (uint32, v8Status) {
 }
 
 func v8EndWriteUnchanged(b *v8Bucket, ctrl uint32) {
-	b.ctrl.Store(ctrl &^ v8WritingMask)
+	b.ctrl.Store(ctrl)
 }
 
 func v8EndWriteModified(b *v8Bucket, ctrl uint32) {
@@ -1263,15 +1264,20 @@ func v8FreezeAndLoadTags(b *v8Bucket) uint64 {
 			continue
 		}
 		if b.ctrl.CompareAndSwap(ctrl, ctrl|v8WritingMask) {
-			b.ctrl.Store(v8BumpCtrl(ctrl | v8FrozenMask | v8WritingMask))
+			b.ctrl.Store(v8BumpCtrl(ctrl | v8FrozenMask))
 			return v8LoadTagWords(b)
 		}
 	}
 }
 
+// v8BumpCtrl increments the version portion of the control word.
+// Note: We do not need to clear v8WritingMask here because the returned
+// ctrl from beginWrite does not have the writing mask set, and we just
+// add v8VersionInc to it.
+//
 //go:nosplit
 func v8BumpCtrl(ctrl uint32) uint32 {
-	return (ctrl &^ (v8VersionMask | v8WritingMask)) | ((ctrl + 1) & v8VersionMask)
+	return ctrl + v8VersionInc
 }
 
 //go:nosplit
