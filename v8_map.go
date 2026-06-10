@@ -31,12 +31,11 @@ const (
 )
 
 const (
-	v8MinBuckets      = 32
-	v8SlotsPerBucket  = 8
-	v8LoadFactorNum   = 13
-	v8LoadFactorDen   = 16
-	v8MaxProbeBuckets = 32
-	v8LaneMarkerMask  = uint64(0x8080808080808080)
+	v8MinBuckets     = 32
+	v8SlotsPerBucket = 8
+	v8LoadFactorNum  = 13
+	v8LoadFactorDen  = 16
+	v8LaneMarkerMask = uint64(0x8080808080808080)
 )
 
 const (
@@ -1075,7 +1074,7 @@ func (m *V8Map[K, V]) helpResizeInto(old, next *v8Table[K, V]) *v8Table[K, V] {
 		}
 		if old.copyDone.Add(1) == old.chunks {
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, uintptr(v8MaxProbeBuckets))))
+			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, calcProbeLimit(next.bucketLen()))))
 			used := m.size.Reset(v8CntUsed)
 			deleted := m.size.Reset(v8CntDeleted)
 			m.size.Add(v8CntUsed, used-deleted)
@@ -1133,7 +1132,7 @@ func newV8Table[K comparable, V any](bucketLen uintptr, intKey bool) *v8Table[K,
 		buckets:       buckets,
 		entries:       entries,
 		mask:          bucketLen - 1,
-		probeLimit:    min(bucketLen, uintptr(v8MaxProbeBuckets)),
+		probeLimit:    min(bucketLen, calcProbeLimit(bucketLen)),
 		stripeCap:     stripeCap,
 		growCap:       growCap,
 		intKey:        intKey,

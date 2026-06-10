@@ -258,16 +258,22 @@ func TestIntThroughputStable(t *testing.T) {
 				rows = append(rows, r)
 			}
 		}
-		sort.Slice(rows, func(i, j int) bool { return rows[i].insertMops > rows[j].insertMops })
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].memoryN > rows[j].memoryN {
+				return true
+			} else if rows[i].memoryN < rows[j].memoryN {
+				return false
+			}
+			return rows[i].insertMops > rows[j].insertMops
+		})
 		fmt.Printf("===== mode %s final summary (total-based, sorted by insert throughput) =====\n", mode.name)
 		for _, r := range rows {
 			fmt.Printf(
-				"%s \n throughput(mops): insert=%.2f [%.2f..%.2f], load=%.2f [%.2f..%.2f], delete=%.2f [%.2f..%.2f] \n memory(total n=%d): retained=%.2f MiB (%.1f B/entry), allocated=%.2f MiB (%.1f B/entry)\n",
-				r.name,
+				"%s(total n=%d) \n throughput(mops): insert=%.2f [%.2f..%.2f], load=%.2f [%.2f..%.2f], delete=%.2f [%.2f..%.2f] \n memory: retained=%.2f MiB (%.1f B/entry), allocated=%.2f MiB (%.1f B/entry)\n",
+				r.name, r.memoryN,
 				r.insertMops, r.insertMin, r.insertMax,
 				r.loadMops, r.loadMin, r.loadMax,
 				r.delMops, r.delMin, r.delMax,
-				r.memoryN,
 				r.retainedMiB, r.retainedBPE,
 				r.allocatedMiB, r.allocatedBPE,
 			)

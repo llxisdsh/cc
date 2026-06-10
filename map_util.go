@@ -228,6 +228,18 @@ func nextPowOf2(v uintptr) uintptr {
 	return v
 }
 
+// calcProbeLimit returns a dynamically scaling probe limit based on the array
+// length. It provides a logarithmic safety margin to naturally accommodate
+// hash clustering, avoiding spurious probe-limit resizes on large tables.
+//
+//go:nosplit
+func calcProbeLimit(length uintptr) uintptr {
+	if length == 0 {
+		return 16
+	}
+	return 16 + uintptr(bits.TrailingZeros(uint(length)))*2
+}
+
 // noescape hides a pointer from escape analysis. noescape is
 // the identity function, but escape analysis doesn't think the
 // output depends on the input.  noescape is inlined and currently

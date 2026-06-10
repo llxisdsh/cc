@@ -31,12 +31,11 @@ const (
 )
 
 const (
-	v4MinBuckets      = 32
-	v4SlotsPerBucket  = 4
-	v4LoadFactorNum   = 12
-	v4LoadFactorDen   = 16
-	v4MaxProbeBuckets = 32
-	v4LaneMarkerMask  = uint32(0x80808080)
+	v4MinBuckets     = 32
+	v4SlotsPerBucket = 4
+	v4LoadFactorNum  = 12
+	v4LoadFactorDen  = 16
+	v4LaneMarkerMask = uint32(0x80808080)
 )
 
 const (
@@ -1073,7 +1072,7 @@ func (m *V4Map[K, V]) helpResizeInto(old, next *v4Table[K, V]) *v4Table[K, V] {
 		}
 		if old.copyDone.Add(1) == old.chunks {
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, uintptr(v4MaxProbeBuckets))))
+			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, calcProbeLimit(next.bucketLen()))))
 			used := m.size.Reset(v4CntUsed)
 			deleted := m.size.Reset(v4CntDeleted)
 			m.size.Add(v4CntUsed, used-deleted)
@@ -1131,7 +1130,7 @@ func newV4Table[K comparable, V any](bucketLen uintptr, intKey bool) *v4Table[K,
 		buckets:    buckets,
 		entries:    entries,
 		mask:       bucketLen - 1,
-		probeLimit: min(bucketLen, uintptr(v4MaxProbeBuckets)),
+		probeLimit: min(bucketLen, calcProbeLimit(bucketLen)),
 		stripeCap:  stripeCap,
 		growCap:    growCap,
 		intKey:     intKey,

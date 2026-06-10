@@ -31,12 +31,11 @@ const (
 )
 
 const (
-	v6MinBuckets      = 32
-	v6SlotsPerBucket  = 6
-	v6LoadFactorNum   = 12
-	v6LoadFactorDen   = 16
-	v6MaxProbeBuckets = 32
-	v6LaneMarkerMask  = uint64(0x808080808080)
+	v6MinBuckets     = 32
+	v6SlotsPerBucket = 6
+	v6LoadFactorNum  = 12
+	v6LoadFactorDen  = 16
+	v6LaneMarkerMask = uint64(0x808080808080)
 )
 
 const (
@@ -1069,7 +1068,7 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 		}
 		if old.copyDone.Add(1) == old.chunks {
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, uintptr(v6MaxProbeBuckets))))
+			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, calcProbeLimit(next.bucketLen()))))
 			used := m.size.Reset(v6CntUsed)
 			deleted := m.size.Reset(v6CntDeleted)
 			m.size.Add(v6CntUsed, used-deleted)
@@ -1127,7 +1126,7 @@ func newV6Table[K comparable, V any](bucketLen uintptr, intKey bool) *v6Table[K,
 		buckets:    buckets,
 		entries:    entries,
 		mask:       bucketLen - 1,
-		probeLimit: min(bucketLen, uintptr(v6MaxProbeBuckets)),
+		probeLimit: min(bucketLen, calcProbeLimit(bucketLen)),
 		stripeCap:  stripeCap,
 		growCap:    growCap,
 		intKey:     intKey,

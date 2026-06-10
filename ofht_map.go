@@ -33,22 +33,6 @@ const (
 	ofhtMinSlots = 128
 	// ofhtLoadFactor must be a multiple of 1/8, such as 0.5, 0.625, 0.75, 0.875, etc.
 	ofhtLoadFactor = 0.625
-
-	// ofhtMaxProbeThreshold is the baseline probe window (slots).
-	//
-	// Tail model (linear probing):
-	//   P(any run >= k) <= n * alpha^k
-	// => k*(n) = ceil( ln(n/epsilon) / -ln(alpha) ).
-	//
-	// The implementation rounds k* to power-of-two windows (nextPow2), so
-	// thresholds become stepwise. With alpha=0.625 and epsilon=1e-6:
-	//   k*(128) = 40 -> window 64,
-	// and the 64->128 step appears when n > epsilon * alpha^(-64) (~1.1e7, ~2^24).
-	//
-	// We keep a fixed baseline floor for stable read/miss locality, and rely on
-	// probe-limit-triggered growth to handle clustering or hash degeneration.
-	ofhtMaxProbeThreshold = 64
-
 	// ofhtGrowCheckMask is used as a bitwise AND mask to sample the local size counter.
 	// This reduces the overhead of checking the global size on every insertion.
 	// It MUST be strictly smaller than the initial grow threshold.
@@ -1055,7 +1039,7 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 			// shrink when clustering dissipates after table growth or
 			// tombstone compaction, avoiding a permanently inflated miss path.
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(nextLen, nextPowOf2(max(observed<<1, ofhtMaxProbeThreshold)))
+			next.probeLimit = min(nextLen, nextPowOf2(max(observed<<1, calcProbeLimit(nextLen))))
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
@@ -1064,7 +1048,7 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 
 func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
-	probeLimit := min(slotLen, uintptr(ofhtMaxProbeThreshold))
+	probeLimit := min(slotLen, calcProbeLimit(slotLen))
 	growCap := int(float64(slotLen) * ofhtLoadFactor)
 	cpus := maxProcs()
 	roundedSizeLen := nextPowOf2(cpus)

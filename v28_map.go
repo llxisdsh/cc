@@ -35,12 +35,11 @@ const (
 )
 
 const (
-	v28MinBuckets      = 8
-	v28SlotsPerBucket  = 28
-	v28LoadFactorNum   = 15
-	v28LoadFactorDen   = 16
-	v28MaxProbeBuckets = 8
-	v28LaneMask        = uint32(1)<<v28SlotsPerBucket - 1
+	v28MinBuckets     = 8
+	v28SlotsPerBucket = 28
+	v28LoadFactorNum  = 15
+	v28LoadFactorDen  = 16
+	v28LaneMask       = uint32(1)<<v28SlotsPerBucket - 1
 )
 
 const (
@@ -1093,7 +1092,7 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 		}
 		if old.copyDone.Add(1) == old.chunks {
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, uintptr(v28MaxProbeBuckets))))
+			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, calcProbeLimit(next.bucketLen()))))
 			used := m.size.Reset(v28CntUsed)
 			deleted := m.size.Reset(v28CntDeleted)
 			m.size.Add(v28CntUsed, used-deleted)
@@ -1167,7 +1166,7 @@ func newV28Table[K comparable, V any](bucketLen uintptr, intKey bool) *v28Table[
 		buckets:       buckets,
 		entries:       entries,
 		mask:          bucketLen - 1,
-		probeLimit:    min(bucketLen, uintptr(v28MaxProbeBuckets)),
+		probeLimit:    min(bucketLen, calcProbeLimit(bucketLen)),
 		stripeCap:     stripeCap,
 		growCap:       growCap,
 		intKey:        intKey,

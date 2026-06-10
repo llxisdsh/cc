@@ -439,7 +439,7 @@ func TestV8MapStringResize(t *testing.T) {
 }
 
 func TestV8MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
-	const n = v8SlotsPerBucket*v8MaxProbeBuckets*3 + 1
+	const n = v8SlotsPerBucket*64*3 + 1
 	m := NewV8Map[int, int](
 		WithCapacity(1),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
@@ -459,8 +459,8 @@ func TestV8MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
 	if table == nil {
 		t.Fatal("table is nil")
 	}
-	if table.probeLimit <= uintptr(v8MaxProbeBuckets) {
-		t.Fatalf("probeLimit = %d, want > baseline %d", table.probeLimit, v8MaxProbeBuckets)
+	if table.probeLimit <= uintptr(64) {
+		t.Fatalf("probeLimit = %d, want > baseline %d", table.probeLimit, 64)
 	}
 }
 

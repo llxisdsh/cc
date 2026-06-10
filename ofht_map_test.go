@@ -432,7 +432,7 @@ func TestOFHTMapLongProbeLimitSurvivesResize(t *testing.T) {
 		WithCapacity(1),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
 	)
-	const n = ofhtMaxProbeThreshold + 1
+	const n = 64 + 1
 	for i := range n {
 		m.Store(i, i*10)
 	}
@@ -452,7 +452,7 @@ func TestOFHTMapLongProbeLimitRepeatedResizeBadHash(t *testing.T) {
 
 	// Push far beyond one probe-limit-triggered resize to stress repeated
 	// grow/copy under maximum clustering.
-	const n = ofhtMaxProbeThreshold * 16
+	const n = 64 * 16
 	for i := range n {
 		m.Store(i, i+1)
 	}
@@ -470,8 +470,8 @@ func TestOFHTMapLongProbeLimitRepeatedResizeBadHash(t *testing.T) {
 	if table == nil {
 		t.Fatal("table is nil")
 	}
-	if table.probeLimit < uintptr(ofhtMaxProbeThreshold) {
-		t.Fatalf("probeLimit=%d, want >= %d", table.probeLimit, ofhtMaxProbeThreshold)
+	if table.probeLimit < uintptr(64) {
+		t.Fatalf("probeLimit=%d, want >= %d", table.probeLimit, 64)
 	}
 }
 
