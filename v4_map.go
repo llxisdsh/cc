@@ -255,8 +255,6 @@ func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			return swapped
 		case v4Frozen:
 			table = m.helpResize(table)
-		case v4Retry:
-			runtime.Gosched()
 		case v4Full:
 			return false
 		}
@@ -286,8 +284,6 @@ func (m *V4Map[K, V]) CompareAndDelete(key K, old V) bool {
 			return deleted
 		case v4Frozen:
 			table = m.helpResize(table)
-		case v4Retry:
-			runtime.Gosched()
 		case v4Full:
 			return false
 		}
@@ -313,8 +309,6 @@ func (m *V4Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
 		case v4Frozen:
 			table = m.helpResize(table)
-		case v4Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -453,8 +447,6 @@ func (m *V4Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
 		case v4Frozen:
 			table = m.helpResize(table)
-		case v4Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -484,8 +476,6 @@ func (m *V4Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			return *new(V), false
 		case v4Frozen:
 			table = m.helpResize(table)
-		case v4Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -507,7 +497,7 @@ func (m *V4Map[K, V]) storeIn(
 			return v4Frozen, *new(V), false, false
 		}
 		if ctrl&v4WritingMask != 0 {
-			return v4Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v4LoadTagWords(b)
 		match := v4MatchBits(words, tag)
@@ -528,6 +518,9 @@ func (m *V4Map[K, V]) storeIn(
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
+					if status == v4Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
@@ -548,6 +541,9 @@ func (m *V4Map[K, V]) storeIn(
 				if e.key == *key {
 					ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 					if status != v4OK {
+						if status == v4Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
@@ -565,6 +561,9 @@ func (m *V4Map[K, V]) storeIn(
 			}
 			ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 			if status != v4OK {
+				if status == v4Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := v4FirstMarkedLane(empty)
@@ -598,7 +597,7 @@ func (m *V4Map[K, V]) updateIn(
 			return v4Frozen, *new(V), false, false
 		}
 		if ctrl&v4WritingMask != 0 {
-			return v4Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v4LoadTagWords(b)
 		match := v4MatchBits(words, tag)
@@ -619,6 +618,9 @@ func (m *V4Map[K, V]) updateIn(
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
+					if status == v4Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
@@ -662,8 +664,6 @@ func (m *V4Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
 			return *new(V), false
 		case v4Frozen:
 			table = m.helpResize(table)
-		case v4Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -684,7 +684,7 @@ func (m *V4Map[K, V]) deleteIn(
 			return v4Frozen, *new(V), false
 		}
 		if ctrl&v4WritingMask != 0 {
-			return v4Retry, *new(V), false
+			goto retryBucket
 		}
 		words := v4LoadTagWords(b)
 		match := v4MatchBits(words, tag)
@@ -698,6 +698,9 @@ func (m *V4Map[K, V]) deleteIn(
 			if e.key == *key {
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
+					if status == v4Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false
 				}
 				var prev V
@@ -746,7 +749,7 @@ func (m *V4Map[K, V]) compareAndSwapIn(
 			return v4Frozen, false
 		}
 		if ctrl&v4WritingMask != 0 {
-			return v4Retry, false
+			goto retryBucket
 		}
 		words := v4LoadTagWords(b)
 		match := v4MatchBits(words, tag)
@@ -766,6 +769,9 @@ func (m *V4Map[K, V]) compareAndSwapIn(
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
+					if status == v4Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *new})
@@ -803,7 +809,7 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 			return v4Frozen, false
 		}
 		if ctrl&v4WritingMask != 0 {
-			return v4Retry, false
+			goto retryBucket
 		}
 		words := v4LoadTagWords(b)
 		match := v4MatchBits(words, tag)
@@ -820,6 +826,9 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
+					if status == v4Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				if !v4EnableSameKeyTombstoneReuse {
@@ -863,7 +872,7 @@ func (m *V4Map[K, V]) computeIn(
 			return v4Frozen, *new(V), false, false
 		}
 		if ctrl&v4WritingMask != 0 {
-			return v4Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v4LoadTagWords(b)
 		match := v4MatchBits(words, tag)
@@ -877,6 +886,9 @@ func (m *V4Map[K, V]) computeIn(
 			if e.key == *key {
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
+					if status == v4Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				it := MapEntry[K, V]{
@@ -918,6 +930,9 @@ func (m *V4Map[K, V]) computeIn(
 				if e.key == *key {
 					ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 					if status != v4OK {
+						if status == v4Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					it := MapEntry[K, V]{
@@ -943,6 +958,9 @@ func (m *V4Map[K, V]) computeIn(
 			}
 			ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 			if status != v4OK {
+				if status == v4Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := v4FirstMarkedLane(empty)
@@ -1191,7 +1209,6 @@ func (table *v4Table[K, V]) copyInsertConcurrent(e v4Entry[K, V], hash uintptr) 
 		ctrl, status := v4BeginWrite(b)
 		if status != v4OK {
 			probe--
-			runtime.Gosched()
 			continue
 		}
 		words := v4LoadTagWords(b)
@@ -1243,7 +1260,6 @@ func v4FreezeAndLoadTags(b *v4Bucket) uint32 {
 			return v4LoadTagWords(b)
 		}
 		if ctrl&v4WritingMask != 0 {
-			runtime.Gosched()
 			continue
 		}
 		if b.ctrl.CompareAndSwap(ctrl, ctrl|v4WritingMask) {

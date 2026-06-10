@@ -258,8 +258,6 @@ func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			return swapped
 		case v6Frozen:
 			table = m.helpResize(table)
-		case v6Retry:
-			runtime.Gosched()
 		case v6Full:
 			return false
 		}
@@ -289,8 +287,6 @@ func (m *V6Map[K, V]) CompareAndDelete(key K, old V) bool {
 			return deleted
 		case v6Frozen:
 			table = m.helpResize(table)
-		case v6Retry:
-			runtime.Gosched()
 		case v6Full:
 			return false
 		}
@@ -316,8 +312,6 @@ func (m *V6Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 			table = m.tryResize(table, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
 		case v6Frozen:
 			table = m.helpResize(table)
-		case v6Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -455,8 +449,6 @@ func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 			table = m.tryResize(table, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
 		case v6Frozen:
 			table = m.helpResize(table)
-		case v6Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -486,8 +478,6 @@ func (m *V6Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			return *new(V), false
 		case v6Frozen:
 			table = m.helpResize(table)
-		case v6Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -509,7 +499,7 @@ func (m *V6Map[K, V]) storeIn(
 			return v6Frozen, *new(V), false, false
 		}
 		if ctrl&v6WritingMask != 0 {
-			return v6Retry, *new(V), false, false
+			goto retryBucket
 		}
 		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
@@ -529,6 +519,9 @@ func (m *V6Map[K, V]) storeIn(
 				}
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
+					if status == v6Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
@@ -549,6 +542,9 @@ func (m *V6Map[K, V]) storeIn(
 				if e.key == *key {
 					ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 					if status != v6OK {
+						if status == v6Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
@@ -566,6 +562,9 @@ func (m *V6Map[K, V]) storeIn(
 			}
 			ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 			if status != v6OK {
+				if status == v6Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := v6FirstMarkedLane(empty)
@@ -599,7 +598,7 @@ func (m *V6Map[K, V]) updateIn(
 			return v6Frozen, *new(V), false, false
 		}
 		if ctrl&v6WritingMask != 0 {
-			return v6Retry, *new(V), false, false
+			goto retryBucket
 		}
 		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
@@ -619,6 +618,9 @@ func (m *V6Map[K, V]) updateIn(
 				}
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
+					if status == v6Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
@@ -662,8 +664,6 @@ func (m *V6Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
 			return *new(V), false
 		case v6Frozen:
 			table = m.helpResize(table)
-		case v6Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -678,13 +678,14 @@ func (m *V6Map[K, V]) deleteIn(
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
+
 	retryBucket:
 		ctrl := b.state.Load()
 		if ctrl&v6FrozenMask != 0 {
 			return v6Frozen, *new(V), false
 		}
 		if ctrl&v6WritingMask != 0 {
-			return v6Retry, *new(V), false
+			goto retryBucket
 		}
 		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
@@ -697,6 +698,9 @@ func (m *V6Map[K, V]) deleteIn(
 			if e.key == *key {
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
+					if status == v6Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false
 				}
 				var prev V
@@ -745,7 +749,7 @@ func (m *V6Map[K, V]) compareAndSwapIn(
 			return v6Frozen, false
 		}
 		if ctrl&v6WritingMask != 0 {
-			return v6Retry, false
+			goto retryBucket
 		}
 		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
@@ -764,6 +768,9 @@ func (m *V6Map[K, V]) compareAndSwapIn(
 				}
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
+					if status == v6Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *new})
@@ -801,7 +808,7 @@ func (m *V6Map[K, V]) compareAndDeleteIn(
 			return v6Frozen, false
 		}
 		if ctrl&v6WritingMask != 0 {
-			return v6Retry, false
+			goto retryBucket
 		}
 		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
@@ -817,6 +824,9 @@ func (m *V6Map[K, V]) compareAndDeleteIn(
 				}
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
+					if status == v6Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				if !v6EnableSameKeyTombstoneReuse {
@@ -860,7 +870,7 @@ func (m *V6Map[K, V]) computeIn(
 			return v6Frozen, *new(V), false, false
 		}
 		if ctrl&v6WritingMask != 0 {
-			return v6Retry, *new(V), false, false
+			goto retryBucket
 		}
 		match := v6MatchBits(ctrl, tag)
 		for match != 0 {
@@ -873,6 +883,9 @@ func (m *V6Map[K, V]) computeIn(
 			if e.key == *key {
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
+					if status == v6Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				it := MapEntry[K, V]{
@@ -914,6 +927,9 @@ func (m *V6Map[K, V]) computeIn(
 				if e.key == *key {
 					ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 					if status != v6OK {
+						if status == v6Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					it := MapEntry[K, V]{
@@ -939,6 +955,9 @@ func (m *V6Map[K, V]) computeIn(
 			}
 			ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 			if status != v6OK {
+				if status == v6Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := v6FirstMarkedLane(empty)
@@ -1187,7 +1206,6 @@ func (table *v6Table[K, V]) copyInsertConcurrent(e v6Entry[K, V], hash uintptr) 
 		ctrl, status := v6BeginWrite(b)
 		if status != v6OK {
 			probe--
-			runtime.Gosched()
 			continue
 		}
 		empty := v6EmptyBits(ctrl)
@@ -1238,7 +1256,6 @@ func v6FreezeAndLoadTags(b *v6Bucket) uint64 {
 			return ctrl
 		}
 		if ctrl&v6WritingMask != 0 {
-			runtime.Gosched()
 			continue
 		}
 		if b.state.CompareAndSwap(ctrl, ctrl|v6WritingMask) {

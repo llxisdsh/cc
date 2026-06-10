@@ -257,8 +257,6 @@ func (m *V8Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			return swapped
 		case v8Frozen:
 			table = m.helpResize(table)
-		case v8Retry:
-			runtime.Gosched()
 		case v8Full:
 			return false
 		}
@@ -288,8 +286,6 @@ func (m *V8Map[K, V]) CompareAndDelete(key K, old V) bool {
 			return deleted
 		case v8Frozen:
 			table = m.helpResize(table)
-		case v8Retry:
-			runtime.Gosched()
 		case v8Full:
 			return false
 		}
@@ -315,8 +311,6 @@ func (m *V8Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 			table = m.tryResize(table, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
 		case v8Frozen:
 			table = m.helpResize(table)
-		case v8Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -455,8 +449,6 @@ func (m *V8Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 			table = m.tryResize(table, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
 		case v8Frozen:
 			table = m.helpResize(table)
-		case v8Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -486,8 +478,6 @@ func (m *V8Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			return *new(V), false
 		case v8Frozen:
 			table = m.helpResize(table)
-		case v8Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -509,7 +499,7 @@ func (m *V8Map[K, V]) storeIn(
 			return v8Frozen, *new(V), false, false
 		}
 		if ctrl&v8WritingMask != 0 {
-			return v8Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v8LoadTagWords(b)
 		match := v8MatchBits(words, tag)
@@ -530,6 +520,9 @@ func (m *V8Map[K, V]) storeIn(
 				}
 				ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 				if status != v8OK {
+					if status == v8Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				slot.WriteUnfenced(v8Entry[K, V]{key: e.key, val: *val})
@@ -550,6 +543,9 @@ func (m *V8Map[K, V]) storeIn(
 				if e.key == *key {
 					ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 					if status != v8OK {
+						if status == v8Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					slot.WriteUnfenced(v8Entry[K, V]{key: e.key, val: *val})
@@ -567,6 +563,9 @@ func (m *V8Map[K, V]) storeIn(
 			}
 			ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 			if status != v8OK {
+				if status == v8Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := v8FirstMarkedLane(empty)
@@ -600,7 +599,7 @@ func (m *V8Map[K, V]) updateIn(
 			return v8Frozen, *new(V), false, false
 		}
 		if ctrl&v8WritingMask != 0 {
-			return v8Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v8LoadTagWords(b)
 		match := v8MatchBits(words, tag)
@@ -621,6 +620,9 @@ func (m *V8Map[K, V]) updateIn(
 				}
 				ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 				if status != v8OK {
+					if status == v8Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				slot.WriteUnfenced(v8Entry[K, V]{key: e.key, val: *val})
@@ -664,8 +666,6 @@ func (m *V8Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
 			return *new(V), false
 		case v8Frozen:
 			table = m.helpResize(table)
-		case v8Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -686,7 +686,7 @@ func (m *V8Map[K, V]) deleteIn(
 			return v8Frozen, *new(V), false
 		}
 		if ctrl&v8WritingMask != 0 {
-			return v8Retry, *new(V), false
+			goto retryBucket
 		}
 		words := v8LoadTagWords(b)
 		match := v8MatchBits(words, tag)
@@ -700,6 +700,9 @@ func (m *V8Map[K, V]) deleteIn(
 			if e.key == *key {
 				ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 				if status != v8OK {
+					if status == v8Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false
 				}
 				var prev V
@@ -748,7 +751,7 @@ func (m *V8Map[K, V]) compareAndSwapIn(
 			return v8Frozen, false
 		}
 		if ctrl&v8WritingMask != 0 {
-			return v8Retry, false
+			goto retryBucket
 		}
 		words := v8LoadTagWords(b)
 		match := v8MatchBits(words, tag)
@@ -768,6 +771,9 @@ func (m *V8Map[K, V]) compareAndSwapIn(
 				}
 				ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 				if status != v8OK {
+					if status == v8Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				slot.WriteUnfenced(v8Entry[K, V]{key: e.key, val: *new})
@@ -805,7 +811,7 @@ func (m *V8Map[K, V]) compareAndDeleteIn(
 			return v8Frozen, false
 		}
 		if ctrl&v8WritingMask != 0 {
-			return v8Retry, false
+			goto retryBucket
 		}
 		words := v8LoadTagWords(b)
 		match := v8MatchBits(words, tag)
@@ -822,6 +828,9 @@ func (m *V8Map[K, V]) compareAndDeleteIn(
 				}
 				ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 				if status != v8OK {
+					if status == v8Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				if !v8EnableSameKeyTombstoneReuse {
@@ -865,7 +874,7 @@ func (m *V8Map[K, V]) computeIn(
 			return v8Frozen, *new(V), false, false
 		}
 		if ctrl&v8WritingMask != 0 {
-			return v8Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v8LoadTagWords(b)
 		match := v8MatchBits(words, tag)
@@ -879,6 +888,9 @@ func (m *V8Map[K, V]) computeIn(
 			if e.key == *key {
 				ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 				if status != v8OK {
+					if status == v8Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				it := MapEntry[K, V]{
@@ -920,6 +932,9 @@ func (m *V8Map[K, V]) computeIn(
 				if e.key == *key {
 					ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 					if status != v8OK {
+						if status == v8Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					it := MapEntry[K, V]{
@@ -945,6 +960,9 @@ func (m *V8Map[K, V]) computeIn(
 			}
 			ctrl, status := v8BeginWriteWithCtrl(b, ctrl)
 			if status != v8OK {
+				if status == v8Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := v8FirstMarkedLane(empty)
@@ -1204,7 +1222,6 @@ func (table *v8Table[K, V]) copyInsertConcurrent(e v8Entry[K, V], hash uintptr) 
 		ctrl, status := v8BeginWrite(b)
 		if status != v8OK {
 			probe--
-			runtime.Gosched()
 			continue
 		}
 		words := v8LoadTagWords(b)
@@ -1256,7 +1273,6 @@ func v8FreezeAndLoadTags(b *v8Bucket) uint64 {
 			return v8LoadTagWords(b)
 		}
 		if ctrl&v8WritingMask != 0 {
-			runtime.Gosched()
 			continue
 		}
 		if b.ctrl.CompareAndSwap(ctrl, ctrl|v8WritingMask) {

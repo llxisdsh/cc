@@ -272,8 +272,6 @@ func (m *V28Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			return swapped
 		case v28Frozen:
 			table = m.helpResize(table)
-		case v28Retry:
-			runtime.Gosched()
 		case v28Full:
 			return false
 		}
@@ -303,8 +301,6 @@ func (m *V28Map[K, V]) CompareAndDelete(key K, old V) bool {
 			return deleted
 		case v28Frozen:
 			table = m.helpResize(table)
-		case v28Retry:
-			runtime.Gosched()
 		case v28Full:
 			return false
 		}
@@ -330,8 +326,6 @@ func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loa
 			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
 		case v28Frozen:
 			table = m.helpResize(table)
-		case v28Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -474,8 +468,6 @@ func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loade
 			table = m.tryResize(table, int(m.size.Value(v28CntUsed)), v28ResizeProbeLimit)
 		case v28Frozen:
 			table = m.helpResize(table)
-		case v28Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -505,8 +497,6 @@ func (m *V28Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, lo
 			return *new(V), false
 		case v28Frozen:
 			table = m.helpResize(table)
-		case v28Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -528,7 +518,7 @@ func (m *V28Map[K, V]) storeIn(
 			return v28Frozen, *new(V), false, false
 		}
 		if ctrl&v28WritingMask != 0 {
-			return v28Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v28LoadTagWords(b)
 		match := v28MatchBits(words, tag)
@@ -548,6 +538,9 @@ func (m *V28Map[K, V]) storeIn(
 				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
+					if status == v28Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				e.val = *val
@@ -568,6 +561,9 @@ func (m *V28Map[K, V]) storeIn(
 				if k == *key {
 					ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 					if status != v28OK {
+						if status == v28Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					e.val = *val
@@ -585,6 +581,9 @@ func (m *V28Map[K, V]) storeIn(
 			}
 			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 			if status != v28OK {
+				if status == v28Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := uintptr(bits.TrailingZeros32(empty))
@@ -620,7 +619,7 @@ func (m *V28Map[K, V]) updateIn(
 			return v28Frozen, *new(V), false, false
 		}
 		if ctrl&v28WritingMask != 0 {
-			return v28Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v28LoadTagWords(b)
 		match := v28MatchBits(words, tag)
@@ -640,6 +639,9 @@ func (m *V28Map[K, V]) updateIn(
 				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
+					if status == v28Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				e.val = *val
@@ -683,8 +685,6 @@ func (m *V28Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) 
 			return *new(V), false
 		case v28Frozen:
 			table = m.helpResize(table)
-		case v28Retry:
-			runtime.Gosched()
 		}
 	}
 }
@@ -705,7 +705,7 @@ func (m *V28Map[K, V]) deleteIn(
 			return v28Frozen, *new(V), false
 		}
 		if ctrl&v28WritingMask != 0 {
-			return v28Retry, *new(V), false
+			goto retryBucket
 		}
 		words := v28LoadTagWords(b)
 		match := v28MatchBits(words, tag)
@@ -719,6 +719,9 @@ func (m *V28Map[K, V]) deleteIn(
 			if k == *key {
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
+					if status == v28Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false
 				}
 				var prev V
@@ -766,7 +769,7 @@ func (m *V28Map[K, V]) compareAndSwapIn(
 			return v28Frozen, false
 		}
 		if ctrl&v28WritingMask != 0 {
-			return v28Retry, false
+			goto retryBucket
 		}
 		words := v28LoadTagWords(b)
 		match := v28MatchBits(words, tag)
@@ -786,6 +789,9 @@ func (m *V28Map[K, V]) compareAndSwapIn(
 				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
+					if status == v28Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				e.val = *new
@@ -823,7 +829,7 @@ func (m *V28Map[K, V]) compareAndDeleteIn(
 			return v28Frozen, false
 		}
 		if ctrl&v28WritingMask != 0 {
-			return v28Retry, false
+			goto retryBucket
 		}
 		words := v28LoadTagWords(b)
 		match := v28MatchBits(words, tag)
@@ -840,6 +846,9 @@ func (m *V28Map[K, V]) compareAndDeleteIn(
 				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
+					if status == v28Retry {
+						goto retryBucket
+					}
 					return status, false
 				}
 				if !v28EnableSameKeyTombstoneReuse {
@@ -882,7 +891,7 @@ func (m *V28Map[K, V]) computeIn(
 			return v28Frozen, *new(V), false, false
 		}
 		if ctrl&v28WritingMask != 0 {
-			return v28Retry, *new(V), false, false
+			goto retryBucket
 		}
 		words := v28LoadTagWords(b)
 		match := v28MatchBits(words, tag)
@@ -896,6 +905,9 @@ func (m *V28Map[K, V]) computeIn(
 			if k == *key {
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
+					if status == v28Retry {
+						goto retryBucket
+					}
 					return status, *new(V), false, false
 				}
 				it := MapEntry[K, V]{
@@ -936,6 +948,9 @@ func (m *V28Map[K, V]) computeIn(
 				if k == *key {
 					ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 					if status != v28OK {
+						if status == v28Retry {
+							goto retryBucket
+						}
 						return status, *new(V), false, false
 					}
 					it := MapEntry[K, V]{
@@ -961,6 +976,9 @@ func (m *V28Map[K, V]) computeIn(
 			}
 			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 			if status != v28OK {
+				if status == v28Retry {
+					goto retryBucket
+				}
 				return status, *new(V), false, false
 			}
 			lane := uintptr(bits.TrailingZeros32(empty))
@@ -1246,7 +1264,6 @@ func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintpt
 		ctrl, status := v28BeginWrite(b)
 		if status != v28OK {
 			probe--
-			runtime.Gosched()
 			continue
 		}
 		words := v28LoadTagWords(b)
@@ -1299,7 +1316,6 @@ func v28FreezeAndLoadTags(b *v28Bucket) archsimd.Uint8x32 {
 			return v28LoadTagWords(b)
 		}
 		if ctrl&v28WritingMask != 0 {
-			runtime.Gosched()
 			continue
 		}
 		if b.ctrl.CompareAndSwap(ctrl, ctrl|v28WritingMask) {
