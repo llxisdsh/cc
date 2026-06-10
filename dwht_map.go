@@ -362,8 +362,7 @@ func (m *DWHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case dwhtStoreFrozen:
 			table = m.helpResize(table)
 		case dwhtStoreFull:
-			occupied := int(m.size.Value(dwhtCntOccupied))
-			table = m.tryResize(table, occupied, dwhtResizeProbeLimit)
+			return *new(V), false
 		}
 	}
 }
@@ -385,10 +384,14 @@ func (m *DWHTMap[K, V]) Delete(key K) {
 	}
 	for {
 		status, _, _ := m.deleteFrom(table, noEscape(&key), h, false)
-		if status == dwhtStoreOK {
+		switch status {
+		case dwhtStoreOK:
+			return
+		case dwhtStoreFrozen:
+			table = m.helpResize(table)
+		case dwhtStoreFull:
 			return
 		}
-		table = m.helpResize(table)
 	}
 }
 
@@ -409,10 +412,14 @@ func (m *DWHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	}
 	for {
 		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h, true)
-		if status == dwhtStoreOK {
+		switch status {
+		case dwhtStoreOK:
 			return prev, loaded
+		case dwhtStoreFrozen:
+			table = m.helpResize(table)
+		case dwhtStoreFull:
+			return *new(V), false
 		}
-		table = m.helpResize(table)
 	}
 }
 
@@ -439,10 +446,14 @@ func (m *DWHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			noEscape(&new),
 			h,
 		)
-		if status == dwhtStoreOK {
+		switch status {
+		case dwhtStoreOK:
 			return swapped
+		case dwhtStoreFrozen:
+			table = m.helpResize(table)
+		case dwhtStoreFull:
+			return false
 		}
-		table = m.helpResize(table)
 	}
 }
 
@@ -468,10 +479,14 @@ func (m *DWHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 			noEscape(&old),
 			h,
 		)
-		if status == dwhtStoreOK {
+		switch status {
+		case dwhtStoreOK:
 			return deleted
+		case dwhtStoreFrozen:
+			table = m.helpResize(table)
+		case dwhtStoreFull:
+			return false
 		}
-		table = m.helpResize(table)
 	}
 }
 

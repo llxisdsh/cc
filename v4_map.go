@@ -182,9 +182,11 @@ func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
+		// spins := 0
 	retryBucket:
 		ctrl := b.ctrl.Load()
 		if ctrl&v4WritingMask != 0 {
+			// delay(&spins)
 			goto retryBucket
 		}
 		words := v4LoadTagWords(b)
@@ -193,7 +195,7 @@ func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
 			lane := v4FirstMarkedLane(match)
 			e := table.entry(bi, lane).ReadUnfenced()
 			ctrl2 := b.ctrl.Load()
-			if ctrl != ctrl2 || ctrl2&v4WritingMask != 0 {
+			if ctrl != ctrl2 {
 				goto retryBucket
 			}
 			if e.key == key {
@@ -257,7 +259,7 @@ func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		case v4Retry:
 			runtime.Gosched()
 		case v4Full:
-			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			return false
 		}
 	}
 }
@@ -288,7 +290,7 @@ func (m *V4Map[K, V]) CompareAndDelete(key K, old V) bool {
 		case v4Retry:
 			runtime.Gosched()
 		case v4Full:
-			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			return false
 		}
 	}
 }
@@ -343,7 +345,7 @@ func (m *V4Map[K, V]) Range(yield func(K, V) bool) {
 			full &= full - 1
 		}
 		ctrl2 := b.ctrl.Load()
-		if ctrl != ctrl2 || ctrl2&v4WritingMask != 0 {
+		if ctrl != ctrl2 {
 			goto retry
 		}
 		for j := range cacheCount {
@@ -480,7 +482,7 @@ func (m *V4Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			}
 			return previous, loaded
 		case v4Full:
-			table = m.tryResize(table, int(m.size.Value(v4CntUsed)), v4ResizeProbeLimit)
+			return *new(V), false
 		case v4Frozen:
 			table = m.helpResize(table)
 		case v4Retry:
@@ -1188,11 +1190,6 @@ func (table *v4Table[K, V]) copyInsertConcurrent(e v4Entry[K, V], hash uintptr) 
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
 		ctrl, status := v4BeginWrite(b)
-		if status == v4Retry {
-			probe--
-			runtime.Gosched()
-			continue
-		}
 		if status != v4OK {
 			probe--
 			runtime.Gosched()

@@ -48,9 +48,9 @@ const (
 	// Keep ctrl for version/frozen/writing only. If miss-heavy workloads need a
 	// probe-continuation hint, prefer a side structure so displaced inserts do not
 	// have to update shared bucket metadata.
-	v6VersionMask = /* unused but kept for ref */ uint64(0x3fff) << 50
 	v6FrozenMask  = uint64(1) << 49
 	v6WritingMask = uint64(1) << 48
+	v6VersionMask = /* unused but kept for ref */ uint64(0x3fff) << 50
 	v6VersionInc  = uint64(1) << 50
 )
 
@@ -186,9 +186,11 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
+		// spins := 0
 	retryBucket:
 		ctrl := b.state.Load()
 		if ctrl&v6WritingMask != 0 {
+			// delay(&spins)
 			goto retryBucket
 		}
 		match := v6MatchBits(ctrl, tag)
@@ -196,7 +198,7 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 			lane := v6FirstMarkedLane(match)
 			e := table.entry(bi, lane).ReadUnfenced()
 			ctrl2 := b.state.Load()
-			if ctrl != ctrl2 || ctrl2&v6WritingMask != 0 {
+			if ctrl != ctrl2 {
 				goto retryBucket
 			}
 			if e.key == key {
@@ -260,7 +262,7 @@ func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		case v6Retry:
 			runtime.Gosched()
 		case v6Full:
-			table = m.tryResize(table, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
+			return false
 		}
 	}
 }
@@ -291,7 +293,7 @@ func (m *V6Map[K, V]) CompareAndDelete(key K, old V) bool {
 		case v6Retry:
 			runtime.Gosched()
 		case v6Full:
-			table = m.tryResize(table, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
+			return false
 		}
 	}
 }
@@ -345,7 +347,7 @@ func (m *V6Map[K, V]) Range(yield func(K, V) bool) {
 			full &= full - 1
 		}
 		ctrl2 := b.state.Load()
-		if ctrl != ctrl2 || ctrl2&v6WritingMask != 0 {
+		if ctrl != ctrl2 {
 			goto retry
 		}
 		for j := range cacheCount {
@@ -482,7 +484,7 @@ func (m *V6Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			}
 			return previous, loaded
 		case v6Full:
-			table = m.tryResize(table, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
+			return *new(V), false
 		case v6Frozen:
 			table = m.helpResize(table)
 		case v6Retry:
@@ -1184,11 +1186,6 @@ func (table *v6Table[K, V]) copyInsertConcurrent(e v6Entry[K, V], hash uintptr) 
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
 		ctrl, status := v6BeginWrite(b)
-		if status == v6Retry {
-			probe--
-			runtime.Gosched()
-			continue
-		}
 		if status != v6OK {
 			probe--
 			runtime.Gosched()

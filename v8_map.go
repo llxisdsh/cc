@@ -184,9 +184,11 @@ func (m *V8Map[K, V]) Load(key K) (value V, ok bool) {
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
+		// spins := 0
 	retryBucket:
 		ctrl := b.ctrl.Load()
 		if ctrl&v8WritingMask != 0 {
+			// delay(&spins)
 			goto retryBucket
 		}
 		words := v8LoadTagWords(b)
@@ -195,7 +197,7 @@ func (m *V8Map[K, V]) Load(key K) (value V, ok bool) {
 			lane := v8FirstMarkedLane(match)
 			e := table.entry(bi, lane).ReadUnfenced()
 			ctrl2 := b.ctrl.Load()
-			if ctrl != ctrl2 || ctrl2&v8WritingMask != 0 {
+			if ctrl != ctrl2 {
 				goto retryBucket
 			}
 			if e.key == key {
@@ -259,7 +261,7 @@ func (m *V8Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		case v8Retry:
 			runtime.Gosched()
 		case v8Full:
-			table = m.tryResize(table, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
+			return false
 		}
 	}
 }
@@ -290,7 +292,7 @@ func (m *V8Map[K, V]) CompareAndDelete(key K, old V) bool {
 		case v8Retry:
 			runtime.Gosched()
 		case v8Full:
-			table = m.tryResize(table, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
+			return false
 		}
 	}
 }
@@ -345,7 +347,7 @@ func (m *V8Map[K, V]) Range(yield func(K, V) bool) {
 			full &= full - 1
 		}
 		ctrl2 := b.ctrl.Load()
-		if ctrl != ctrl2 || ctrl2&v8WritingMask != 0 {
+		if ctrl != ctrl2 {
 			goto retry
 		}
 		for j := range cacheCount {
@@ -482,7 +484,7 @@ func (m *V8Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			}
 			return previous, loaded
 		case v8Full:
-			table = m.tryResize(table, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
+			return *new(V), false
 		case v8Frozen:
 			table = m.helpResize(table)
 		case v8Retry:
@@ -1201,11 +1203,6 @@ func (table *v8Table[K, V]) copyInsertConcurrent(e v8Entry[K, V], hash uintptr) 
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
 		ctrl, status := v8BeginWrite(b)
-		if status == v8Retry {
-			probe--
-			runtime.Gosched()
-			continue
-		}
 		if status != v8OK {
 			probe--
 			runtime.Gosched()

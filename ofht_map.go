@@ -335,8 +335,7 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		case ofhtStoreFrozen:
 			table = m.helpResize(table)
 		case ofhtStoreFull:
-			occupied := int(m.size.Value(ofhtCntOccupied))
-			table = m.tryResize(table, occupied, ofhtResizeProbeLimit)
+			return *new(V), false
 		}
 	}
 }
@@ -358,10 +357,14 @@ func (m *OFHTMap[K, V]) Delete(key K) {
 	}
 	for {
 		status, _, _ := m.deleteFrom(table, noEscape(&key), h, false)
-		if status == ofhtStoreOK {
+		switch status {
+		case ofhtStoreOK:
+			return
+		case ofhtStoreFrozen:
+			table = m.helpResize(table)
+		case ofhtStoreFull:
 			return
 		}
-		table = m.helpResize(table)
 	}
 }
 
@@ -382,10 +385,14 @@ func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	}
 	for {
 		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h, true)
-		if status == ofhtStoreOK {
+		switch status {
+		case ofhtStoreOK:
 			return prev, loaded
+		case ofhtStoreFrozen:
+			table = m.helpResize(table)
+		case ofhtStoreFull:
+			return *new(V), false
 		}
-		table = m.helpResize(table)
 	}
 }
 
@@ -412,10 +419,14 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			noEscape(&new),
 			h,
 		)
-		if status == ofhtStoreOK {
+		switch status {
+		case ofhtStoreOK:
 			return swapped
+		case ofhtStoreFrozen:
+			table = m.helpResize(table)
+		case ofhtStoreFull:
+			return false
 		}
-		table = m.helpResize(table)
 	}
 }
 
@@ -442,10 +453,14 @@ func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 			noEscape(&old),
 			h,
 		)
-		if status == ofhtStoreOK {
+		switch status {
+		case ofhtStoreOK:
 			return deleted
+		case ofhtStoreFrozen:
+			table = m.helpResize(table)
+		case ofhtStoreFull:
+			return false
 		}
-		table = m.helpResize(table)
 	}
 }
 
