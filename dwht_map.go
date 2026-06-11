@@ -1020,15 +1020,15 @@ func (m *DWHTMap[K, V]) helpResizeInto(old, next *dwhtTable[K, V]) *dwhtTable[K,
 			}
 		}
 		if old.copyDone.Add(1) == chunks {
-			occupied := m.size.Reset(dwhtCntOccupied)
-			tombstones := m.size.Reset(dwhtCntTombstones)
-			m.size.Add(dwhtCntOccupied, occupied-tombstones)
 			// Adaptive probe limit: tighten based on the max probe distance
 			// actually observed during migration. This allows the window to
 			// shrink when clustering dissipates after table growth or
 			// tombstone compaction, avoiding a permanently inflated miss path.
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(nextLen, nextPowOf2(max(observed<<1, calcProbeLimit(nextLen))))
+			next.probeLimit = min(nextLen, max(observed<<1, calcProbeLimit(nextLen)))
+			occupied := m.size.Reset(dwhtCntOccupied)
+			tombstones := m.size.Reset(dwhtCntTombstones)
+			m.size.Add(dwhtCntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 			return next
 		}

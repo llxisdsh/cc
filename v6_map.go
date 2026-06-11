@@ -54,8 +54,11 @@ const (
 )
 
 const (
-	v6CntUsed = iota
-	v6CntDeleted
+	// occupied tracks physical lanes that are no longer Empty: Full + Tombstone.
+	// tombstones tracks lanes currently in Deleted/Tombstone state, not total
+	// delete operations.
+	v6CntOccupied = iota
+	v6CntTombstones
 )
 
 type v6Status uint8
@@ -304,12 +307,12 @@ func (m *V6Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v6CntUsed)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(m.size.Get(v6CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v6Full:
-			table = m.tryResize(table, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
+			table = m.tryResize(table, int(m.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
 		case v6Frozen:
 			table = m.helpResize(table)
 		}
@@ -360,8 +363,8 @@ type v6MapStats struct {
 	Buckets        uintptr
 	Capacity       uintptr
 	Live           uintptr
-	Used           uintptr
-	Deleted        uintptr
+	Occupied       uintptr
+	Tombstones     uintptr
 	FullBuckets    uintptr
 	FullLanes      uintptr
 	EmptyLanes     uintptr
@@ -373,12 +376,12 @@ type v6MapStats struct {
 
 func (m *V6Map[K, V]) stats() v6MapStats {
 	table := m.table.Load()
-	used := m.size.Value(v6CntUsed)
-	deleted := m.size.Value(v6CntDeleted)
+	occupied := m.size.Value(v6CntOccupied)
+	tombstones := m.size.Value(v6CntTombstones)
 	stats := v6MapStats{
-		Live:    used - deleted,
-		Used:    used,
-		Deleted: deleted,
+		Live:       occupied - tombstones,
+		Occupied:   occupied,
+		Tombstones: tombstones,
 	}
 	if table == nil {
 		return stats
@@ -390,11 +393,11 @@ func (m *V6Map[K, V]) stats() v6MapStats {
 		ctrl := b.state.Load()
 		full := v6FullBits(ctrl)
 		empty := v6EmptyBits(ctrl)
-		deleted := v6DeletedBits(ctrl)
+		tombstones := v6DeletedBits(ctrl)
 		fullCount := uintptr(bits.OnesCount64(full))
 		stats.FullLanes += fullCount
 		stats.EmptyLanes += uintptr(bits.OnesCount64(empty))
-		stats.TombstoneLanes += uintptr(bits.OnesCount64(deleted))
+		stats.TombstoneLanes += uintptr(bits.OnesCount64(tombstones))
 		if fullCount == v6SlotsPerBucket {
 			stats.FullBuckets++
 		}
@@ -417,9 +420,9 @@ func (m *V6Map[K, V]) stats() v6MapStats {
 }
 
 func (m *V6Map[K, V]) Size() int {
-	used := int(m.size.Value(v6CntUsed))
-	deleted := int(m.size.Value(v6CntDeleted))
-	return max(used-deleted, 0)
+	occupied := int(m.size.Value(v6CntOccupied))
+	tombstones := int(m.size.Value(v6CntTombstones))
+	return max(occupied-tombstones, 0)
 }
 
 func (m *V6Map[K, V]) Clear() {
@@ -441,12 +444,12 @@ func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v6CntUsed)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(m.size.Get(v6CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v6Full:
-			table = m.tryResize(table, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
+			table = m.tryResize(table, int(m.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
 		case v6Frozen:
 			table = m.helpResize(table)
 		}
@@ -470,7 +473,7 @@ func (m *V6Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v6CntUsed)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(m.size.Get(v6CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return previous, loaded
@@ -531,9 +534,9 @@ func (m *V6Map[K, V]) storeIn(
 			match &= match - 1
 		}
 		if v6EnableSameKeyTombstoneReuse {
-			deleted := v6DeletedBits(ctrl)
-			for deleted != 0 {
-				lane := v6FirstMarkedLane(deleted)
+			tombstones := v6DeletedBits(ctrl)
+			for tombstones != 0 {
+				lane := v6FirstMarkedLane(tombstones)
 				slot := table.entry(bi, lane)
 				e := slot.ReadUnfenced()
 				if ctrl != b.state.Load() {
@@ -550,10 +553,10 @@ func (m *V6Map[K, V]) storeIn(
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
 					ctrl = v6SetTag(ctrl, lane, tag)
 					v6EndWriteModified(b, ctrl)
-					m.size.Add(v6CntDeleted, ^uintptr(0))
+					m.size.Add(v6CntTombstones, ^uintptr(0))
 					return v6OK, *val, false, false
 				}
-				deleted &= deleted - 1
+				tombstones &= tombstones - 1
 			}
 		}
 		if empty := v6EmptyBits(ctrl); empty != 0 {
@@ -571,7 +574,7 @@ func (m *V6Map[K, V]) storeIn(
 			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: *val})
 			ctrl = v6SetTag(ctrl, lane, tag)
 			v6EndWriteModified(b, ctrl)
-			m.size.Add(v6CntUsed, 1)
+			m.size.Add(v6CntOccupied, 1)
 			return v6OK, *val, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.state.Load() {
@@ -714,7 +717,7 @@ func (m *V6Map[K, V]) deleteIn(
 				}
 				ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
 				v6EndWriteModified(b, ctrl)
-				m.size.Add(v6CntDeleted, 1)
+				m.size.Add(v6CntTombstones, 1)
 				return v6OK, prev, true
 			}
 			match &= match - 1
@@ -836,7 +839,7 @@ func (m *V6Map[K, V]) compareAndDeleteIn(
 				}
 				ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
 				v6EndWriteModified(b, ctrl)
-				m.size.Add(v6CntDeleted, 1)
+				m.size.Add(v6CntTombstones, 1)
 				return v6OK, true
 			}
 			match &= match - 1
@@ -906,7 +909,7 @@ func (m *V6Map[K, V]) computeIn(
 					}
 					ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
 					v6EndWriteModified(b, ctrl)
-					m.size.Add(v6CntDeleted, 1)
+					m.size.Add(v6CntTombstones, 1)
 					return v6OK, it.entry.value, true, false
 				default:
 					v6EndWriteUnchanged(b, ctrl)
@@ -916,9 +919,9 @@ func (m *V6Map[K, V]) computeIn(
 			match &= match - 1
 		}
 		if v6EnableSameKeyTombstoneReuse {
-			deleted := v6DeletedBits(ctrl)
-			for deleted != 0 {
-				lane := v6FirstMarkedLane(deleted)
+			tombstones := v6DeletedBits(ctrl)
+			for tombstones != 0 {
+				lane := v6FirstMarkedLane(tombstones)
 				slot := table.entry(bi, lane)
 				e := slot.ReadUnfenced()
 				if ctrl != b.state.Load() {
@@ -943,10 +946,10 @@ func (m *V6Map[K, V]) computeIn(
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.value})
 					ctrl = v6SetTag(ctrl, lane, tag)
 					v6EndWriteModified(b, ctrl)
-					m.size.Add(v6CntDeleted, ^uintptr(0))
+					m.size.Add(v6CntTombstones, ^uintptr(0))
 					return v6OK, it.entry.value, false, false
 				}
-				deleted &= deleted - 1
+				tombstones &= tombstones - 1
 			}
 		}
 		if empty := v6EmptyBits(ctrl); empty != 0 {
@@ -972,7 +975,7 @@ func (m *V6Map[K, V]) computeIn(
 			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: it.entry.value})
 			ctrl = v6SetTag(ctrl, lane, tag)
 			v6EndWriteModified(b, ctrl)
-			m.size.Add(v6CntUsed, 1)
+			m.size.Add(v6CntOccupied, 1)
 			return v6OK, it.entry.value, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.state.Load() {
@@ -983,9 +986,9 @@ func (m *V6Map[K, V]) computeIn(
 }
 
 func (m *V6Map[K, V]) resizeIfNeeded(table *v6Table[K, V]) {
-	used := int(m.size.Value(v6CntUsed))
-	if used >= table.growCap {
-		m.tryResize(table, used, v6ResizeNormal)
+	occupied := int(m.size.Value(v6CntOccupied))
+	if occupied >= table.growCap {
+		m.tryResize(table, occupied, v6ResizeNormal)
 		return
 	}
 
@@ -997,30 +1000,35 @@ func (m *V6Map[K, V]) resizeIfNeeded(table *v6Table[K, V]) {
 	// reduce miss-path tombstone drag, but it may trigger full-table copy long
 	// before physical occupancy reaches growCap.
 	//
-	// deleted := int(m.size.Value(v6CntDeleted))
-	// live := used - deleted
-	// if deleted > v6SlotsPerBucket && deleted > live/4 {
-	// 	m.tryResize(table, used, v6ResizeCompact)
+	// tombstones := int(m.size.Value(v6CntTombstones))
+	// live := occupied - tombstones
+	// if tombstones > v6SlotsPerBucket && tombstones > live/4 {
+	// 	m.tryResize(table, occupied, v6ResizeCompact)
 	// }
 }
 
-func (m *V6Map[K, V]) tryResize(old *v6Table[K, V], used int, hint v6ResizeHint) *v6Table[K, V] {
+func (m *V6Map[K, V]) tryResize(old *v6Table[K, V], occupied int, hint v6ResizeHint) *v6Table[K, V] {
 	if table := m.table.Load(); table != old {
 		return table
 	}
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			deleted := int(m.size.Value(v6CntDeleted))
-			live := used - deleted
+			// Base sizing follows the live entry count. At the normal grow
+			// threshold this rounds to 2x; tombstone-heavy resize can stay at
+			// the same size and compact tombstone slots away.
+			tombstones := int(m.size.Value(v6CntTombstones))
+			live := occupied - tombstones
 			nextLen := v6CalcBucketLen(live)
 			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == v6ResizeProbeLimit
 			if v6EnableAggressiveGrow {
-				curUsed := int(m.size.Value(v6CntUsed))
-				usedInResize := curUsed - used
-				aggressive = aggressive || usedInResize >= 2
+				curOccupied := int(m.size.Value(v6CntOccupied))
+				occupiedInResize := curOccupied - occupied
+				aggressive = aggressive || occupiedInResize >= 2
 			}
+			// Probe-limit resize or observed concurrent insert pressure gets
+			// one extra size class, capped at 4x the old table.
 			if aggressive {
 				nextLen = min(nextLen<<1, old.bucketLen()<<2)
 			}
@@ -1042,12 +1050,16 @@ func (m *V6Map[K, V]) tryResize(old *v6Table[K, V], used int, hint v6ResizeHint)
 func (m *V6Map[K, V]) helpResize(old *v6Table[K, V]) *v6Table[K, V] {
 	next := old.nextTable.Load()
 	if next == nil {
-		return m.tryResize(old, int(m.size.Value(v6CntUsed)), v6ResizeProbeLimit)
+		return m.tryResize(old, int(m.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
 	}
 	return m.helpResizeInto(old, next)
 }
 
 func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
+	// Cooperative resize.
+	// Each slot is frozen before it is copied. This removes the old global
+	// freeze barrier while preserving the key rule: a copied slot can no longer
+	// be modified in the old table.
 	for {
 		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= old.chunks {
@@ -1086,11 +1098,16 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 			}
 		}
 		if old.copyDone.Add(1) == old.chunks {
+			// Adaptive probe limit: tighten based on the max probe distance
+			// actually observed during migration. This allows the window to
+			// shrink when clustering dissipates after table growth or
+			// tombstone compaction, avoiding a permanently inflated miss path.
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, calcProbeLimit(next.bucketLen()))))
-			used := m.size.Reset(v6CntUsed)
-			deleted := m.size.Reset(v6CntDeleted)
-			m.size.Add(v6CntUsed, used-deleted)
+			nextLen := next.bucketLen()
+			next.probeLimit = min(nextLen, max(observed<<1, calcProbeLimit(nextLen)))
+			occupied := m.size.Reset(v6CntOccupied)
+			tombstones := m.size.Reset(v6CntTombstones)
+			m.size.Add(v6CntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 		}
 	}

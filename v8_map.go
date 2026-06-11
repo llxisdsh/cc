@@ -54,8 +54,11 @@ const (
 )
 
 const (
-	v8CntUsed = iota
-	v8CntDeleted
+	// occupied tracks physical lanes that are no longer Empty: Full + Tombstone.
+	// tombstones tracks lanes currently in Deleted/Tombstone state, not total
+	// delete operations.
+	v8CntOccupied = iota
+	v8CntTombstones
 )
 
 type v8Status uint8
@@ -303,12 +306,12 @@ func (m *V8Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
 		switch status {
 		case v8OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v8CntUsed)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(m.size.Get(v8CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v8Full:
-			table = m.tryResize(table, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
+			table = m.tryResize(table, int(m.size.Value(v8CntOccupied)), v8ResizeProbeLimit)
 		case v8Frozen:
 			table = m.helpResize(table)
 		}
@@ -360,8 +363,8 @@ type v8MapStats struct {
 	Buckets        uintptr
 	Capacity       uintptr
 	Live           uintptr
-	Used           uintptr
-	Deleted        uintptr
+	Occupied       uintptr
+	Tombstones     uintptr
 	FullBuckets    uintptr
 	FullLanes      uintptr
 	EmptyLanes     uintptr
@@ -373,12 +376,12 @@ type v8MapStats struct {
 
 func (m *V8Map[K, V]) stats() v8MapStats {
 	table := m.table.Load()
-	used := m.size.Value(v8CntUsed)
-	deleted := m.size.Value(v8CntDeleted)
+	occupied := m.size.Value(v8CntOccupied)
+	tombstones := m.size.Value(v8CntTombstones)
 	stats := v8MapStats{
-		Live:    used - deleted,
-		Used:    used,
-		Deleted: deleted,
+		Live:       occupied - tombstones,
+		Occupied:   occupied,
+		Tombstones: tombstones,
 	}
 	if table == nil {
 		return stats
@@ -390,11 +393,11 @@ func (m *V8Map[K, V]) stats() v8MapStats {
 		words := v8LoadTagWords(b)
 		full := v8FullBits(words)
 		empty := v8EmptyBits(words)
-		deleted := v8DeletedBits(words)
+		tombstones := v8DeletedBits(words)
 		fullCount := uintptr(bits.OnesCount64(full))
 		stats.FullLanes += fullCount
 		stats.EmptyLanes += uintptr(bits.OnesCount64(empty))
-		stats.TombstoneLanes += uintptr(bits.OnesCount64(deleted))
+		stats.TombstoneLanes += uintptr(bits.OnesCount64(tombstones))
 		if fullCount == v8SlotsPerBucket {
 			stats.FullBuckets++
 		}
@@ -417,9 +420,9 @@ func (m *V8Map[K, V]) stats() v8MapStats {
 }
 
 func (m *V8Map[K, V]) Size() int {
-	used := int(m.size.Value(v8CntUsed))
-	deleted := int(m.size.Value(v8CntDeleted))
-	return max(used-deleted, 0)
+	occupied := int(m.size.Value(v8CntOccupied))
+	tombstones := int(m.size.Value(v8CntTombstones))
+	return max(occupied-tombstones, 0)
 }
 
 func (m *V8Map[K, V]) Clear() {
@@ -441,12 +444,12 @@ func (m *V8Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v8OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v8CntUsed)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(m.size.Get(v8CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v8Full:
-			table = m.tryResize(table, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
+			table = m.tryResize(table, int(m.size.Value(v8CntOccupied)), v8ResizeProbeLimit)
 		case v8Frozen:
 			table = m.helpResize(table)
 		}
@@ -470,7 +473,7 @@ func (m *V8Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v8OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v8CntUsed)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(m.size.Get(v8CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return previous, loaded
@@ -532,9 +535,9 @@ func (m *V8Map[K, V]) storeIn(
 			match &= match - 1
 		}
 		if v8EnableSameKeyTombstoneReuse {
-			deleted := v8DeletedBits(words)
-			for deleted != 0 {
-				lane := v8FirstMarkedLane(deleted)
+			tombstones := v8DeletedBits(words)
+			for tombstones != 0 {
+				lane := v8FirstMarkedLane(tombstones)
 				slot := table.entry(bi, lane)
 				e := slot.ReadUnfenced()
 				if ctrl != b.ctrl.Load() {
@@ -551,10 +554,10 @@ func (m *V8Map[K, V]) storeIn(
 					slot.WriteUnfenced(v8Entry[K, V]{key: e.key, val: *val})
 					v8StoreTag(b, lane, tag)
 					v8EndWriteModified(b, ctrl)
-					m.size.Add(v8CntDeleted, ^uintptr(0))
+					m.size.Add(v8CntTombstones, ^uintptr(0))
 					return v8OK, *val, false, false
 				}
-				deleted &= deleted - 1
+				tombstones &= tombstones - 1
 			}
 		}
 		if empty := v8EmptyBits(words); empty != 0 {
@@ -572,7 +575,7 @@ func (m *V8Map[K, V]) storeIn(
 			table.entry(bi, lane).WriteUnfenced(v8Entry[K, V]{key: *key, val: *val})
 			v8StoreTag(b, lane, tag)
 			v8EndWriteModified(b, ctrl)
-			m.size.Add(v8CntUsed, 1)
+			m.size.Add(v8CntOccupied, 1)
 			return v8OK, *val, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
@@ -716,7 +719,7 @@ func (m *V8Map[K, V]) deleteIn(
 				}
 				v8StoreTag(b, lane, v8TagDeleted)
 				v8EndWriteModified(b, ctrl)
-				m.size.Add(v8CntDeleted, 1)
+				m.size.Add(v8CntTombstones, 1)
 				return v8OK, prev, true
 			}
 			match &= match - 1
@@ -840,7 +843,7 @@ func (m *V8Map[K, V]) compareAndDeleteIn(
 				}
 				v8StoreTag(b, lane, v8TagDeleted)
 				v8EndWriteModified(b, ctrl)
-				m.size.Add(v8CntDeleted, 1)
+				m.size.Add(v8CntTombstones, 1)
 				return v8OK, true
 			}
 			match &= match - 1
@@ -911,7 +914,7 @@ func (m *V8Map[K, V]) computeIn(
 					}
 					v8StoreTag(b, lane, v8TagDeleted)
 					v8EndWriteModified(b, ctrl)
-					m.size.Add(v8CntDeleted, 1)
+					m.size.Add(v8CntTombstones, 1)
 					return v8OK, it.entry.value, true, false
 				default:
 					v8EndWriteUnchanged(b, ctrl)
@@ -921,9 +924,9 @@ func (m *V8Map[K, V]) computeIn(
 			match &= match - 1
 		}
 		if v8EnableSameKeyTombstoneReuse {
-			deleted := v8DeletedBits(words)
-			for deleted != 0 {
-				lane := v8FirstMarkedLane(deleted)
+			tombstones := v8DeletedBits(words)
+			for tombstones != 0 {
+				lane := v8FirstMarkedLane(tombstones)
 				slot := table.entry(bi, lane)
 				e := slot.ReadUnfenced()
 				if ctrl != b.ctrl.Load() {
@@ -948,10 +951,10 @@ func (m *V8Map[K, V]) computeIn(
 					slot.WriteUnfenced(v8Entry[K, V]{key: e.key, val: it.entry.value})
 					v8StoreTag(b, lane, tag)
 					v8EndWriteModified(b, ctrl)
-					m.size.Add(v8CntDeleted, ^uintptr(0))
+					m.size.Add(v8CntTombstones, ^uintptr(0))
 					return v8OK, it.entry.value, false, false
 				}
-				deleted &= deleted - 1
+				tombstones &= tombstones - 1
 			}
 		}
 		if empty := v8EmptyBits(words); empty != 0 {
@@ -977,7 +980,7 @@ func (m *V8Map[K, V]) computeIn(
 			table.entry(bi, lane).WriteUnfenced(v8Entry[K, V]{key: *key, val: it.entry.value})
 			v8StoreTag(b, lane, tag)
 			v8EndWriteModified(b, ctrl)
-			m.size.Add(v8CntUsed, 1)
+			m.size.Add(v8CntOccupied, 1)
 			return v8OK, it.entry.value, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
@@ -988,9 +991,9 @@ func (m *V8Map[K, V]) computeIn(
 }
 
 func (m *V8Map[K, V]) resizeIfNeeded(table *v8Table[K, V]) {
-	used := int(m.size.Value(v8CntUsed))
-	if used >= table.growCap {
-		m.tryResize(table, used, v8ResizeNormal)
+	occupied := int(m.size.Value(v8CntOccupied))
+	if occupied >= table.growCap {
+		m.tryResize(table, occupied, v8ResizeNormal)
 		return
 	}
 
@@ -1002,30 +1005,35 @@ func (m *V8Map[K, V]) resizeIfNeeded(table *v8Table[K, V]) {
 	// reduce miss-path tombstone drag, but it may trigger full-table copy long
 	// before physical occupancy reaches growCap.
 	//
-	// deleted := int(m.size.Value(v8CntDeleted))
-	// live := used - deleted
-	// if deleted > v8SlotsPerBucket && deleted > live/4 {
-	// 	m.tryResize(table, used, v8ResizeCompact)
+	// tombstones := int(m.size.Value(v8CntTombstones))
+	// live := occupied - tombstones
+	// if tombstones > v8SlotsPerBucket && tombstones > live/4 {
+	// 	m.tryResize(table, occupied, v8ResizeCompact)
 	// }
 }
 
-func (m *V8Map[K, V]) tryResize(old *v8Table[K, V], used int, hint v8ResizeHint) *v8Table[K, V] {
+func (m *V8Map[K, V]) tryResize(old *v8Table[K, V], occupied int, hint v8ResizeHint) *v8Table[K, V] {
 	if table := m.table.Load(); table != old {
 		return table
 	}
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			deleted := int(m.size.Value(v8CntDeleted))
-			live := used - deleted
+			// Base sizing follows the live entry count. At the normal grow
+			// threshold this rounds to 2x; tombstone-heavy resize can stay at
+			// the same size and compact tombstone slots away.
+			tombstones := int(m.size.Value(v8CntTombstones))
+			live := occupied - tombstones
 			nextLen := v8CalcBucketLen(live)
 			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == v8ResizeProbeLimit
 			if v8EnableAggressiveGrow {
-				curUsed := int(m.size.Value(v8CntUsed))
-				usedInResize := curUsed - used
-				aggressive = aggressive || usedInResize >= 2
+				curOccupied := int(m.size.Value(v8CntOccupied))
+				occupiedInResize := curOccupied - occupied
+				aggressive = aggressive || occupiedInResize >= 2
 			}
+			// Probe-limit resize or observed concurrent insert pressure gets
+			// one extra size class, capped at 4x the old table.
 			if aggressive {
 				nextLen = min(nextLen<<1, old.bucketLen()<<2)
 			}
@@ -1047,12 +1055,16 @@ func (m *V8Map[K, V]) tryResize(old *v8Table[K, V], used int, hint v8ResizeHint)
 func (m *V8Map[K, V]) helpResize(old *v8Table[K, V]) *v8Table[K, V] {
 	next := old.nextTable.Load()
 	if next == nil {
-		return m.tryResize(old, int(m.size.Value(v8CntUsed)), v8ResizeProbeLimit)
+		return m.tryResize(old, int(m.size.Value(v8CntOccupied)), v8ResizeProbeLimit)
 	}
 	return m.helpResizeInto(old, next)
 }
 
 func (m *V8Map[K, V]) helpResizeInto(old, next *v8Table[K, V]) *v8Table[K, V] {
+	// Cooperative resize.
+	// Each slot is frozen before it is copied. This removes the old global
+	// freeze barrier while preserving the key rule: a copied slot can no longer
+	// be modified in the old table.
 	for {
 		chunk := old.copyIdx.Add(1) - 1
 		if chunk >= old.chunks {
@@ -1091,11 +1103,16 @@ func (m *V8Map[K, V]) helpResizeInto(old, next *v8Table[K, V]) *v8Table[K, V] {
 			}
 		}
 		if old.copyDone.Add(1) == old.chunks {
+			// Adaptive probe limit: tighten based on the max probe distance
+			// actually observed during migration. This allows the window to
+			// shrink when clustering dissipates after table growth or
+			// tombstone compaction, avoiding a permanently inflated miss path.
 			observed := next.copyMaxProbe.Load() + 1
-			next.probeLimit = min(next.bucketLen(), nextPowOf2(max(observed<<1, calcProbeLimit(next.bucketLen()))))
-			used := m.size.Reset(v8CntUsed)
-			deleted := m.size.Reset(v8CntDeleted)
-			m.size.Add(v8CntUsed, used-deleted)
+			nextLen := next.bucketLen()
+			next.probeLimit = min(nextLen, max(observed<<1, calcProbeLimit(nextLen)))
+			occupied := m.size.Reset(v8CntOccupied)
+			tombstones := m.size.Reset(v8CntTombstones)
+			m.size.Add(v8CntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 		}
 	}
