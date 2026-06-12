@@ -467,12 +467,9 @@ func (m *V4Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			}
 			continue
 		}
-		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
+		status, previous, loaded := m.updateIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v4OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v4CntOccupied)) >= table.stripeCap {
-				m.resizeIfNeeded(table)
-			}
 			return previous, loaded
 		case v4Full:
 			return *new(V), false
@@ -588,7 +585,7 @@ func (m *V4Map[K, V]) updateIn(
 	val *V,
 	hash uintptr,
 	onlyIfAbsent bool,
-) (v4Status, V, bool, bool) {
+) (v4Status, V, bool) {
 	tag, start := v4HashParts(hash, table.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
@@ -596,7 +593,7 @@ func (m *V4Map[K, V]) updateIn(
 	retryBucket:
 		ctrl := b.ctrl.Load()
 		if ctrl&v4FrozenMask != 0 {
-			return v4Frozen, *new(V), false, false
+			return v4Frozen, *new(V), false
 		}
 		if ctrl&v4WritingMask != 0 {
 			goto retryBucket
@@ -612,22 +609,22 @@ func (m *V4Map[K, V]) updateIn(
 			}
 			if e.key == *key {
 				if onlyIfAbsent {
-					return v4OK, e.val, true, false
+					return v4OK, e.val, true
 				}
 				if v4EnableDedupVal && m.valEqual != nil &&
 					m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
-					return v4OK, e.val, true, false
+					return v4OK, e.val, true
 				}
 				ctrl, status := v4BeginWriteWithCtrl(b, ctrl)
 				if status != v4OK {
 					if status == v4Retry {
 						goto retryBucket
 					}
-					return status, *new(V), false, false
+					return status, *new(V), false
 				}
 				slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
 				v4EndWriteModified(b, ctrl)
-				return v4OK, e.val, true, false
+				return v4OK, e.val, true
 			}
 			match &= match - 1
 		}
@@ -635,13 +632,13 @@ func (m *V4Map[K, V]) updateIn(
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			return v4OK, *new(V), false, false
+			return v4OK, *new(V), false
 		}
 		if ctrl != b.ctrl.Load() {
 			goto retryBucket
 		}
 	}
-	return v4OK, *new(V), false, false
+	return v4OK, *new(V), false
 }
 
 func (m *V4Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
@@ -988,6 +985,11 @@ func (m *V4Map[K, V]) computeIn(
 }
 
 func (m *V4Map[K, V]) resizeIfNeeded(table *v4Table[K, V]) {
+	if v4EnableStoreInGrow {
+		if table.allocating.Load() != 0 {
+			return
+		}
+	}
 	occupied := int(m.size.Value(v4CntOccupied))
 	if occupied >= table.growCap {
 		m.tryResize(table, occupied, v4ResizeNormal)

@@ -871,8 +871,10 @@ func (m *OFHTMap[K, V]) resizeIfNeeded(table *ofhtTable[K, V]) {
 	if localSize < table.stripeCap {
 		return
 	}
-	if table.allocating.Load() != 0 {
-		return
+	if ofhtEnableStoreInGrow {
+		if table.allocating.Load() != 0 {
+			return
+		}
 	}
 	occupied := m.size.Value(ofhtCntOccupied)
 	if int(occupied) >= table.growCap {

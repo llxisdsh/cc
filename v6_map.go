@@ -469,12 +469,9 @@ func (m *V6Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 			}
 			continue
 		}
-		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
+		status, previous, loaded := m.updateIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v6CntOccupied)) >= table.stripeCap {
-				m.resizeIfNeeded(table)
-			}
 			return previous, loaded
 		case v6Full:
 			return *new(V), false
@@ -589,7 +586,7 @@ func (m *V6Map[K, V]) updateIn(
 	val *V,
 	hash uintptr,
 	onlyIfAbsent bool,
-) (v6Status, V, bool, bool) {
+) (v6Status, V, bool) {
 	tag, start := v6HashParts(hash, table.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
@@ -597,7 +594,7 @@ func (m *V6Map[K, V]) updateIn(
 	retryBucket:
 		ctrl := b.state.Load()
 		if ctrl&v6FrozenMask != 0 {
-			return v6Frozen, *new(V), false, false
+			return v6Frozen, *new(V), false
 		}
 		if ctrl&v6WritingMask != 0 {
 			goto retryBucket
@@ -612,22 +609,22 @@ func (m *V6Map[K, V]) updateIn(
 			}
 			if e.key == *key {
 				if onlyIfAbsent {
-					return v6OK, e.val, true, false
+					return v6OK, e.val, true
 				}
 				if v6EnableDedupVal && m.valEqual != nil &&
 					m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
-					return v6OK, e.val, true, false
+					return v6OK, e.val, true
 				}
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
 					if status == v6Retry {
 						goto retryBucket
 					}
-					return status, *new(V), false, false
+					return status, *new(V), false
 				}
 				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
 				v6EndWriteModified(b, ctrl)
-				return v6OK, e.val, true, false
+				return v6OK, e.val, true
 			}
 			match &= match - 1
 		}
@@ -635,13 +632,13 @@ func (m *V6Map[K, V]) updateIn(
 			if ctrl != b.state.Load() {
 				goto retryBucket
 			}
-			return v6OK, *new(V), false, false
+			return v6OK, *new(V), false
 		}
 		if ctrl != b.state.Load() {
 			goto retryBucket
 		}
 	}
-	return v6OK, *new(V), false, false
+	return v6OK, *new(V), false
 }
 
 func (m *V6Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
@@ -985,6 +982,11 @@ func (m *V6Map[K, V]) computeIn(
 }
 
 func (m *V6Map[K, V]) resizeIfNeeded(table *v6Table[K, V]) {
+	if v6EnableStoreInGrow {
+		if table.allocating.Load() != 0 {
+			return
+		}
+	}
 	occupied := int(m.size.Value(v6CntOccupied))
 	if occupied >= table.growCap {
 		m.tryResize(table, occupied, v6ResizeNormal)

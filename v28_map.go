@@ -488,12 +488,9 @@ func (m *V28Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, lo
 			}
 			continue
 		}
-		status, previous, loaded, shouldCheckResize := m.updateIn(table, key, val, hash, onlyIfAbsent)
+		status, previous, loaded := m.updateIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v28OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v28CntOccupied)) >= table.stripeCap {
-				m.resizeIfNeeded(table)
-			}
 			return previous, loaded
 		case v28Full:
 			return *new(V), false
@@ -610,7 +607,7 @@ func (m *V28Map[K, V]) updateIn(
 	val *V,
 	hash uintptr,
 	onlyIfAbsent bool,
-) (v28Status, V, bool, bool) {
+) (v28Status, V, bool) {
 	tag, start := v28HashParts(hash, table.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
@@ -618,7 +615,7 @@ func (m *V28Map[K, V]) updateIn(
 	retryBucket:
 		ctrl := b.ctrl.Load()
 		if ctrl&v28FrozenMask != 0 {
-			return v28Frozen, *new(V), false, false
+			return v28Frozen, *new(V), false
 		}
 		if ctrl&v28WritingMask != 0 {
 			goto retryBucket
@@ -634,21 +631,21 @@ func (m *V28Map[K, V]) updateIn(
 			}
 			if k == *key {
 				if onlyIfAbsent {
-					return v28OK, previous, true, false
+					return v28OK, previous, true
 				}
 				if v28EnableDedupVal && m.valEqual != nil && m.valEqual(noescape(unsafe.Pointer(&previous)), noescape(unsafe.Pointer(val))) {
-					return v28OK, previous, true, false
+					return v28OK, previous, true
 				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
 					if status == v28Retry {
 						goto retryBucket
 					}
-					return status, *new(V), false, false
+					return status, *new(V), false
 				}
 				e.val = *val
 				v28EndWriteModified(b, ctrl)
-				return v28OK, previous, true, false
+				return v28OK, previous, true
 			}
 			match &= match - 1
 		}
@@ -656,13 +653,13 @@ func (m *V28Map[K, V]) updateIn(
 			if ctrl != b.ctrl.Load() {
 				goto retryBucket
 			}
-			return v28OK, *new(V), false, false
+			return v28OK, *new(V), false
 		}
 		if ctrl != b.ctrl.Load() {
 			goto retryBucket
 		}
 	}
-	return v28OK, *new(V), false, false
+	return v28OK, *new(V), false
 }
 
 func (m *V28Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
@@ -1008,6 +1005,11 @@ func (m *V28Map[K, V]) computeIn(
 }
 
 func (m *V28Map[K, V]) resizeIfNeeded(table *v28Table[K, V]) {
+	if v28EnableStoreInGrow {
+		if table.allocating.Load() != 0 {
+			return
+		}
+	}
 	occupied := int(m.size.Value(v28CntOccupied))
 	if occupied >= table.growCap {
 		m.tryResize(table, occupied, v28ResizeNormal)

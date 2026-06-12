@@ -864,8 +864,10 @@ func (m *DWHTMap[K, V]) resizeIfNeeded(table *dwhtTable[K, V]) {
 	if localSize < table.stripeCap {
 		return
 	}
-	if table.allocating.Load() != 0 {
-		return
+	if dwhtEnableStoreInGrow {
+		if table.allocating.Load() != 0 {
+			return
+		}
 	}
 	occupied := int(m.size.Value(dwhtCntOccupied))
 	if occupied >= table.growCap {
