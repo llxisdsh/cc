@@ -37,8 +37,7 @@ const (
 const (
 	v28MinBuckets     = 8
 	v28SlotsPerBucket = 28
-	v28LoadFactorNum  = 15
-	v28LoadFactorDen  = 16
+	v28LoadFactor     = 0.9375
 	v28LaneMask       = uint32(1)<<v28SlotsPerBucket - 1
 )
 
@@ -1190,10 +1189,10 @@ func v28AutoWyHash[K comparable]() HashFunc {
 func newV28Table[K comparable, V any](bucketLen uintptr, intKey bool) *v28Table[K, V] {
 	bucketLen = nextPowOf2(max(bucketLen, uintptr(v28MinBuckets)))
 	slotLen := bucketLen * v28SlotsPerBucket
-	growCap := int(slotLen * v28LoadFactorNum / v28LoadFactorDen)
-	cpus := max(uintptr(runtime.GOMAXPROCS(0)), 1)
-	roundedSizeLen := nextPowOf2(cpus)
-	stripeCap := int(uintptr(growCap) >> bits.TrailingZeros(uint(roundedSizeLen)))
+	growCap := int(float64(slotLen) * v28LoadFactor)
+	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
+	cpus := maxProcs()
+	stripeCap := max(growCap/int(cpus), 1)
 	chunks, chunkSz := v28ResizeChunks(bucketLen, cpus)
 	buckets, bucketBacking := makeV28Buckets(bucketLen)
 	entries := makeUnsafeSlice[v28Entry[K, V]](slotLen)
@@ -1247,7 +1246,8 @@ func v28CalcBucketLen(capacity int) uintptr {
 	if capacity <= 0 {
 		return v28MinBuckets
 	}
-	needSlots := uintptr(capacity+1) * v28LoadFactorDen / v28LoadFactorNum
+	const invLoadFactor = 1 / v28LoadFactor
+	needSlots := uintptr(float64(capacity+1) * invLoadFactor)
 	needBuckets := (needSlots + v28SlotsPerBucket - 1) / v28SlotsPerBucket
 	return nextPowOf2(max(needBuckets, uintptr(v28MinBuckets)))
 }

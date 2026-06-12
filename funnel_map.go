@@ -123,11 +123,12 @@ func newFunnelTable[K cmp.Ordered, V any](tableLen uintptr) *funnelTable[K, V] {
 	const capFactor = float64(fEntriesPerBucket) * loadFactor
 	growCap := int(float64(tableLen) * capFactor)
 	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
-	roundedSizeLen := nextPowOf2(maxProcs())
+	cpus := maxProcs()
+	stripeCap := max(growCap/int(cpus), 1)
 	table := &funnelTable[K, V]{
 		buckets:   makeUnsafeSlice[funnelBucket](tableLen),
 		mask:      tableLen - 1,
-		stripeCap: growCap >> bits.TrailingZeros32(uint32(roundedSizeLen)),
+		stripeCap: stripeCap,
 		growCap:   growCap,
 	}
 	return table

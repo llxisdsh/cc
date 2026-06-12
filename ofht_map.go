@@ -1050,9 +1050,9 @@ func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
 	probeLimit := min(slotLen, calcProbeLimit(slotLen))
 	growCap := int(float64(slotLen) * ofhtLoadFactor)
+	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
 	cpus := maxProcs()
-	roundedSizeLen := nextPowOf2(cpus)
-	stripeCap := int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen)))
+	stripeCap := max(growCap/int(cpus), 1)
 	chunks, chunkSz := ofhtResizeChunks(slotLen, cpus)
 	return &ofhtTable[K, V]{
 		slots:      makeUnsafeSlice[ofhtSlot[K, V]](slotLen),

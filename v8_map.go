@@ -33,8 +33,7 @@ const (
 const (
 	v8MinBuckets     = 32
 	v8SlotsPerBucket = 8
-	v8LoadFactorNum  = 13
-	v8LoadFactorDen  = 16
+	v8LoadFactor     = 0.8125
 	v8LaneMarkerMask = uint64(0x8080808080808080)
 )
 
@@ -1156,10 +1155,10 @@ func (m *V8Map[K, V]) hashKey(key *K) uintptr {
 func newV8Table[K comparable, V any](bucketLen uintptr, intKey bool) *v8Table[K, V] {
 	bucketLen = nextPowOf2(max(bucketLen, uintptr(v8MinBuckets)))
 	slotLen := bucketLen * v8SlotsPerBucket
-	growCap := int(slotLen * v8LoadFactorNum / v8LoadFactorDen)
-	cpus := max(uintptr(runtime.GOMAXPROCS(0)), 1)
-	roundedSizeLen := nextPowOf2(cpus)
-	stripeCap := int(uintptr(growCap) >> bits.TrailingZeros(uint(roundedSizeLen)))
+	growCap := int(float64(slotLen) * v8LoadFactor)
+	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
+	cpus := maxProcs()
+	stripeCap := max(growCap/int(cpus), 1)
 	chunks, chunkSz := v8ResizeChunks(bucketLen, cpus)
 	buckets, bucketBacking := makeV8Buckets(bucketLen)
 	entries := makeUnsafeSlice[SeqLockSlot[v8Entry[K, V]]](slotLen)
@@ -1205,7 +1204,8 @@ func v8CalcBucketLen(capacity int) uintptr {
 	if capacity <= 0 {
 		return v8MinBuckets
 	}
-	needSlots := uintptr(capacity+1) * v8LoadFactorDen / v8LoadFactorNum
+	const invLoadFactor = 1 / v8LoadFactor
+	needSlots := uintptr(float64(capacity+1) * invLoadFactor)
 	needBuckets := (needSlots + v8SlotsPerBucket - 1) / v8SlotsPerBucket
 	return nextPowOf2(max(needBuckets, uintptr(v8MinBuckets)))
 }

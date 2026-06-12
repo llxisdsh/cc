@@ -33,8 +33,7 @@ const (
 const (
 	v4MinBuckets     = 32
 	v4SlotsPerBucket = 4
-	v4LoadFactorNum  = 12
-	v4LoadFactorDen  = 16
+	v4LoadFactor     = 0.75
 	v4LaneMarkerMask = uint32(0x80808080)
 )
 
@@ -1154,10 +1153,10 @@ func (m *V4Map[K, V]) hashKey(key *K) uintptr {
 func newV4Table[K comparable, V any](bucketLen uintptr, intKey bool) *v4Table[K, V] {
 	bucketLen = nextPowOf2(max(bucketLen, uintptr(v4MinBuckets)))
 	slotLen := bucketLen * v4SlotsPerBucket
-	growCap := int(slotLen * v4LoadFactorNum / v4LoadFactorDen)
-	cpus := max(uintptr(runtime.GOMAXPROCS(0)), 1)
-	roundedSizeLen := nextPowOf2(cpus)
-	stripeCap := int(uintptr(growCap) >> bits.TrailingZeros(uint(roundedSizeLen)))
+	growCap := int(float64(slotLen) * v4LoadFactor)
+	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
+	cpus := maxProcs()
+	stripeCap := max(growCap/int(cpus), 1)
 	chunks, chunkSz := v4ResizeChunks(bucketLen, cpus)
 	buckets := makeUnsafeSlice[v4Bucket](bucketLen)
 	entries := makeUnsafeSlice[SeqLockSlot[v4Entry[K, V]]](slotLen)
@@ -1192,7 +1191,8 @@ func v4CalcBucketLen(capacity int) uintptr {
 	if capacity <= 0 {
 		return v4MinBuckets
 	}
-	needSlots := uintptr(capacity+1) * v4LoadFactorDen / v4LoadFactorNum
+	const invLoadFactor = 1 / v4LoadFactor
+	needSlots := uintptr(float64(capacity+1) * invLoadFactor)
 	needBuckets := (needSlots + v4SlotsPerBucket - 1) / v4SlotsPerBucket
 	return nextPowOf2(max(needBuckets, uintptr(v4MinBuckets)))
 }

@@ -1040,9 +1040,9 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 	probeLimit := min(slotLen, calcProbeLimit(slotLen))
 	base, raw := makeDWHTSlots(slotLen)
 	growCap := int(float64(slotLen) * dwhtLoadFactor)
+	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
 	cpus := maxProcs()
-	roundedSizeLen := nextPowOf2(cpus)
-	stripeCap := int(growCap >> bits.TrailingZeros32(uint32(roundedSizeLen)))
+	stripeCap := max(growCap/int(cpus), 1)
 	chunks, chunkSz := dwhtResizeChunks(slotLen, cpus)
 	return &dwhtTable[K, V]{
 		slotsBase:  base,
