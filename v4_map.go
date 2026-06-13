@@ -99,7 +99,6 @@ type V4Map[K comparable, V any] struct {
 	keyHash   HashFunc
 	valEqual  EqualFunc
 	minLen    uintptr
-	size      PLocalCounterN
 }
 
 type v4Table[K comparable, V any] struct {
@@ -109,9 +108,9 @@ type v4Table[K comparable, V any] struct {
 	probeLimit   uintptr
 	stripeCap    int
 	growCap      int
-	intKey       bool
-	chunks       uint32
+	size         FixedLocalCounterN
 	chunkSz      uintptr
+	chunks       uint32
 	allocating   atomic.Uint32
 	copyIdx      atomic.Uint32
 	copyDone     atomic.Uint32
@@ -170,7 +169,7 @@ func (m *V4Map[K, V]) init(cfg *MapConfig) {
 	}
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = v4CalcBucketLen(cfg.capacity)
-	m.table.Store(newV4Table[K, V](m.minLen, m.intKey))
+	m.table.Store(newV4Table[K, V](m.minLen))
 }
 
 func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
@@ -179,7 +178,7 @@ func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 	hash := m.hashKey(noEscape(&key))
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	tag, start := v4HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -303,12 +302,12 @@ func (m *V4Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
 		switch status {
 		case v4OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v4CntOccupied)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(table.size.Get(v4CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v4Full:
-			table = m.tryResize(table, int(m.size.Value(v4CntOccupied)), v4ResizeProbeLimit)
+			table = m.tryResize(table, int(table.size.Value(v4CntOccupied)), v4ResizeProbeLimit)
 		case v4Frozen:
 			table = m.helpResize(table)
 		}
@@ -373,8 +372,11 @@ type v4MapStats struct {
 
 func (m *V4Map[K, V]) stats() v4MapStats {
 	table := m.table.Load()
-	occupied := m.size.Value(v4CntOccupied)
-	tombstones := m.size.Value(v4CntTombstones)
+	var occupied, tombstones uintptr
+	if table != nil {
+		occupied = table.size.Value(v4CntOccupied)
+		tombstones = table.size.Value(v4CntTombstones)
+	}
 	stats := v4MapStats{
 		Live:       occupied - tombstones,
 		Occupied:   occupied,
@@ -403,7 +405,7 @@ func (m *V4Map[K, V]) stats() v4MapStats {
 			lane := v4FirstMarkedLane(fullScan)
 			e := table.entry(i, lane).ReadUnfenced()
 			hash := m.hashKey(noEscape(&e.key))
-			_, start := v4HashParts(hash, table.intKey, table.mask)
+			_, start := v4HashParts(hash, m.intKey, table.mask)
 			probe := (i - start) & table.mask
 			stats.ProbeTotal += probe
 			stats.ProbeSamples++
@@ -417,8 +419,12 @@ func (m *V4Map[K, V]) stats() v4MapStats {
 }
 
 func (m *V4Map[K, V]) Size() int {
-	occupied := int(m.size.Value(v4CntOccupied))
-	tombstones := int(m.size.Value(v4CntTombstones))
+	table := m.table.Load()
+	if table == nil {
+		return 0
+	}
+	occupied := int(table.size.Value(v4CntOccupied))
+	tombstones := int(table.size.Value(v4CntTombstones))
 	return max(occupied-tombstones, 0)
 }
 
@@ -426,8 +432,7 @@ func (m *V4Map[K, V]) Clear() {
 	if m.table.Load() == nil {
 		return
 	}
-	m.size.Clear()
-	m.table.Store(newV4Table[K, V](m.minLen, m.intKey))
+	m.table.Store(newV4Table[K, V](m.minLen))
 }
 
 func (m *V4Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
@@ -441,12 +446,12 @@ func (m *V4Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v4OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v4CntOccupied)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(table.size.Get(v4CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v4Full:
-			table = m.tryResize(table, int(m.size.Value(v4CntOccupied)), v4ResizeProbeLimit)
+			table = m.tryResize(table, int(table.size.Value(v4CntOccupied)), v4ResizeProbeLimit)
 		case v4Frozen:
 			table = m.helpResize(table)
 		}
@@ -486,7 +491,7 @@ func (m *V4Map[K, V]) storeIn(
 	hash uintptr,
 	onlyIfAbsent bool,
 ) (v4Status, V, bool, bool) {
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	tag, start := v4HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -548,7 +553,7 @@ func (m *V4Map[K, V]) storeIn(
 					slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: *val})
 					v4StoreTag(b, lane, tag)
 					v4EndWriteModified(b, ctrl)
-					m.size.Add(v4CntTombstones, ^uintptr(0))
+					table.size.Add(v4CntTombstones, ^uintptr(0))
 					return v4OK, *val, false, false
 				}
 				tombstones &= tombstones - 1
@@ -569,7 +574,7 @@ func (m *V4Map[K, V]) storeIn(
 			table.entry(bi, lane).WriteUnfenced(v4Entry[K, V]{key: *key, val: *val})
 			v4StoreTag(b, lane, tag)
 			v4EndWriteModified(b, ctrl)
-			m.size.Add(v4CntOccupied, 1)
+			table.size.Add(v4CntOccupied, 1)
 			return v4OK, *val, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
@@ -586,7 +591,7 @@ func (m *V4Map[K, V]) updateIn(
 	hash uintptr,
 	onlyIfAbsent bool,
 ) (v4Status, V, bool) {
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	tag, start := v4HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -673,7 +678,7 @@ func (m *V4Map[K, V]) deleteIn(
 	hash uintptr,
 	needValue bool,
 ) (v4Status, V, bool) {
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	tag, start := v4HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -713,7 +718,7 @@ func (m *V4Map[K, V]) deleteIn(
 				}
 				v4StoreTag(b, lane, v4TagDeleted)
 				v4EndWriteModified(b, ctrl)
-				m.size.Add(v4CntTombstones, 1)
+				table.size.Add(v4CntTombstones, 1)
 				return v4OK, prev, true
 			}
 			match &= match - 1
@@ -738,7 +743,7 @@ func (m *V4Map[K, V]) compareAndSwapIn(
 	old *V,
 	new *V,
 ) (v4Status, bool) {
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	tag, start := v4HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -798,7 +803,7 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 	hash uintptr,
 	old *V,
 ) (v4Status, bool) {
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	tag, start := v4HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -837,7 +842,7 @@ func (m *V4Map[K, V]) compareAndDeleteIn(
 				}
 				v4StoreTag(b, lane, v4TagDeleted)
 				v4EndWriteModified(b, ctrl)
-				m.size.Add(v4CntTombstones, 1)
+				table.size.Add(v4CntTombstones, 1)
 				return v4OK, true
 			}
 			match &= match - 1
@@ -861,7 +866,7 @@ func (m *V4Map[K, V]) computeIn(
 	hash uintptr,
 	fn func(e *MapEntry[K, V]),
 ) (v4Status, V, bool, bool) {
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+	tag, start := v4HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -908,7 +913,7 @@ func (m *V4Map[K, V]) computeIn(
 					}
 					v4StoreTag(b, lane, v4TagDeleted)
 					v4EndWriteModified(b, ctrl)
-					m.size.Add(v4CntTombstones, 1)
+					table.size.Add(v4CntTombstones, 1)
 					return v4OK, it.entry.value, true, false
 				default:
 					v4EndWriteUnchanged(b, ctrl)
@@ -945,7 +950,7 @@ func (m *V4Map[K, V]) computeIn(
 					slot.WriteUnfenced(v4Entry[K, V]{key: e.key, val: it.entry.value})
 					v4StoreTag(b, lane, tag)
 					v4EndWriteModified(b, ctrl)
-					m.size.Add(v4CntTombstones, ^uintptr(0))
+					table.size.Add(v4CntTombstones, ^uintptr(0))
 					return v4OK, it.entry.value, false, false
 				}
 				tombstones &= tombstones - 1
@@ -974,7 +979,7 @@ func (m *V4Map[K, V]) computeIn(
 			table.entry(bi, lane).WriteUnfenced(v4Entry[K, V]{key: *key, val: it.entry.value})
 			v4StoreTag(b, lane, tag)
 			v4EndWriteModified(b, ctrl)
-			m.size.Add(v4CntOccupied, 1)
+			table.size.Add(v4CntOccupied, 1)
 			return v4OK, it.entry.value, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
@@ -990,7 +995,7 @@ func (m *V4Map[K, V]) resizeIfNeeded(table *v4Table[K, V]) {
 			return
 		}
 	}
-	occupied := int(m.size.Value(v4CntOccupied))
+	occupied := int(table.size.Value(v4CntOccupied))
 	if occupied >= table.growCap {
 		m.tryResize(table, occupied, v4ResizeNormal)
 		return
@@ -1004,7 +1009,7 @@ func (m *V4Map[K, V]) resizeIfNeeded(table *v4Table[K, V]) {
 	// reduce miss-path tombstone drag, but it may trigger full-table copy long
 	// before physical occupancy reaches growCap.
 	//
-	// tombstones := int(m.size.Value(v4CntTombstones))
+	// tombstones := int(table.size.Value(v4CntTombstones))
 	// live := occupied - tombstones
 	// if tombstones > v4SlotsPerBucket && tombstones > live/4 {
 	// 	m.tryResize(table, occupied, v4ResizeCompact)
@@ -1021,13 +1026,13 @@ func (m *V4Map[K, V]) tryResize(old *v4Table[K, V], occupied int, hint v4ResizeH
 			// Base sizing follows the live entry count. At the normal grow
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
 			// the same size and compact tombstone slots away.
-			tombstones := int(m.size.Value(v4CntTombstones))
+			tombstones := int(old.size.Value(v4CntTombstones))
 			live := occupied - tombstones
 			nextLen := v4CalcBucketLen(live)
 			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == v4ResizeProbeLimit
 			if v4EnableAggressiveGrow {
-				curOccupied := int(m.size.Value(v4CntOccupied))
+				curOccupied := int(old.size.Value(v4CntOccupied))
 				occupiedInResize := curOccupied - occupied
 				aggressive = aggressive || occupiedInResize >= 2
 			}
@@ -1036,7 +1041,7 @@ func (m *V4Map[K, V]) tryResize(old *v4Table[K, V], occupied int, hint v4ResizeH
 			if aggressive {
 				nextLen = min(nextLen<<1, old.bucketLen()<<2)
 			}
-			next = newV4Table[K, V](nextLen, old.intKey)
+			next = newV4Table[K, V](nextLen)
 			old.nextTable.Store(next)
 		} else {
 			if v4EnableStoreInGrow {
@@ -1054,7 +1059,7 @@ func (m *V4Map[K, V]) tryResize(old *v4Table[K, V], occupied int, hint v4ResizeH
 func (m *V4Map[K, V]) helpResize(old *v4Table[K, V]) *v4Table[K, V] {
 	next := old.nextTable.Load()
 	if next == nil {
-		return m.tryResize(old, int(m.size.Value(v4CntOccupied)), v4ResizeProbeLimit)
+		return m.tryResize(old, int(old.size.Value(v4CntOccupied)), v4ResizeProbeLimit)
 	}
 	return m.helpResizeInto(old, next)
 }
@@ -1078,6 +1083,7 @@ func (m *V4Map[K, V]) helpResizeInto(old, next *v4Table[K, V]) *v4Table[K, V] {
 		copyMaxProbe := uintptr(0)
 		start := uintptr(chunk) * old.chunkSz
 		end := min(start+old.chunkSz, old.bucketLen())
+		copied := uintptr(0)
 		for i := start; i < end; i++ {
 			b := old.buckets.At(i)
 			words := v4FreezeAndLoadTags(b)
@@ -1085,12 +1091,16 @@ func (m *V4Map[K, V]) helpResizeInto(old, next *v4Table[K, V]) *v4Table[K, V] {
 			for full != 0 {
 				lane := v4FirstMarkedLane(full)
 				e := old.entry(i, lane).ReadUnfenced()
-				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)))
+				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)), m.intKey)
+				copied++
 				if probe > copyMaxProbe {
 					copyMaxProbe = probe
 				}
 				full &= full - 1
 			}
+		}
+		if copied != 0 {
+			next.size.Add(v4CntOccupied, copied)
 		}
 		for {
 			cur := next.copyMaxProbe.Load()
@@ -1109,9 +1119,6 @@ func (m *V4Map[K, V]) helpResizeInto(old, next *v4Table[K, V]) *v4Table[K, V] {
 			observed := next.copyMaxProbe.Load() + 1
 			nextLen := next.bucketLen()
 			next.probeLimit = min(nextLen, max(observed<<1, calcProbeLimit(nextLen)))
-			occupied := m.size.Reset(v4CntOccupied)
-			tombstones := m.size.Reset(v4CntTombstones)
-			m.size.Add(v4CntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 		}
 	}
@@ -1152,27 +1159,27 @@ func (m *V4Map[K, V]) hashKey(key *K) uintptr {
 	return m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 }
 
-func newV4Table[K comparable, V any](bucketLen uintptr, intKey bool) *v4Table[K, V] {
+func newV4Table[K comparable, V any](bucketLen uintptr) *v4Table[K, V] {
 	bucketLen = nextPowOf2(max(bucketLen, uintptr(v4MinBuckets)))
 	slotLen := bucketLen * v4SlotsPerBucket
 	growCap := int(float64(slotLen) * v4LoadFactor)
-	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
 	cpus := maxProcs()
-	stripeCap := max(growCap/int(cpus), 1)
+	sizeLen := calcSizeLen(bucketLen, cpus)
 	chunks, chunkSz := v4ResizeChunks(bucketLen, cpus)
 	buckets := makeUnsafeSlice[v4Bucket](bucketLen)
 	entries := makeUnsafeSlice[SeqLockSlot[v4Entry[K, V]]](slotLen)
-	return &v4Table[K, V]{
+	table := &v4Table[K, V]{
 		buckets:    buckets,
 		entries:    entries,
 		mask:       bucketLen - 1,
 		probeLimit: min(bucketLen, calcProbeLimit(bucketLen)),
-		stripeCap:  stripeCap,
+		stripeCap:  max(growCap/int(sizeLen), 1),
 		growCap:    growCap,
-		intKey:     intKey,
+		size:       NewFixedLocalCounterN(sizeLen),
 		chunks:     chunks,
 		chunkSz:    chunkSz,
 	}
+	return table
 }
 
 //go:nosplit
@@ -1220,8 +1227,8 @@ func (table *v4Table[K, V]) entry(bucketIdx, lane uintptr) *SeqLockSlot[v4Entry[
 	return table.entries.At(bucketIdx*v4SlotsPerBucket + lane)
 }
 
-func (table *v4Table[K, V]) copyInsertConcurrent(e v4Entry[K, V], hash uintptr) uintptr {
-	tag, start := v4HashParts(hash, table.intKey, table.mask)
+func (table *v4Table[K, V]) copyInsertConcurrent(e v4Entry[K, V], hash uintptr, intKey bool) uintptr {
+	tag, start := v4HashParts(hash, intKey, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)

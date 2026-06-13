@@ -106,7 +106,6 @@ type V28Map[K comparable, V any] struct {
 	keyHash   HashFunc
 	valEqual  EqualFunc
 	minLen    uintptr
-	size      PLocalCounterN
 }
 
 type v28Table[K comparable, V any] struct {
@@ -116,9 +115,9 @@ type v28Table[K comparable, V any] struct {
 	probeLimit    uintptr
 	stripeCap     int
 	growCap       int
-	intKey        bool
-	chunks        uint32
+	size          FixedLocalCounterN
 	chunkSz       uintptr
+	chunks        uint32
 	allocating    atomic.Uint32
 	copyIdx       atomic.Uint32
 	copyDone      atomic.Uint32
@@ -186,7 +185,7 @@ func (m *V28Map[K, V]) init(cfg *MapConfig) {
 	}
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = v28CalcBucketLen(cfg.capacity)
-	m.table.Store(newV28Table[K, V](m.minLen, m.intKey))
+	m.table.Store(newV28Table[K, V](m.minLen))
 }
 
 func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
@@ -195,7 +194,7 @@ func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 	hash := m.hashKey(noEscape(&key))
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -320,12 +319,12 @@ func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loa
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
 		switch status {
 		case v28OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v28CntOccupied)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(table.size.Get(v28CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v28Full:
-			table = m.tryResize(table, int(m.size.Value(v28CntOccupied)), v28ResizeProbeLimit)
+			table = m.tryResize(table, int(table.size.Value(v28CntOccupied)), v28ResizeProbeLimit)
 		case v28Frozen:
 			table = m.helpResize(table)
 		}
@@ -394,8 +393,11 @@ type v28MapStats struct {
 
 func (m *V28Map[K, V]) stats() v28MapStats {
 	table := m.table.Load()
-	occupied := m.size.Value(v28CntOccupied)
-	tombstones := m.size.Value(v28CntTombstones)
+	var occupied, tombstones uintptr
+	if table != nil {
+		occupied = table.size.Value(v28CntOccupied)
+		tombstones = table.size.Value(v28CntTombstones)
+	}
 	stats := v28MapStats{
 		Live:       occupied - tombstones,
 		Occupied:   occupied,
@@ -424,7 +426,7 @@ func (m *V28Map[K, V]) stats() v28MapStats {
 			lane := uintptr(bits.TrailingZeros32(fullScan))
 			e := table.entry(i, lane)
 			hash := m.hashKey(noEscape(&e.key))
-			_, start := v28HashParts(hash, table.intKey, table.mask)
+			_, start := v28HashParts(hash, m.intKey, table.mask)
 			probe := (i - start) & table.mask
 			stats.ProbeTotal += probe
 			stats.ProbeSamples++
@@ -438,8 +440,12 @@ func (m *V28Map[K, V]) stats() v28MapStats {
 }
 
 func (m *V28Map[K, V]) Size() int {
-	occupied := int(m.size.Value(v28CntOccupied))
-	tombstones := int(m.size.Value(v28CntTombstones))
+	table := m.table.Load()
+	if table == nil {
+		return 0
+	}
+	occupied := int(table.size.Value(v28CntOccupied))
+	tombstones := int(table.size.Value(v28CntTombstones))
 	return max(occupied-tombstones, 0)
 }
 
@@ -447,8 +453,7 @@ func (m *V28Map[K, V]) Clear() {
 	if m.table.Load() == nil {
 		return
 	}
-	m.size.Clear()
-	m.table.Store(newV28Table[K, V](m.minLen, m.intKey))
+	m.table.Store(newV28Table[K, V](m.minLen))
 }
 
 func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
@@ -462,12 +467,12 @@ func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loade
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v28OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v28CntOccupied)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(table.size.Get(v28CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v28Full:
-			table = m.tryResize(table, int(m.size.Value(v28CntOccupied)), v28ResizeProbeLimit)
+			table = m.tryResize(table, int(table.size.Value(v28CntOccupied)), v28ResizeProbeLimit)
 		case v28Frozen:
 			table = m.helpResize(table)
 		}
@@ -507,7 +512,7 @@ func (m *V28Map[K, V]) storeIn(
 	hash uintptr,
 	onlyIfAbsent bool,
 ) (v28Status, V, bool, bool) {
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -568,7 +573,7 @@ func (m *V28Map[K, V]) storeIn(
 					e.val = *val
 					v28StoreTag(b, lane, tag)
 					v28EndWriteModified(b, ctrl)
-					m.size.Add(v28CntTombstones, ^uintptr(0))
+					table.size.Add(v28CntTombstones, ^uintptr(0))
 					return v28OK, *val, false, false
 				}
 				tombstones &= tombstones - 1
@@ -591,7 +596,7 @@ func (m *V28Map[K, V]) storeIn(
 			e.val = *val
 			v28StoreTag(b, lane, tag)
 			v28EndWriteModified(b, ctrl)
-			m.size.Add(v28CntOccupied, 1)
+			table.size.Add(v28CntOccupied, 1)
 			return v28OK, *val, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
@@ -608,7 +613,7 @@ func (m *V28Map[K, V]) updateIn(
 	hash uintptr,
 	onlyIfAbsent bool,
 ) (v28Status, V, bool) {
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -694,7 +699,7 @@ func (m *V28Map[K, V]) deleteIn(
 	hash uintptr,
 	needValue bool,
 ) (v28Status, V, bool) {
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -733,7 +738,7 @@ func (m *V28Map[K, V]) deleteIn(
 				e.val = *new(V)
 				v28StoreTag(b, lane, v28TagDeleted)
 				v28EndWriteModified(b, ctrl)
-				m.size.Add(v28CntTombstones, 1)
+				table.size.Add(v28CntTombstones, 1)
 				return v28OK, prev, true
 			}
 			match &= match - 1
@@ -758,7 +763,7 @@ func (m *V28Map[K, V]) compareAndSwapIn(
 	old *V,
 	new *V,
 ) (v28Status, bool) {
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -818,7 +823,7 @@ func (m *V28Map[K, V]) compareAndDeleteIn(
 	hash uintptr,
 	old *V,
 ) (v28Status, bool) {
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -856,7 +861,7 @@ func (m *V28Map[K, V]) compareAndDeleteIn(
 				e.val = *new(V)
 				v28StoreTag(b, lane, v28TagDeleted)
 				v28EndWriteModified(b, ctrl)
-				m.size.Add(v28CntTombstones, 1)
+				table.size.Add(v28CntTombstones, 1)
 				return v28OK, true
 			}
 			match &= match - 1
@@ -880,7 +885,7 @@ func (m *V28Map[K, V]) computeIn(
 	hash uintptr,
 	fn func(e *MapEntry[K, V]),
 ) (v28Status, V, bool, bool) {
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -926,7 +931,7 @@ func (m *V28Map[K, V]) computeIn(
 					e.val = *new(V)
 					v28StoreTag(b, lane, v28TagDeleted)
 					v28EndWriteModified(b, ctrl)
-					m.size.Add(v28CntTombstones, 1)
+					table.size.Add(v28CntTombstones, 1)
 					return v28OK, it.entry.value, true, false
 				default:
 					v28EndWriteUnchanged(b, ctrl)
@@ -963,7 +968,7 @@ func (m *V28Map[K, V]) computeIn(
 					e.val = it.entry.value
 					v28StoreTag(b, lane, tag)
 					v28EndWriteModified(b, ctrl)
-					m.size.Add(v28CntTombstones, ^uintptr(0))
+					table.size.Add(v28CntTombstones, ^uintptr(0))
 					return v28OK, it.entry.value, false, false
 				}
 				tombstones &= tombstones - 1
@@ -994,7 +999,7 @@ func (m *V28Map[K, V]) computeIn(
 			e.val = it.entry.value
 			v28StoreTag(b, lane, tag)
 			v28EndWriteModified(b, ctrl)
-			m.size.Add(v28CntOccupied, 1)
+			table.size.Add(v28CntOccupied, 1)
 			return v28OK, it.entry.value, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
@@ -1010,7 +1015,7 @@ func (m *V28Map[K, V]) resizeIfNeeded(table *v28Table[K, V]) {
 			return
 		}
 	}
-	occupied := int(m.size.Value(v28CntOccupied))
+	occupied := int(table.size.Value(v28CntOccupied))
 	if occupied >= table.growCap {
 		m.tryResize(table, occupied, v28ResizeNormal)
 		return
@@ -1024,7 +1029,7 @@ func (m *V28Map[K, V]) resizeIfNeeded(table *v28Table[K, V]) {
 	// reduce miss-path tombstone drag, but it may trigger full-table copy long
 	// before physical occupancy reaches growCap.
 	//
-	// tombstones := int(m.size.Value(v28CntTombstones))
+	// tombstones := int(table.size.Value(v28CntTombstones))
 	// live := occupied - tombstones
 	// if tombstones > v28SlotsPerBucket && tombstones > live/4 {
 	// 	m.tryResize(table, occupied, v28ResizeCompact)
@@ -1041,13 +1046,13 @@ func (m *V28Map[K, V]) tryResize(old *v28Table[K, V], occupied int, hint v28Resi
 			// Base sizing follows the live entry count. At the normal grow
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
 			// the same size and compact tombstone slots away.
-			tombstones := int(m.size.Value(v28CntTombstones))
+			tombstones := int(old.size.Value(v28CntTombstones))
 			live := occupied - tombstones
 			nextLen := v28CalcBucketLen(live)
 			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == v28ResizeProbeLimit
 			if v28EnableAggressiveGrow {
-				curOccupied := int(m.size.Value(v28CntOccupied))
+				curOccupied := int(old.size.Value(v28CntOccupied))
 				occupiedInResize := curOccupied - occupied
 				aggressive = aggressive || occupiedInResize >= 2
 			}
@@ -1056,7 +1061,7 @@ func (m *V28Map[K, V]) tryResize(old *v28Table[K, V], occupied int, hint v28Resi
 			if aggressive {
 				nextLen = min(nextLen<<1, old.bucketLen()<<2)
 			}
-			next = newV28Table[K, V](nextLen, old.intKey)
+			next = newV28Table[K, V](nextLen)
 			old.nextTable.Store(next)
 		} else {
 			if v28EnableStoreInGrow {
@@ -1074,7 +1079,7 @@ func (m *V28Map[K, V]) tryResize(old *v28Table[K, V], occupied int, hint v28Resi
 func (m *V28Map[K, V]) helpResize(old *v28Table[K, V]) *v28Table[K, V] {
 	next := old.nextTable.Load()
 	if next == nil {
-		return m.tryResize(old, int(m.size.Value(v28CntOccupied)), v28ResizeProbeLimit)
+		return m.tryResize(old, int(old.size.Value(v28CntOccupied)), v28ResizeProbeLimit)
 	}
 	return m.helpResizeInto(old, next)
 }
@@ -1098,6 +1103,7 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 		copyMaxProbe := uintptr(0)
 		start := uintptr(chunk) * old.chunkSz
 		end := min(start+old.chunkSz, old.bucketLen())
+		copied := uintptr(0)
 		for i := start; i < end; i++ {
 			b := old.buckets.At(i)
 			words := v28FreezeAndLoadTags(b)
@@ -1105,12 +1111,16 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 			for full != 0 {
 				lane := uintptr(bits.TrailingZeros32(full))
 				e := old.entry(i, lane)
-				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)))
+				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)), m.intKey)
+				copied++
 				if probe > copyMaxProbe {
 					copyMaxProbe = probe
 				}
 				full &= full - 1
 			}
+		}
+		if copied != 0 {
+			next.size.Add(v28CntOccupied, copied)
 		}
 		for {
 			cur := next.copyMaxProbe.Load()
@@ -1129,9 +1139,6 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 			observed := next.copyMaxProbe.Load() + 1
 			nextLen := next.bucketLen()
 			next.probeLimit = min(nextLen, max(observed<<1, calcProbeLimit(nextLen)))
-			occupied := m.size.Reset(v28CntOccupied)
-			tombstones := m.size.Reset(v28CntTombstones)
-			m.size.Add(v28CntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 		}
 	}
@@ -1188,28 +1195,28 @@ func v28AutoWyHash[K comparable]() HashFunc {
 	return nil
 }
 
-func newV28Table[K comparable, V any](bucketLen uintptr, intKey bool) *v28Table[K, V] {
+func newV28Table[K comparable, V any](bucketLen uintptr) *v28Table[K, V] {
 	bucketLen = nextPowOf2(max(bucketLen, uintptr(v28MinBuckets)))
 	slotLen := bucketLen * v28SlotsPerBucket
 	growCap := int(float64(slotLen) * v28LoadFactor)
-	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
 	cpus := maxProcs()
-	stripeCap := max(growCap/int(cpus), 1)
+	sizeLen := calcSizeLen(bucketLen, cpus)
 	chunks, chunkSz := v28ResizeChunks(bucketLen, cpus)
 	buckets, bucketBacking := makeV28Buckets(bucketLen)
 	entries := makeUnsafeSlice[v28Entry[K, V]](slotLen)
-	return &v28Table[K, V]{
+	table := &v28Table[K, V]{
 		buckets:       buckets,
 		entries:       entries,
 		mask:          bucketLen - 1,
 		probeLimit:    min(bucketLen, calcProbeLimit(bucketLen)),
-		stripeCap:     stripeCap,
+		stripeCap:     max(growCap/int(sizeLen), 1),
 		growCap:       growCap,
-		intKey:        intKey,
+		size:          NewLocalCounterN(sizeLen),
 		chunks:        chunks,
 		chunkSz:       chunkSz,
 		bucketBacking: bucketBacking,
 	}
+	return table
 }
 
 func makeV28Buckets(bucketLen uintptr) (unsafeSlice[v28Bucket], unsafe.Pointer) {
@@ -1275,8 +1282,8 @@ func (table *v28Table[K, V]) entry(bucketIdx, lane uintptr) *v28Entry[K, V] {
 	return table.entries.At(bucketIdx*v28SlotsPerBucket + lane)
 }
 
-func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintptr) uintptr {
-	tag, start := v28HashParts(hash, table.intKey, table.mask)
+func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintptr, intKey bool) uintptr {
+	tag, start := v28HashParts(hash, intKey, table.mask)
 	for probe := uintptr(0); probe <= table.mask; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)

@@ -194,7 +194,7 @@ func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
 		t.Fatal("table is nil")
 	}
 	keyCopy := key
-	_, start := v28HashParts(m.hashKey(&keyCopy), table.intKey, table.mask)
+	_, start := v28HashParts(m.hashKey(&keyCopy), m.intKey, table.mask)
 	b := table.buckets.At(start)
 	ctrl := b.ctrl.Load()
 
@@ -463,7 +463,7 @@ func TestV28MapBucketAndEntryAlignment(t *testing.T) {
 	if size != 32 {
 		t.Fatalf("bucket size = %d, want 32", size)
 	}
-	table := newV28Table[int, int](v28MinBuckets, true)
+	table := newV28Table[int, int](v28MinBuckets)
 	bucketBase := uintptr(unsafe.Pointer(table.buckets.At(0)))
 	align := size
 	if bucketBase&(uintptr(align)-1) != 0 {

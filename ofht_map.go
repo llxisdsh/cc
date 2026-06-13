@@ -84,7 +84,6 @@ type OFHTMap[K comparable, V any] struct {
 	keyHash   HashFunc
 	valEqual  EqualFunc
 	minLen    uintptr
-	size      PLocalCounterN
 }
 
 type ofhtTable[K comparable, V any] struct {
@@ -93,6 +92,7 @@ type ofhtTable[K comparable, V any] struct {
 	probeLimit   uintptr
 	stripeCap    int
 	growCap      int
+	size         FixedLocalCounterN
 	chunkSz      uintptr
 	chunks       uint32
 	allocating   atomic.Uint32 // 0: no one is allocating, 1: allocating
@@ -260,7 +260,7 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 		case ofhtStoreFrozen:
 			table = m.helpResize(table)
 		case ofhtStoreFull:
-			occupied := int(m.size.Value(ofhtCntOccupied))
+			occupied := int(table.size.Value(ofhtCntOccupied))
 			table = m.tryResize(table, occupied, ofhtResizeProbeLimit)
 		}
 	}
@@ -290,7 +290,7 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		case ofhtStoreFrozen:
 			table = m.helpResize(table)
 		case ofhtStoreFull:
-			occupied := int(m.size.Value(ofhtCntOccupied))
+			occupied := int(table.size.Value(ofhtCntOccupied))
 			table = m.tryResize(table, occupied, ofhtResizeProbeLimit)
 		}
 	}
@@ -491,8 +491,8 @@ func (m *OFHTMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	occupied := int(m.size.Value(ofhtCntOccupied))
-	tombstones := int(m.size.Value(ofhtCntTombstones))
+	occupied := int(table.size.Value(ofhtCntOccupied))
+	tombstones := int(table.size.Value(ofhtCntTombstones))
 	return max(occupied-tombstones, 0)
 }
 
@@ -503,7 +503,6 @@ func (m *OFHTMap[K, V]) Clear() {
 		return
 	}
 	m.table.Store(newOFHTTable[K, V](m.minLen))
-	m.size.Clear()
 }
 
 func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {
@@ -610,7 +609,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			}
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
-			m.size.Add(ofhtCntTombstones, ^uintptr(0))
+			table.size.Add(ofhtCntTombstones, ^uintptr(0))
 			return ofhtStoreOK, *val, false
 		} else if state == ofhtStateBusy {
 			// delay(&spins)
@@ -625,7 +624,7 @@ func (m *OFHTMap[K, V]) storeInto(
 			slot.key.WriteUnfenced(*key)
 			slot.val.WriteUnfenced(*val)
 			slot.ctrl.Store(ofhtCtrlInsert(busyCtrl, h))
-			m.size.Add(ofhtCntOccupied, 1)
+			table.size.Add(ofhtCntOccupied, 1)
 			return ofhtStoreOK, *val, false
 		}
 	}
@@ -731,7 +730,7 @@ func (m *OFHTMap[K, V]) deleteFrom(
 			}
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(ofhtCntTombstones, 1)
+			table.size.Add(ofhtCntTombstones, 1)
 			return ofhtStoreOK, prev, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, *new(V), false
@@ -850,7 +849,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 			}
 			slot.val.WriteUnfenced(*new(V))
 			slot.ctrl.Store(ofhtCtrlDelete(busyCtrl))
-			m.size.Add(ofhtCntTombstones, 1)
+			table.size.Add(ofhtCntTombstones, 1)
 			return ofhtStoreOK, true
 		} else if state == ofhtStateEmpty {
 			return ofhtStoreOK, false
@@ -864,7 +863,7 @@ func (m *OFHTMap[K, V]) compareAndDeleteIn(
 }
 
 func (m *OFHTMap[K, V]) resizeIfNeeded(table *ofhtTable[K, V]) {
-	localSize := int(m.size.Get(ofhtCntOccupied))
+	localSize := int(table.size.Get(ofhtCntOccupied))
 	if localSize&ofhtGrowCheckMask != 0 {
 		return
 	}
@@ -876,7 +875,7 @@ func (m *OFHTMap[K, V]) resizeIfNeeded(table *ofhtTable[K, V]) {
 			return
 		}
 	}
-	occupied := m.size.Value(ofhtCntOccupied)
+	occupied := table.size.Value(ofhtCntOccupied)
 	if int(occupied) >= table.growCap {
 		m.tryResize(table, int(occupied), ofhtResizeNormal)
 	}
@@ -890,7 +889,7 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int, hint ofhtR
 	next := old.nextTable.Load()
 	if next == nil {
 		if old.allocating.CompareAndSwap(0, 1) {
-			tombstones := int(m.size.Value(ofhtCntTombstones))
+			tombstones := int(old.size.Value(ofhtCntTombstones))
 			live := occupied - tombstones
 			// Base sizing follows the live entry count. At the normal grow
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
@@ -899,7 +898,7 @@ func (m *OFHTMap[K, V]) tryResize(old *ofhtTable[K, V], occupied int, hint ofhtR
 			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == ofhtResizeProbeLimit
 			if ofhtEnableAggressiveGrow {
-				curOccupied := int(m.size.Value(ofhtCntOccupied))
+				curOccupied := int(old.size.Value(ofhtCntOccupied))
 				occupiedInResize := curOccupied - occupied
 				aggressive = aggressive || occupiedInResize >= 2
 			}
@@ -974,6 +973,7 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 		var copyMaxProbe uintptr
 		start := uintptr(chunk) * chunkSz
 		end := min(start+chunkSz, slotLen)
+		copied := uintptr(0)
 		for i := start; i < end; i++ {
 			slot := old.slots.At(i)
 			var ctrl uint64
@@ -1021,7 +1021,11 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 				if probe > copyMaxProbe {
 					copyMaxProbe = probe
 				}
+				copied++
 			}
+		}
+		if copied != 0 {
+			next.size.Add(ofhtCntOccupied, copied)
 		}
 		for {
 			cur := next.copyMaxProbe.Load()
@@ -1039,9 +1043,6 @@ func (m *OFHTMap[K, V]) helpResizeInto(old, next *ofhtTable[K, V]) *ofhtTable[K,
 			// tombstone compaction, avoiding a permanently inflated miss path.
 			observed := next.copyMaxProbe.Load() + 1
 			next.probeLimit = min(nextLen, max(observed<<1, calcProbeLimit(nextLen)))
-			occupied := m.size.Reset(ofhtCntOccupied)
-			tombstones := m.size.Reset(ofhtCntTombstones)
-			m.size.Add(ofhtCntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 			return next
 		}
@@ -1052,19 +1053,20 @@ func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	slotLen = nextPowOf2(max(slotLen, ofhtMinSlots))
 	probeLimit := min(slotLen, calcProbeLimit(slotLen))
 	growCap := int(float64(slotLen) * ofhtLoadFactor)
-	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
 	cpus := maxProcs()
-	stripeCap := max(growCap/int(cpus), 1)
+	sizeLen := calcSizeLen(slotLen, cpus)
 	chunks, chunkSz := ofhtResizeChunks(slotLen, cpus)
-	return &ofhtTable[K, V]{
+	table := &ofhtTable[K, V]{
 		slots:      makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
 		mask:       slotLen - 1,
 		probeLimit: probeLimit,
-		stripeCap:  stripeCap,
+		stripeCap:  max(growCap/int(sizeLen), 1),
 		growCap:    growCap,
+		size:       NewFixedLocalCounterN(sizeLen),
 		chunks:     chunks,
 		chunkSz:    chunkSz,
 	}
+	return table
 }
 
 //go:nosplit

@@ -174,7 +174,7 @@ func TestV4MapNoOpWritesDoNotPublish(t *testing.T) {
 		t.Fatal("table is nil")
 	}
 	keyCopy := key
-	_, start := v4HashParts(m.hashKey(&keyCopy), table.intKey, table.mask)
+	_, start := v4HashParts(m.hashKey(&keyCopy), m.intKey, table.mask)
 	b := table.buckets.At(start)
 	ctrl := b.ctrl.Load()
 
@@ -326,7 +326,7 @@ func TestV4MapStoreReusesHashAfterResizeHelp(t *testing.T) {
 	if old == nil {
 		t.Fatal("table is nil")
 	}
-	old.nextTable.Store(newV4Table[int, int](old.bucketLen()<<1, old.intKey))
+	old.nextTable.Store(newV4Table[int, int](old.bucketLen() << 1))
 
 	m.Store(7, 70)
 	if got := hashCalls.Load(); got != 1 {
@@ -469,7 +469,7 @@ func TestV4MapBucketAndEntryLayout(t *testing.T) {
 	if size != 8 {
 		t.Fatalf("bucket size = %d, want 8", size)
 	}
-	table := newV4Table[int, int](v4MinBuckets, true)
+	table := newV4Table[int, int](v4MinBuckets)
 	bucketBase := uintptr(unsafe.Pointer(table.buckets.At(0)))
 	if uintptr(unsafe.Pointer(table.buckets.At(1)))-bucketBase != size {
 		t.Fatal("bucket stride mismatch")

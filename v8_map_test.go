@@ -174,7 +174,7 @@ func TestV8MapNoOpWritesDoNotPublish(t *testing.T) {
 		t.Fatal("table is nil")
 	}
 	keyCopy := key
-	_, start := v8HashParts(m.hashKey(&keyCopy), table.intKey, table.mask)
+	_, start := v8HashParts(m.hashKey(&keyCopy), m.intKey, table.mask)
 	b := table.buckets.At(start)
 	ctrl := b.ctrl.Load()
 
@@ -326,7 +326,7 @@ func TestV8MapStoreReusesHashAfterResizeHelp(t *testing.T) {
 	if old == nil {
 		t.Fatal("table is nil")
 	}
-	old.nextTable.Store(newV8Table[int, int](old.bucketLen()<<1, old.intKey))
+	old.nextTable.Store(newV8Table[int, int](old.bucketLen() << 1))
 
 	m.Store(7, 70)
 	if got := hashCalls.Load(); got != 1 {
@@ -469,7 +469,7 @@ func TestV8MapBucketAndEntryLayout(t *testing.T) {
 	if size != 16 {
 		t.Fatalf("bucket size = %d, want 16", size)
 	}
-	table := newV8Table[int, int](v8MinBuckets, true)
+	table := newV8Table[int, int](v8MinBuckets)
 	bucketBase := uintptr(unsafe.Pointer(table.buckets.At(0)))
 	if uintptr(unsafe.Pointer(table.buckets.At(1)))-bucketBase != size {
 		t.Fatal("bucket stride mismatch")
