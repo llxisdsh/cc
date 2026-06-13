@@ -540,7 +540,7 @@ func (m *Map[K, V]) Compute(
 func (m *Map[K, V]) compute(
 	key *K,
 	val unsafe.Pointer, // *V or func(e *MapEntry[K, V])
-	flags uint8,
+	flags computeFlags,
 ) (actual V, loaded bool) {
 	table := (*mapTable)(loadPtr(&m.table))
 	if table == nil {
@@ -888,7 +888,8 @@ func (m *Map[K, V]) Size() int {
 	return max(table.SumSize(), 0)
 }
 
-// ToMap collect up to limit entries into a map[K]V, limit < 0 is no limit.
+// ToMap collects up to limit entries into a map[K]V.
+// Omitting limit collects everything; limit <= 0 returns an empty map.
 func (m *Map[K, V]) ToMap(limit ...int) map[K]V {
 	l := maxInt
 	if len(limit) != 0 {

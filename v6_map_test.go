@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -174,7 +175,7 @@ func TestV6MapNoOpWritesDoNotPublish(t *testing.T) {
 		t.Fatal("table is nil")
 	}
 	keyCopy := key
-	_, start := v6HashParts(m.hashKey(&keyCopy), table.intKey, table.mask)
+	_, start := v6HashParts(m.hashKey(&keyCopy), m.intKey, table.mask)
 	b := table.buckets.At(start)
 	ctrl := b.state.Load()
 
@@ -326,7 +327,7 @@ func TestV6MapStoreReusesHashAfterResizeHelp(t *testing.T) {
 	if old == nil {
 		t.Fatal("table is nil")
 	}
-	old.nextTable.Store(newV6Table[int, int](old.bucketLen()<<1, old.intKey))
+	old.nextTable.Store(newV6Table[int, int](old.bucketLen() << 1))
 
 	m.Store(7, 70)
 	if got := hashCalls.Load(); got != 1 {
@@ -464,12 +465,593 @@ func TestV6MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
 	}
 }
 
+func TestV6MapLoadOrStoreFn(t *testing.T) {
+	var m V6Map[string, int]
+
+	calls := 0
+	if actual, loaded := m.LoadOrStoreFn("a", func() int { calls++; return 1 }); loaded || actual != 1 {
+		t.Fatalf("LoadOrStoreFn insert = (%d, %v), want (1, false)", actual, loaded)
+	}
+	if calls != 1 {
+		t.Fatalf("valueFn calls on insert = %d, want 1", calls)
+	}
+	if actual, loaded := m.LoadOrStoreFn("a", func() int { calls++; return 2 }); !loaded || actual != 1 {
+		t.Fatalf("LoadOrStoreFn hit = (%d, %v), want (1, true)", actual, loaded)
+	}
+	if calls != 1 {
+		t.Fatalf("valueFn calls on hit = %d, want 1 (not invoked)", calls)
+	}
+}
+
+func TestV6MapLoadOrStoreFnConcurrentUnique(t *testing.T) {
+	const n = 512
+	m := NewV6Map[int, int]()
+	var stores atomic.Int32
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range n {
+				m.LoadOrStoreFn(i, func() int {
+					stores.Add(1)
+					return i + 1
+				})
+			}
+		}()
+	}
+	wg.Wait()
+
+	// valueFn may be invoked more than once under contention, but exactly one
+	// result wins per key and every key must be present.
+	for i := range n {
+		if v, ok := m.Load(i); !ok || v != i+1 {
+			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i+1)
+		}
+	}
+	if got := int(stores.Load()); got < n {
+		t.Fatalf("valueFn invocations = %d, want >= %d", got, n)
+	}
+}
+
+func TestV6MapSwap(t *testing.T) {
+	m := NewV6Map[string, int]()
+
+	if previous, loaded := m.Swap("a", 1); loaded || previous != 0 {
+		t.Fatalf("Swap miss = (%d, %v), want (0, false)", previous, loaded)
+	}
+	if v, ok := m.Load("a"); !ok || v != 1 {
+		t.Fatalf("Load after Swap insert = (%d, %v), want (1, true)", v, ok)
+	}
+	if previous, loaded := m.Swap("a", 2); !loaded || previous != 1 {
+		t.Fatalf("Swap hit = (%d, %v), want (1, true)", previous, loaded)
+	}
+	if v, ok := m.Load("a"); !ok || v != 2 {
+		t.Fatalf("Load after Swap update = (%d, %v), want (2, true)", v, ok)
+	}
+
+	m.Delete("a")
+	if previous, loaded := m.Swap("a", 3); loaded || previous != 0 {
+		t.Fatalf("Swap on tombstone = (%d, %v), want (0, false)", previous, loaded)
+	}
+	if v, ok := m.Load("a"); !ok || v != 3 {
+		t.Fatalf("Load after tombstone Swap = (%d, %v), want (3, true)", v, ok)
+	}
+}
+
+func TestV6MapSwapStoresDespiteCustomEquality(t *testing.T) {
+	// A coarse EqualFunc must not let Swap skip the store (value dedup applies
+	// to Store, not Swap).
+	m := NewV6Map[string, int](WithValueEqual(func(int, int) bool { return true }))
+
+	m.Store("a", 1)
+	if previous, loaded := m.Swap("a", 2); !loaded || previous != 1 {
+		t.Fatalf("Swap = (%d, %v), want (1, true)", previous, loaded)
+	}
+	if v, ok := m.Load("a"); !ok || v != 2 {
+		t.Fatalf("Load after Swap = (%d, %v), want (2, true)", v, ok)
+	}
+}
+
+func TestV6MapToMap(t *testing.T) {
+	m := NewV6Map[int, int]()
+	const n = 100
+	for i := range n {
+		m.Store(i, i*10)
+	}
+
+	full := m.ToMap()
+	if len(full) != n {
+		t.Fatalf("ToMap len = %d, want %d", len(full), n)
+	}
+	for i := range n {
+		if full[i] != i*10 {
+			t.Fatalf("ToMap[%d] = %d, want %d", i, full[i], i*10)
+		}
+	}
+	// Parity with FlatMap/Map: limit <= 0 returns an empty map.
+	if got := m.ToMap(-1); len(got) != 0 {
+		t.Fatalf("ToMap(-1) len = %d, want 0", len(got))
+	}
+	if got := m.ToMap(0); len(got) != 0 {
+		t.Fatalf("ToMap(0) len = %d, want 0", len(got))
+	}
+	if got := m.ToMap(7); len(got) != 7 {
+		t.Fatalf("ToMap(7) len = %d, want 7", len(got))
+	}
+
+	var empty V6Map[int, int]
+	if got := empty.ToMap(); len(got) != 0 {
+		t.Fatalf("zero-value ToMap len = %d, want 0", len(got))
+	}
+}
+
+func TestV6MapComputeRange(t *testing.T) {
+	m := NewV6Map[int, int]()
+	const n = 64
+	for i := range n {
+		m.Store(i, i)
+	}
+
+	// Read-only pass observes every entry exactly once.
+	seen := map[int]int{}
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
+		if !e.Loaded() {
+			t.Fatal("ComputeRange yielded unloaded entry")
+		}
+		seen[e.Key()]++
+		return true
+	})
+	if len(seen) != n {
+		t.Fatalf("ComputeRange visited %d keys, want %d", len(seen), n)
+	}
+	for k, c := range seen {
+		if c != 1 {
+			t.Fatalf("key %d visited %d times, want 1", k, c)
+		}
+	}
+
+	// Update all even keys, delete all odd keys.
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
+		if e.Key()%2 == 0 {
+			e.Update(e.Value() + 1000)
+		} else {
+			e.Delete()
+		}
+		return true
+	})
+	if got := m.Size(); got != n/2 {
+		t.Fatalf("Size after ComputeRange = %d, want %d", got, n/2)
+	}
+	for i := range n {
+		v, ok := m.Load(i)
+		if i%2 == 0 {
+			if !ok || v != i+1000 {
+				t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i+1000)
+			}
+		} else if ok {
+			t.Fatalf("deleted key %d still present with %d", i, v)
+		}
+	}
+
+	// Early stop.
+	visited := 0
+	m.ComputeRange(func(e *MapEntry[int, int]) bool {
+		visited++
+		return false
+	})
+	if visited != 1 {
+		t.Fatalf("early-stop visited %d entries, want 1", visited)
+	}
+
+	var empty V6Map[int, int]
+	empty.ComputeRange(func(e *MapEntry[int, int]) bool {
+		t.Fatal("zero-value ComputeRange yielded an entry")
+		return false
+	})
+}
+
+func TestV6MapEntries(t *testing.T) {
+	m := NewV6Map[int, int]()
+	for i := range 16 {
+		m.Store(i, i)
+	}
+	count := 0
+	for e := range m.Entries() {
+		if !e.Loaded() {
+			t.Fatal("Entries yielded unloaded entry")
+		}
+		if e.Key() == 3 {
+			e.Delete()
+		}
+		count++
+	}
+	if count != 16 {
+		t.Fatalf("Entries visited %d, want 16", count)
+	}
+	if _, ok := m.Load(3); ok {
+		t.Fatal("Entries Delete did not remove key")
+	}
+	if got := m.Size(); got != 15 {
+		t.Fatalf("Size = %d, want 15", got)
+	}
+}
+
+func TestV6MapComputeRangeConcurrentWriters(t *testing.T) {
+	const n = 4096
+	m := NewV6Map[int, int](WithCapacity(n))
+	for i := range n {
+		m.Store(i, 0)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for g := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			i := g
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				m.Store(n+i, i)
+				m.Delete(n + i)
+				i += 4
+				if i > 4*n {
+					i = g
+				}
+			}
+		}()
+	}
+
+	for range 8 {
+		visited := 0
+		m.ComputeRange(func(e *MapEntry[int, int]) bool {
+			if e.Key() < n {
+				e.Update(e.Value() + 1)
+			}
+			visited++
+			return true
+		})
+		if visited < n/2 {
+			t.Fatalf("ComputeRange visited only %d entries", visited)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	// Every completed pass visits each persistent key at least once; resize
+	// restarts may re-visit (weakly consistent), so 8 is a lower bound.
+	for i := range n {
+		v, ok := m.Load(i)
+		if !ok || v < 8 {
+			t.Fatalf("Load(%d) = (%d, %v), want >= 8", i, v, ok)
+		}
+	}
+}
+
+func TestV6MapGrowAvoidsResize(t *testing.T) {
+	const n = 10_000
+	m := NewV6Map[int, int]()
+	m.Grow(n)
+	table := m.table.Load()
+	if table == nil {
+		t.Fatal("table is nil after Grow")
+	}
+	for i := range n {
+		m.Store(i, i)
+	}
+	if got := m.table.Load(); got != table {
+		t.Fatalf("table replaced during inserts after Grow(%d)", n)
+	}
+	if got := m.Size(); got != n {
+		t.Fatalf("Size = %d, want %d", got, n)
+	}
+
+	// Growing within existing capacity is a no-op.
+	before := m.table.Load()
+	m.Grow(1)
+	if got := m.table.Load(); got != before {
+		t.Fatal("Grow within capacity replaced the table")
+	}
+	m.Grow(-5)
+	m.Grow(0)
+}
+
+func TestV6MapShrink(t *testing.T) {
+	const n = 10_000
+	m := NewV6Map[int, int]()
+	for i := range n {
+		m.Store(i, i)
+	}
+	grown := m.table.Load().bucketLen()
+	for i := range n {
+		if i >= 64 {
+			m.Delete(i)
+		}
+	}
+	m.Shrink()
+	table := m.table.Load()
+	if table.bucketLen() >= grown {
+		t.Fatalf("Shrink kept bucketLen %d, want < %d", table.bucketLen(), grown)
+	}
+	if got := m.Size(); got != 64 {
+		t.Fatalf("Size after Shrink = %d, want 64", got)
+	}
+	for i := range 64 {
+		if v, ok := m.Load(i); !ok || v != i {
+			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i)
+		}
+	}
+	if stats := m.stats(); stats.Tombstones != 0 {
+		t.Fatalf("Shrink left %d tombstones, want 0 (compacted)", stats.Tombstones)
+	}
+
+	// Shrink never goes below the configured capacity.
+	c := NewV6Map[int, int](WithCapacity(4096))
+	c.Store(1, 1)
+	before := c.table.Load().bucketLen()
+	c.Shrink()
+	if got := c.table.Load().bucketLen(); got != before {
+		t.Fatalf("Shrink went below WithCapacity: %d -> %d", before, got)
+	}
+
+	var empty V6Map[int, int]
+	empty.Shrink()
+}
+
+func TestV6MapGrowShrinkConcurrentDataIntegrity(t *testing.T) {
+	const n = 4096
+	m := NewV6Map[int, int]()
+	for i := range n {
+		m.Store(i, i)
+	}
+
+	var resizers sync.WaitGroup
+	stop := make(chan struct{})
+	for range 2 {
+		resizers.Add(1)
+		go func() {
+			defer resizers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				m.Grow(n * 4)
+				m.Shrink()
+			}
+		}()
+	}
+	var writers sync.WaitGroup
+	for g := range 4 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for i := range 1000 {
+				k := n + g*1000 + i
+				m.Store(k, k)
+				if v, ok := m.Load(k); !ok || v != k {
+					t.Errorf("Load(%d) = (%d, %v) during resize churn", k, v, ok)
+					return
+				}
+				m.Delete(k)
+			}
+		}()
+	}
+	writers.Wait()
+	close(stop)
+	resizers.Wait()
+
+	if got := m.Size(); got != n {
+		t.Fatalf("Size = %d, want %d", got, n)
+	}
+	for i := range n {
+		if v, ok := m.Load(i); !ok || v != i {
+			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i)
+		}
+	}
+}
+
+func TestV6MapCloneTo(t *testing.T) {
+	src := NewV6Map[string, int](
+		WithKeyHasher(func(key string, seed uintptr) uintptr {
+			return uintptr(len(key)) * 31
+		}),
+	)
+	const n = 500
+	for i := range n {
+		src.Store(strconv.Itoa(i), i)
+	}
+
+	clone := NewV6Map[string, int]()
+	clone.Store("stale", 999)
+	src.CloneTo(clone)
+
+	if _, ok := clone.Load("stale"); ok {
+		t.Fatal("CloneTo did not clear destination")
+	}
+	if got := clone.Size(); got != n {
+		t.Fatalf("clone Size = %d, want %d", got, n)
+	}
+	for i := range n {
+		if v, ok := clone.Load(strconv.Itoa(i)); !ok || v != i {
+			t.Fatalf("clone Load(%d) = (%d, %v), want (%d, true)", i, v, ok, i)
+		}
+	}
+	if clone.seed != src.seed || clone.minLen != src.minLen || clone.intKey != src.intKey {
+		t.Fatal("CloneTo did not copy configuration")
+	}
+
+	// Cloning into a zero-value destination.
+	var fresh V6Map[string, int]
+	src.CloneTo(&fresh)
+	if got := fresh.Size(); got != n {
+		t.Fatalf("zero-value clone Size = %d, want %d", got, n)
+	}
+
+	// Cloning an empty source empties the destination.
+	empty := NewV6Map[string, int]()
+	empty.CloneTo(clone)
+	if got := clone.Size(); got != 0 {
+		t.Fatalf("clone of empty source Size = %d, want 0", got)
+	}
+}
+
+func TestV6MapRebuildOperations(t *testing.T) {
+	m := NewV6Map[int, int]()
+	for i := range 32 {
+		m.Store(i, i)
+	}
+
+	m.Rebuild(func(r *MapRebuild[int, int]) {
+		if v, ok := r.Load(5); !ok || v != 5 {
+			t.Fatalf("rebuild Load(5) = (%d, %v), want (5, true)", v, ok)
+		}
+		r.Store(100, 100)
+		if previous, loaded := r.Swap(100, 101); !loaded || previous != 100 {
+			t.Fatalf("rebuild Swap = (%d, %v), want (100, true)", previous, loaded)
+		}
+		if actual, loaded := r.LoadOrStore(101, 1); loaded || actual != 1 {
+			t.Fatalf("rebuild LoadOrStore = (%d, %v), want (1, false)", actual, loaded)
+		}
+		if previous, loaded := r.LoadAndDelete(0); !loaded || previous != 0 {
+			t.Fatalf("rebuild LoadAndDelete = (%d, %v), want (0, true)", previous, loaded)
+		}
+		r.Delete(1)
+		r.ComputeRange(func(e *MapEntry[int, int]) bool {
+			if e.Key() == 2 {
+				e.Update(2000)
+			}
+			return true
+		})
+		count := 0
+		for range r.Entries() {
+			count++
+		}
+		if got := r.Size(); got != count || got != 32 {
+			t.Fatalf("rebuild Size = %d, Entries count = %d, want 32", got, count)
+		}
+		if got := len(r.ToMap()); got != 32 {
+			t.Fatalf("rebuild ToMap len = %d, want 32", got)
+		}
+	})
+
+	if _, ok := m.Load(0); ok {
+		t.Fatal("rebuild LoadAndDelete did not remove key 0")
+	}
+	if _, ok := m.Load(1); ok {
+		t.Fatal("rebuild Delete did not remove key 1")
+	}
+	if v, ok := m.Load(2); !ok || v != 2000 {
+		t.Fatalf("rebuild ComputeRange update: Load(2) = (%d, %v), want (2000, true)", v, ok)
+	}
+	if v, ok := m.Load(100); !ok || v != 101 {
+		t.Fatalf("rebuild Store/Swap: Load(100) = (%d, %v), want (101, true)", v, ok)
+	}
+}
+
+func TestV6MapRebuildBlocksWritersAllowsReaders(t *testing.T) {
+	m := NewV6Map[int, int]()
+	m.Store(1, 1)
+
+	inRebuild := make(chan struct{})
+	release := make(chan struct{})
+	rebuildDone := make(chan struct{})
+	go func() {
+		m.Rebuild(func(r *MapRebuild[int, int]) {
+			close(inRebuild)
+			<-release
+		})
+		close(rebuildDone)
+	}()
+	<-inRebuild
+
+	writes := make(chan struct{}, 4)
+	writeOps := []func(){
+		func() { m.Store(2, 2) },
+		func() { m.Delete(1) },
+		func() { m.Compute(3, func(e *MapEntry[int, int]) { e.Update(3) }) },
+		func() { m.Swap(4, 4) },
+	}
+	for _, op := range writeOps {
+		go func() {
+			op()
+			writes <- struct{}{}
+		}()
+	}
+	select {
+	case <-writes:
+		t.Fatal("a writer completed during rebuild")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Readers proceed during rebuild.
+	if v, ok := m.Load(1); !ok || v != 1 {
+		t.Fatalf("Load during rebuild = (%d, %v), want (1, true)", v, ok)
+	}
+	if got := m.Size(); got != 1 {
+		t.Fatalf("Size during rebuild = %d, want 1", got)
+	}
+
+	close(release)
+	<-rebuildDone
+	for range writeOps {
+		select {
+		case <-writes:
+		case <-time.After(2 * time.Second):
+			t.Fatal("writer did not complete after rebuild ended")
+		}
+	}
+	if v, ok := m.Load(2); !ok || v != 2 {
+		t.Fatalf("Load(2) after rebuild = (%d, %v), want (2, true)", v, ok)
+	}
+	if _, ok := m.Load(1); ok {
+		t.Fatal("Delete(1) blocked during rebuild was lost afterwards")
+	}
+}
+
+func TestV6MapClearDuringConcurrentWrites(t *testing.T) {
+	m := NewV6Map[int, int]()
+	var wg sync.WaitGroup
+	for g := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 2000 {
+				m.Store(g*2000+i, i)
+			}
+		}()
+	}
+	for range 8 {
+		m.Clear()
+	}
+	wg.Wait()
+	m.Clear()
+	if got := m.Size(); got != 0 {
+		t.Fatalf("Size after final Clear = %d, want 0", got)
+	}
+	count := 0
+	m.Range(func(int, int) bool {
+		count++
+		return true
+	})
+	if count != 0 {
+		t.Fatalf("Range after final Clear yielded %d entries, want 0", count)
+	}
+}
+
 func TestV6MapBucketAndEntryLayout(t *testing.T) {
 	size := unsafe.Sizeof(v6Bucket{})
 	if size != 8 {
 		t.Fatalf("bucket size = %d, want 8", size)
 	}
-	table := newV6Table[int, int](v6MinBuckets, true)
+	table := newV6Table[int, int](v6MinBuckets)
 	bucketBase := uintptr(unsafe.Pointer(table.buckets.At(0)))
 	if uintptr(unsafe.Pointer(table.buckets.At(1)))-bucketBase != size {
 		t.Fatal("bucket stride mismatch")

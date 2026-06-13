@@ -98,12 +98,14 @@ const (
 	deleteOp
 )
 
+type computeFlags uint8
+
 const (
-	computeInit           uint8 = 1 << iota // auto-init table if nil
-	computeIgnoreHint                       // skip rebuild cooperation
-	computeSkipIfFound                      // fast path: skip lock if key found
-	computeSkipIfNotFound                   // fast path: skip lock if key not found
-	computeUsesValue                        // val is *V, not func(e *MapEntry[K, V])
+	computeInit           computeFlags = 1 << iota // auto-init table if nil
+	computeIgnoreHint                              // skip rebuild cooperation
+	computeSkipIfFound                             // fast path: skip lock if key found
+	computeSkipIfNotFound                          // fast path: skip lock if key not found
+	computeUsesValue                               // val is *V, not func(e *MapEntry[K, V])
 )
 
 var maxProcs_ = uintptr(max(runtime.GOMAXPROCS(0), 1))

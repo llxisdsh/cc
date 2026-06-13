@@ -93,13 +93,19 @@ const (
 type V6Map[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[v6Table[K, V]]
+	rs        atomic.Pointer[v6RebuildState]
 	initState atomic.Uint32
 	intKey    bool
 	seed      uintptr
 	keyHash   HashFunc
 	valEqual  EqualFunc
 	minLen    uintptr
-	size      PLocalCounterN
+}
+
+// v6RebuildState blocks new writers while a Rebuild (or Clear) holds the map.
+// Readers never wait on it; cooperative resize is independent of it.
+type v6RebuildState struct {
+	latch Latch
 }
 
 type v6Table[K comparable, V any] struct {
@@ -109,9 +115,9 @@ type v6Table[K comparable, V any] struct {
 	probeLimit   uintptr
 	stripeCap    int
 	growCap      int
-	intKey       bool
-	chunks       uint32
+	size         FixedLocalCounterN
 	chunkSz      uintptr
+	chunks       uint32
 	allocating   atomic.Uint32
 	copyIdx      atomic.Uint32
 	copyDone     atomic.Uint32
@@ -174,7 +180,7 @@ func (m *V6Map[K, V]) init(cfg *MapConfig) {
 	}
 	m.seed = uintptr(rand.Uint64())
 	m.minLen = v6CalcBucketLen(cfg.capacity)
-	m.table.Store(newV6Table[K, V](m.minLen, m.intKey))
+	m.table.Store(newV6Table[K, V](m.minLen))
 }
 
 func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
@@ -183,7 +189,7 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 		return *new(V), false
 	}
 	hash := m.hashKey(noEscape(&key))
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
+	tag, start := v6HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -218,11 +224,41 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 }
 
 func (m *V6Map[K, V]) Store(key K, value V) {
-	m.store(noEscape(&key), noEscape(&value), false)
+	m.store(noEscape(&key), noEscape(&value), false, true)
 }
 
+// LoadOrStore returns the existing value for the key if present.
+// Otherwise, it stores and returns the given value.
+// The loaded result is true if the value was loaded, false if stored.
 func (m *V6Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	return m.store(noEscape(&key), noEscape(&value), true)
+	return m.store(noEscape(&key), noEscape(&value), true, true)
+}
+
+// LoadOrStoreFn loads the value for a key if present.
+// Otherwise, it stores and returns the value returned by valueFn.
+// The loaded result is true if the value was loaded, false if stored.
+// valueFn is only invoked when the key is absent.
+func (m *V6Map[K, V]) LoadOrStoreFn(
+	key K,
+	valueFn func() V,
+) (actual V, loaded bool) {
+	fn := func(e *MapEntry[K, V]) {
+		if e.Loaded() {
+			return
+		}
+		e.Update(valueFn())
+	}
+	return m.compute(noEscape(&key), unsafe.Pointer(&fn), computeInit|computeSkipIfFound)
+}
+
+// Swap stores value for key and returns the previous value if any.
+// The loaded result reports whether the key was present.
+func (m *V6Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
+	actual, loaded := m.store(noEscape(&key), noEscape(&value), false, false)
+	if !loaded {
+		return *new(V), false
+	}
+	return actual, true
 }
 
 func (m *V6Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
@@ -238,80 +274,120 @@ func (m *V6Map[K, V]) Delete(key K) {
 }
 
 func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
-	table := m.table.Load()
-	if table == nil {
+	if m.table.Load() == nil {
 		return false
 	}
 	if m.valEqual == nil {
 		panic("cc: value is not comparable; use WithValueEqual")
 	}
-	hash := m.hashKey(noEscape(&key))
-	for {
-		if next := table.nextTable.Load(); next != nil {
-			table = m.helpResizeInto(table, next)
-			if table == nil {
-				return false
-			}
-			continue
+	swapped := false
+	fn := func(e *MapEntry[K, V]) {
+		if !e.Loaded() {
+			return
 		}
-		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), noEscape(&new))
-		switch status {
-		case v6OK:
-			return swapped
-		case v6Frozen:
-			table = m.helpResize(table)
-		case v6Full:
-			return false
+		if !m.valEqual(noescape(unsafe.Pointer(&e.entry.value)), noescape(unsafe.Pointer(&old))) {
+			return
+		}
+		swapped = true
+		if !m.valEqual(noescape(unsafe.Pointer(&e.entry.value)), noescape(unsafe.Pointer(&new))) {
+			e.Update(new)
 		}
 	}
+	m.compute(noEscape(&key), unsafe.Pointer(&fn), computeSkipIfNotFound)
+	return swapped
 }
 
 func (m *V6Map[K, V]) CompareAndDelete(key K, old V) bool {
-	table := m.table.Load()
-	if table == nil {
+	if m.table.Load() == nil {
 		return false
 	}
 	if m.valEqual == nil {
 		panic("cc: value is not comparable; use WithValueEqual")
 	}
-	hash := m.hashKey(noEscape(&key))
-	for {
-		if next := table.nextTable.Load(); next != nil {
-			table = m.helpResizeInto(table, next)
-			if table == nil {
-				return false
-			}
-			continue
+	deleted := false
+	fn := func(e *MapEntry[K, V]) {
+		if !e.Loaded() {
+			return
 		}
-		status, deleted := m.compareAndDeleteIn(table, noEscape(&key), hash, noEscape(&old))
-		switch status {
-		case v6OK:
-			return deleted
-		case v6Frozen:
-			table = m.helpResize(table)
-		case v6Full:
-			return false
+		if m.valEqual(noescape(unsafe.Pointer(&e.entry.value)), noescape(unsafe.Pointer(&old))) {
+			e.Delete()
+			deleted = true
 		}
 	}
+	m.compute(noEscape(&key), unsafe.Pointer(&fn), computeSkipIfNotFound)
+	return deleted
 }
 
+// Compute performs a compute-style, atomic update for the given key.
+//
+// Callback signature:
+//
+//		fn(e *MapEntry[K, V])
+//
+//	  - Use e.Loaded() and e.Value() to inspect the current state
+//	  - Use e.Update(newV) to upsert; Use e.Delete() to remove
+//
+// The callback runs inside the bucket's short write window; keep it
+// lightweight and do not call other operations on the same map from it.
+//
+// Returns:
+//   - actual: the current value in the map after the operation
+//   - loaded: true if the key existed before the operation
 func (m *V6Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loaded bool) {
-	table := m.ensureTable()
-	hash := m.hashKey(noEscape(&key))
+	return m.compute(noEscape(&key), unsafe.Pointer(&fn), computeInit)
+}
+
+// compute adapts Map.compute's shape so MapRebuild can dispatch to either
+// implementation under both build tags. val must be a *func(e *MapEntry[K, V]).
+func (m *V6Map[K, V]) compute(
+	key *K,
+	val unsafe.Pointer, // *func(e *MapEntry[K, V])
+	flags computeFlags,
+) (actual V, loaded bool) {
+	fn := *(*func(e *MapEntry[K, V]))(val)
+	return m.computeLoop(key, fn, flags)
+}
+
+func (m *V6Map[K, V]) computeLoop(
+	key *K,
+	fn func(e *MapEntry[K, V]),
+	flags computeFlags,
+) (actual V, loaded bool) {
+	table := m.table.Load()
+	if table == nil {
+		if flags&computeInit == 0 {
+			return *new(V), false
+		}
+		table = m.ensureTable()
+	}
+	hash := m.hashKey(key)
 	for {
+		if flags&computeIgnoreHint == 0 {
+			if rs := m.rs.Load(); rs != nil {
+				rs.latch.Wait()
+				table = m.table.Load()
+				if table == nil {
+					if flags&computeInit == 0 {
+						return *new(V), false
+					}
+					table = m.ensureTable()
+				}
+				continue
+			}
+		}
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
 			continue
 		}
-		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
+		status, actual, loaded, shouldCheckResize := m.computeIn(table, key, hash, fn, flags)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v6CntOccupied)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(table.size.Get(v6CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v6Full:
-			table = m.tryResize(table, int(m.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
+			table = m.tryResize(table, int(table.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
 		case v6Frozen:
 			table = m.helpResize(table)
 		}
@@ -358,6 +434,137 @@ func (m *V6Map[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
 
+// ToMap collects up to limit entries into a map[K]V.
+// Omitting limit collects everything; limit <= 0 returns an empty map.
+func (m *V6Map[K, V]) ToMap(limit ...int) map[K]V {
+	l := maxInt
+	if len(limit) != 0 {
+		l = limit[0]
+		if l <= 0 {
+			return map[K]V{}
+		}
+	}
+	a := make(map[K]V, min(m.Size(), l))
+	for k, v := range m.All() {
+		a[k] = v
+		l--
+		if l == 0 {
+			break
+		}
+	}
+	return a
+}
+
+// Entries returns an iterator function for use with range-over-func.
+// It provides the same functionality as ComputeRange but in iterator form.
+//
+//go:nosplit
+func (m *V6Map[K, V]) Entries() func(yield func(e *MapEntry[K, V]) bool) {
+	return m.ComputeRange
+}
+
+// ComputeRange iterates all entries and applies a user callback.
+//
+// Callback signature:
+//
+//		yield(e *MapEntry[K, V]) bool
+//
+//	  - e.Update(newV): update the entry to newV
+//	  - e.Delete(): delete the entry
+//	  - default (no op): keep the entry unchanged
+//	  - return true to continue; return false to stop iteration
+//
+// Concurrency & consistency:
+//   - Allows concurrent writers during iteration.
+//   - The callback runs inside the bucket's write window: concurrent readers
+//     and writers of that bucket spin until the window closes. Keep yield
+//     very lightweight, and never call operations on the same map from it
+//     (doing so deadlocks).
+//   - Cooperates with concurrent grow/shrink; if a resize is detected, it
+//     helps complete copying, then restarts on the latest table.
+//   - Provides weakly consistent iteration: entries may be updated, added,
+//     or removed concurrently, may or may not be observed, and may be
+//     observed more than once after an iteration restart.
+func (m *V6Map[K, V]) ComputeRange(yield func(e *MapEntry[K, V]) bool) {
+	m.computeRange(yield, false)
+}
+
+func (m *V6Map[K, V]) computeRange(yield func(e *MapEntry[K, V]) bool, ignoreRebuildState bool) {
+restart:
+	table := m.table.Load()
+	if table == nil {
+		return
+	}
+	it := MapEntry[K, V]{
+		loaded: true,
+	}
+	for i := uintptr(0); i <= table.mask; i++ {
+		if !ignoreRebuildState {
+			if rs := m.rs.Load(); rs != nil {
+				rs.latch.Wait()
+				goto restart
+			}
+			if newTable := m.table.Load(); table != newTable {
+				goto restart
+			}
+		}
+		b := table.buckets.At(i)
+	retryBucket:
+		ctrl, status := v6BeginWrite(b)
+		if status != v6OK {
+			if status == v6Retry {
+				goto retryBucket
+			}
+			// v6Frozen: help finish the resize, restart on the latest table.
+			m.helpResize(table)
+			goto restart
+		}
+		newCtrl := ctrl
+		tombstoneAdds := uintptr(0)
+		modified := false
+		stop := false
+		for full := v6FullBits(ctrl); full != 0; full &= full - 1 {
+			lane := v6FirstMarkedLane(full)
+			slot := table.entry(i, lane)
+			e := slot.ReadUnfenced()
+			it.entry.key, it.entry.value = e.key, e.val
+			it.op = cancelOp
+			shouldContinue := yield(noEscape(&it))
+			switch it.op {
+			case updateOp:
+				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.value})
+				modified = true
+			case deleteOp:
+				if !v6EnableSameKeyTombstoneReuse {
+					slot.WriteUnfenced(v6Entry[K, V]{})
+				} else {
+					slot.WriteUnfenced(v6Entry[K, V]{key: e.key})
+				}
+				newCtrl = v6SetTag(newCtrl, lane, v6TagDeleted)
+				tombstoneAdds++
+				modified = true
+			default:
+				// cancelOp: no-op
+			}
+			if !shouldContinue {
+				stop = true
+				break
+			}
+		}
+		if modified {
+			v6EndWriteModified(b, newCtrl)
+		} else {
+			v6EndWriteUnchanged(b, newCtrl)
+		}
+		if tombstoneAdds != 0 {
+			table.size.Add(v6CntTombstones, tombstoneAdds)
+		}
+		if stop {
+			return
+		}
+	}
+}
+
 type v6MapStats struct {
 	Buckets        uintptr
 	Capacity       uintptr
@@ -375,8 +582,11 @@ type v6MapStats struct {
 
 func (m *V6Map[K, V]) stats() v6MapStats {
 	table := m.table.Load()
-	occupied := m.size.Value(v6CntOccupied)
-	tombstones := m.size.Value(v6CntTombstones)
+	var occupied, tombstones uintptr
+	if table != nil {
+		occupied = table.size.Value(v6CntOccupied)
+		tombstones = table.size.Value(v6CntTombstones)
+	}
 	stats := v6MapStats{
 		Live:       occupied - tombstones,
 		Occupied:   occupied,
@@ -405,7 +615,7 @@ func (m *V6Map[K, V]) stats() v6MapStats {
 			lane := v6FirstMarkedLane(fullScan)
 			e := table.entry(i, lane).ReadUnfenced()
 			hash := m.hashKey(noEscape(&e.key))
-			_, start := v6HashParts(hash, table.intKey, table.mask)
+			_, start := v6HashParts(hash, m.intKey, table.mask)
 			probe := (i - start) & table.mask
 			stats.ProbeTotal += probe
 			stats.ProbeSamples++
@@ -419,36 +629,126 @@ func (m *V6Map[K, V]) stats() v6MapStats {
 }
 
 func (m *V6Map[K, V]) Size() int {
-	occupied := int(m.size.Value(v6CntOccupied))
-	tombstones := int(m.size.Value(v6CntTombstones))
+	table := m.table.Load()
+	if table == nil {
+		return 0
+	}
+	occupied := int(table.size.Value(v6CntOccupied))
+	tombstones := int(table.size.Value(v6CntTombstones))
 	return max(occupied-tombstones, 0)
 }
 
+// Clear clears all key-value pairs from the map.
+// New writers wait while the table is replaced. Writers that already entered
+// before the rebuild state was installed may finish on their captured table.
 func (m *V6Map[K, V]) Clear() {
 	if m.table.Load() == nil {
 		return
 	}
-	m.size.Clear()
-	m.table.Store(newV6Table[K, V](m.minLen, m.intKey))
+	for {
+		if rs := m.rs.Load(); rs != nil {
+			rs.latch.Wait()
+			continue
+		}
+		rs := m.beginRebuild()
+		if rs == nil {
+			continue
+		}
+		m.drainResize()
+		m.table.Store(newV6Table[K, V](m.minLen))
+		m.endRebuild(rs)
+		return
+	}
 }
 
-func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
+// Rebuild performs a map rebuild operation with the given function.
+// New public writers wait while the rebuild state is active; concurrent readers
+// are allowed. Writers that already entered before the state was installed may
+// finish on their captured table.
+//
+// Parameters:
+//   - fn: The function to execute during rebuild.
+//     It receives a MapRebuild instance.
+//
+// Notes:
+//   - You must use the `m *MapRebuild[K, V]` parameter passed to `fn` for
+//     processing. Do not call methods on the Map instance directly, as this
+//     may cause deadlocks.
+func (m *V6Map[K, V]) Rebuild(fn func(m *MapRebuild[K, V])) {
+	for {
+		if rs := m.rs.Load(); rs != nil {
+			rs.latch.Wait()
+			continue
+		}
+		rs := m.beginRebuild()
+		if rs == nil {
+			continue
+		}
+		m.drainResize()
+		fn(noEscape(&MapRebuild[K, V]{v6: m}))
+		m.endRebuild(rs)
+		return
+	}
+}
+
+func (m *V6Map[K, V]) beginRebuild() *v6RebuildState {
+	if m.rs.Load() != nil {
+		return nil
+	}
+	rs := &v6RebuildState{}
+	if !m.rs.CompareAndSwap(nil, rs) {
+		return nil
+	}
+	return rs
+}
+
+func (m *V6Map[K, V]) endRebuild(rs *v6RebuildState) {
+	m.rs.Store(nil)
+	rs.latch.Open()
+}
+
+// drainResize completes any in-flight cooperative resize so the rebuild
+// holder starts from a stable table. Must be called after beginRebuild.
+// It must not wait on m.rs (self-deadlock).
+func (m *V6Map[K, V]) drainResize() {
+	for {
+		table := m.table.Load()
+		if table == nil {
+			return
+		}
+		if next := table.nextTable.Load(); next != nil {
+			m.helpResizeInto(table, next)
+			continue
+		}
+		if table.allocating.Load() == 0 {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
+func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent, dedup bool) (actual V, loaded bool) {
 	table := m.ensureTable()
 	hash := m.hashKey(key)
 	for {
+		if rs := m.rs.Load(); rs != nil {
+			rs.latch.Wait()
+			table = m.ensureTable()
+			continue
+		}
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
 			continue
 		}
-		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
+		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent, dedup)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(m.size.Get(v6CntOccupied)) >= table.stripeCap {
+			if !loaded && shouldCheckResize && int(table.size.Get(v6CntOccupied)) >= table.stripeCap {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
 		case v6Full:
-			table = m.tryResize(table, int(m.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
+			table = m.tryResize(table, int(table.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
 		case v6Frozen:
 			table = m.helpResize(table)
 		}
@@ -462,6 +762,14 @@ func (m *V6Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 	}
 	hash := m.hashKey(key)
 	for {
+		if rs := m.rs.Load(); rs != nil {
+			rs.latch.Wait()
+			table = m.table.Load()
+			if table == nil {
+				return *new(V), false
+			}
+			continue
+		}
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
 			if table == nil {
@@ -486,9 +794,9 @@ func (m *V6Map[K, V]) storeIn(
 	key *K,
 	val *V,
 	hash uintptr,
-	onlyIfAbsent bool,
+	onlyIfAbsent, dedup bool,
 ) (v6Status, V, bool, bool) {
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
+	tag, start := v6HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -512,7 +820,7 @@ func (m *V6Map[K, V]) storeIn(
 				if onlyIfAbsent {
 					return v6OK, e.val, true, false
 				}
-				if v6EnableDedupVal && m.valEqual != nil &&
+				if v6EnableDedupVal && dedup && m.valEqual != nil &&
 					m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
 					return v6OK, e.val, true, false
 				}
@@ -525,7 +833,9 @@ func (m *V6Map[K, V]) storeIn(
 				}
 				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
 				v6EndWriteModified(b, ctrl)
-				return v6OK, *val, true, false
+				// e is still current: the CAS in v6BeginWriteWithCtrl validated
+				// the same ctrl snapshot the read was checked against.
+				return v6OK, e.val, true, false
 			}
 			match &= match - 1
 		}
@@ -549,7 +859,7 @@ func (m *V6Map[K, V]) storeIn(
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
 					ctrl = v6SetTag(ctrl, lane, tag)
 					v6EndWriteModified(b, ctrl)
-					m.size.Add(v6CntTombstones, ^uintptr(0))
+					table.size.Add(v6CntTombstones, ^uintptr(0))
 					return v6OK, *val, false, false
 				}
 				tombstones &= tombstones - 1
@@ -570,7 +880,7 @@ func (m *V6Map[K, V]) storeIn(
 			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: *val})
 			ctrl = v6SetTag(ctrl, lane, tag)
 			v6EndWriteModified(b, ctrl)
-			m.size.Add(v6CntOccupied, 1)
+			table.size.Add(v6CntOccupied, 1)
 			return v6OK, *val, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.state.Load() {
@@ -587,7 +897,7 @@ func (m *V6Map[K, V]) updateIn(
 	hash uintptr,
 	onlyIfAbsent bool,
 ) (v6Status, V, bool) {
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
+	tag, start := v6HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -648,6 +958,14 @@ func (m *V6Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
 	}
 	hash := m.hashKey(key)
 	for {
+		if rs := m.rs.Load(); rs != nil {
+			rs.latch.Wait()
+			table = m.table.Load()
+			if table == nil {
+				return *new(V), false
+			}
+			continue
+		}
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
 			if table == nil {
@@ -673,7 +991,7 @@ func (m *V6Map[K, V]) deleteIn(
 	hash uintptr,
 	needValue bool,
 ) (v6Status, V, bool) {
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
+	tag, start := v6HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -713,7 +1031,7 @@ func (m *V6Map[K, V]) deleteIn(
 				}
 				ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
 				v6EndWriteModified(b, ctrl)
-				m.size.Add(v6CntTombstones, 1)
+				table.size.Add(v6CntTombstones, 1)
 				return v6OK, prev, true
 			}
 			match &= match - 1
@@ -731,135 +1049,14 @@ func (m *V6Map[K, V]) deleteIn(
 	return v6Full, *new(V), false
 }
 
-func (m *V6Map[K, V]) compareAndSwapIn(
-	table *v6Table[K, V],
-	key *K,
-	hash uintptr,
-	old *V,
-	new *V,
-) (v6Status, bool) {
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
-	for probe := uintptr(0); probe < table.probeLimit; probe++ {
-		bi := (start + probe) & table.mask
-		b := table.buckets.At(bi)
-	retryBucket:
-		ctrl := b.state.Load()
-		if ctrl&v6FrozenMask != 0 {
-			return v6Frozen, false
-		}
-		if ctrl&v6WritingMask != 0 {
-			goto retryBucket
-		}
-		match := v6MatchBits(ctrl, tag)
-		for match != 0 {
-			lane := v6FirstMarkedLane(match)
-			slot := table.entry(bi, lane)
-			e := slot.ReadUnfenced()
-			if ctrl != b.state.Load() {
-				goto retryBucket
-			}
-			if e.key == *key {
-				if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
-					return v6OK, false
-				}
-				if m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(new))) {
-					return v6OK, true
-				}
-				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
-				if status != v6OK {
-					if status == v6Retry {
-						goto retryBucket
-					}
-					return status, false
-				}
-				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *new})
-				v6EndWriteModified(b, ctrl)
-				return v6OK, true
-			}
-			match &= match - 1
-		}
-		if v6EmptyBits(ctrl) != 0 {
-			if ctrl != b.state.Load() {
-				goto retryBucket
-			}
-			return v6OK, false
-		}
-		if ctrl != b.state.Load() {
-			goto retryBucket
-		}
-	}
-	return v6Full, false
-}
-
-func (m *V6Map[K, V]) compareAndDeleteIn(
-	table *v6Table[K, V],
-	key *K,
-	hash uintptr,
-	old *V,
-) (v6Status, bool) {
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
-	for probe := uintptr(0); probe < table.probeLimit; probe++ {
-		bi := (start + probe) & table.mask
-		b := table.buckets.At(bi)
-	retryBucket:
-		ctrl := b.state.Load()
-		if ctrl&v6FrozenMask != 0 {
-			return v6Frozen, false
-		}
-		if ctrl&v6WritingMask != 0 {
-			goto retryBucket
-		}
-		match := v6MatchBits(ctrl, tag)
-		for match != 0 {
-			lane := v6FirstMarkedLane(match)
-			slot := table.entry(bi, lane)
-			e := slot.ReadUnfenced()
-			if ctrl != b.state.Load() {
-				goto retryBucket
-			}
-			if e.key == *key {
-				if !m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(old))) {
-					return v6OK, false
-				}
-				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
-				if status != v6OK {
-					if status == v6Retry {
-						goto retryBucket
-					}
-					return status, false
-				}
-				if !v6EnableSameKeyTombstoneReuse {
-					slot.WriteUnfenced(v6Entry[K, V]{})
-				} else {
-					slot.WriteUnfenced(v6Entry[K, V]{key: e.key})
-				}
-				ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
-				v6EndWriteModified(b, ctrl)
-				m.size.Add(v6CntTombstones, 1)
-				return v6OK, true
-			}
-			match &= match - 1
-		}
-		if v6EmptyBits(ctrl) != 0 {
-			if ctrl != b.state.Load() {
-				goto retryBucket
-			}
-			return v6OK, false
-		}
-		if ctrl != b.state.Load() {
-			goto retryBucket
-		}
-	}
-	return v6Full, false
-}
-
 func (m *V6Map[K, V]) computeIn(
 	table *v6Table[K, V],
 	key *K,
 	hash uintptr,
 	fn func(e *MapEntry[K, V]),
+	flags computeFlags,
 ) (v6Status, V, bool, bool) {
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
+	tag, start := v6HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
 		b := table.buckets.At(bi)
@@ -880,6 +1077,9 @@ func (m *V6Map[K, V]) computeIn(
 				goto retryBucket
 			}
 			if e.key == *key {
+				if flags&computeSkipIfFound != 0 {
+					return v6OK, e.val, true, false
+				}
 				ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 				if status != v6OK {
 					if status == v6Retry {
@@ -892,11 +1092,12 @@ func (m *V6Map[K, V]) computeIn(
 					loaded: true,
 				}
 				fn(noEscape(&it))
+				ret := it.entry.value
 				switch it.op {
 				case updateOp:
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.value})
 					v6EndWriteModified(b, ctrl)
-					return v6OK, it.entry.value, true, false
+					return v6OK, ret, true, false
 				case deleteOp:
 					if !v6EnableSameKeyTombstoneReuse {
 						slot.WriteUnfenced(v6Entry[K, V]{})
@@ -905,11 +1106,11 @@ func (m *V6Map[K, V]) computeIn(
 					}
 					ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
 					v6EndWriteModified(b, ctrl)
-					m.size.Add(v6CntTombstones, 1)
-					return v6OK, it.entry.value, true, false
+					table.size.Add(v6CntTombstones, 1)
+					return v6OK, ret, true, false
 				default:
 					v6EndWriteUnchanged(b, ctrl)
-					return v6OK, it.entry.value, true, false
+					return v6OK, ret, true, false
 				}
 			}
 			match &= match - 1
@@ -924,6 +1125,9 @@ func (m *V6Map[K, V]) computeIn(
 					goto retryBucket
 				}
 				if e.key == *key {
+					if flags&computeSkipIfNotFound != 0 {
+						return v6OK, *new(V), false, false
+					}
 					ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 					if status != v6OK {
 						if status == v6Retry {
@@ -942,7 +1146,7 @@ func (m *V6Map[K, V]) computeIn(
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.value})
 					ctrl = v6SetTag(ctrl, lane, tag)
 					v6EndWriteModified(b, ctrl)
-					m.size.Add(v6CntTombstones, ^uintptr(0))
+					table.size.Add(v6CntTombstones, ^uintptr(0))
 					return v6OK, it.entry.value, false, false
 				}
 				tombstones &= tombstones - 1
@@ -951,6 +1155,9 @@ func (m *V6Map[K, V]) computeIn(
 		if empty := v6EmptyBits(ctrl); empty != 0 {
 			if ctrl != b.state.Load() {
 				goto retryBucket
+			}
+			if flags&computeSkipIfNotFound != 0 {
+				return v6OK, *new(V), false, false
 			}
 			ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
 			if status != v6OK {
@@ -971,7 +1178,7 @@ func (m *V6Map[K, V]) computeIn(
 			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: it.entry.value})
 			ctrl = v6SetTag(ctrl, lane, tag)
 			v6EndWriteModified(b, ctrl)
-			m.size.Add(v6CntOccupied, 1)
+			table.size.Add(v6CntOccupied, 1)
 			return v6OK, it.entry.value, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.state.Load() {
@@ -987,7 +1194,7 @@ func (m *V6Map[K, V]) resizeIfNeeded(table *v6Table[K, V]) {
 			return
 		}
 	}
-	occupied := int(m.size.Value(v6CntOccupied))
+	occupied := int(table.size.Value(v6CntOccupied))
 	if occupied >= table.growCap {
 		m.tryResize(table, occupied, v6ResizeNormal)
 		return
@@ -1001,11 +1208,135 @@ func (m *V6Map[K, V]) resizeIfNeeded(table *v6Table[K, V]) {
 	// reduce miss-path tombstone drag, but it may trigger full-table copy long
 	// before physical occupancy reaches growCap.
 	//
-	// tombstones := int(m.size.Value(v6CntTombstones))
+	// tombstones := int(table.size.Value(v6CntTombstones))
 	// live := occupied - tombstones
 	// if tombstones > v6SlotsPerBucket && tombstones > live/4 {
 	// 	m.tryResize(table, occupied, v6ResizeCompact)
 	// }
+}
+
+// Grow increases the map's capacity by sizeAdd entries to accommodate future
+// growth. This pre-allocation avoids rehashing when adding new entries up to
+// the new capacity.
+//
+// Parameters:
+//   - sizeAdd specifies the number of additional entries the map should be able
+//     to hold.
+//
+// Notes:
+//   - If the current remaining capacity already exceeds sizeAdd, no growth will
+//     be triggered.
+//   - Sizing is based on live entries; tombstones still occupy physical slots
+//     until the next compaction, so a tombstone-heavy map may resize earlier
+//     than the pre-allocated capacity suggests.
+func (m *V6Map[K, V]) Grow(sizeAdd int) {
+	if sizeAdd <= 0 {
+		return
+	}
+
+	table := m.ensureTable()
+	for {
+		if rs := m.rs.Load(); rs != nil {
+			rs.latch.Wait()
+			table = m.ensureTable()
+			continue
+		}
+		occupied := int(table.size.Value(v6CntOccupied))
+		tombstones := int(table.size.Value(v6CntTombstones))
+		live := max(occupied-tombstones, 0)
+		newLen := v6CalcBucketLen(live + sizeAdd)
+		if newLen <= table.bucketLen() {
+			return
+		}
+		table = m.tryResizeLen(table, newLen)
+	}
+}
+
+// Shrink reduces the capacity to fit the current size.
+// It never shrinks below the initial capacity (WithCapacity).
+func (m *V6Map[K, V]) Shrink() {
+	table := m.table.Load()
+	if table == nil {
+		return
+	}
+	for {
+		if rs := m.rs.Load(); rs != nil {
+			rs.latch.Wait()
+			table = m.table.Load()
+			if table == nil {
+				return
+			}
+			continue
+		}
+		if table.bucketLen() <= m.minLen {
+			return
+		}
+		occupied := int(table.size.Value(v6CntOccupied))
+		tombstones := int(table.size.Value(v6CntTombstones))
+		live := max(occupied-tombstones, 0)
+		newLen := max(v6CalcBucketLen(live), m.minLen)
+		if newLen >= table.bucketLen() {
+			return
+		}
+		table = m.tryResizeLen(table, newLen)
+	}
+}
+
+// tryResizeLen resizes to a caller-chosen bucket length. Unlike tryResize,
+// the target length is supplied, but the winner still re-checks the fresh
+// live count so a stale or too-tight target (e.g. Shrink racing inserts)
+// cannot produce a table smaller than the current contents need.
+func (m *V6Map[K, V]) tryResizeLen(old *v6Table[K, V], nextLen uintptr) *v6Table[K, V] {
+	if table := m.table.Load(); table != old {
+		return table
+	}
+	next := old.nextTable.Load()
+	if next == nil {
+		if old.allocating.CompareAndSwap(0, 1) {
+			occupied := int(old.size.Value(v6CntOccupied))
+			tombstones := int(old.size.Value(v6CntTombstones))
+			live := max(occupied-tombstones, 0)
+			nextLen = max(nextLen, v6CalcBucketLen(live), m.minLen)
+			next = newV6Table[K, V](nextLen)
+			old.nextTable.Store(next)
+		} else {
+			for next == nil {
+				runtime.Gosched()
+				next = old.nextTable.Load()
+			}
+		}
+	}
+	return m.helpResizeInto(old, next)
+}
+
+// CloneTo copies all key-value pairs from this map to the destination map.
+// The destination map is cleared before copying.
+//
+// Parameters:
+//   - clone: The destination map to copy into. Must not be nil.
+//
+// Notes:
+//   - This operation is not atomic with respect to concurrent modifications.
+//   - The destination map will have the same configuration as the source.
+//   - The destination map is cleared before copying to ensure a clean state.
+func (m *V6Map[K, V]) CloneTo(clone *V6Map[K, V]) {
+	clone.Clear()
+	table := m.table.Load()
+	if table == nil {
+		return
+	}
+	clone.intKey = m.intKey
+	clone.seed = m.seed
+	clone.keyHash = m.keyHash
+	clone.valEqual = m.valEqual
+	clone.minLen = m.minLen
+	occupied := int(table.size.Value(v6CntOccupied))
+	tombstones := int(table.size.Value(v6CntTombstones))
+	bucketLen := max(v6CalcBucketLen(max(occupied-tombstones, 0)), m.minLen)
+	clone.table.Store(newV6Table[K, V](bucketLen))
+	for k, v := range m.All() {
+		clone.Store(k, v)
+	}
 }
 
 func (m *V6Map[K, V]) tryResize(old *v6Table[K, V], occupied int, hint v6ResizeHint) *v6Table[K, V] {
@@ -1018,13 +1349,13 @@ func (m *V6Map[K, V]) tryResize(old *v6Table[K, V], occupied int, hint v6ResizeH
 			// Base sizing follows the live entry count. At the normal grow
 			// threshold this rounds to 2x; tombstone-heavy resize can stay at
 			// the same size and compact tombstone slots away.
-			tombstones := int(m.size.Value(v6CntTombstones))
+			tombstones := int(old.size.Value(v6CntTombstones))
 			live := occupied - tombstones
 			nextLen := v6CalcBucketLen(live)
 			nextLen = max(nextLen, m.minLen)
 			aggressive := hint == v6ResizeProbeLimit
 			if v6EnableAggressiveGrow {
-				curOccupied := int(m.size.Value(v6CntOccupied))
+				curOccupied := int(old.size.Value(v6CntOccupied))
 				occupiedInResize := curOccupied - occupied
 				aggressive = aggressive || occupiedInResize >= 2
 			}
@@ -1033,7 +1364,7 @@ func (m *V6Map[K, V]) tryResize(old *v6Table[K, V], occupied int, hint v6ResizeH
 			if aggressive {
 				nextLen = min(nextLen<<1, old.bucketLen()<<2)
 			}
-			next = newV6Table[K, V](nextLen, old.intKey)
+			next = newV6Table[K, V](nextLen)
 			old.nextTable.Store(next)
 		} else {
 			if v6EnableStoreInGrow {
@@ -1051,7 +1382,7 @@ func (m *V6Map[K, V]) tryResize(old *v6Table[K, V], occupied int, hint v6ResizeH
 func (m *V6Map[K, V]) helpResize(old *v6Table[K, V]) *v6Table[K, V] {
 	next := old.nextTable.Load()
 	if next == nil {
-		return m.tryResize(old, int(m.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
+		return m.tryResize(old, int(old.size.Value(v6CntOccupied)), v6ResizeProbeLimit)
 	}
 	return m.helpResizeInto(old, next)
 }
@@ -1075,6 +1406,7 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 		copyMaxProbe := uintptr(0)
 		start := uintptr(chunk) * old.chunkSz
 		end := min(start+old.chunkSz, old.bucketLen())
+		copied := uintptr(0)
 		for i := start; i < end; i++ {
 			b := old.buckets.At(i)
 			words := v6FreezeAndLoadTags(b)
@@ -1082,12 +1414,40 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 			for full != 0 {
 				lane := v6FirstMarkedLane(full)
 				e := old.entry(i, lane).ReadUnfenced()
-				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)))
+				tag, insertStart := v6HashParts(m.hashKey(noEscape(&e.key)), m.intKey, next.mask)
+				var probe uintptr
+				for probe = 0; probe <= next.mask; probe++ {
+					bi := (insertStart + probe) & next.mask
+					b := next.buckets.At(bi)
+					ctrl, status := v6BeginWrite(b)
+					if status != v6OK {
+						probe--
+						continue
+					}
+					empty := v6EmptyBits(ctrl)
+					if empty == 0 {
+						v6EndWriteUnchanged(b, ctrl)
+						continue
+					}
+					lane := v6FirstMarkedLane(empty)
+					dst := next.entry(bi, lane)
+					dst.WriteUnfenced(e)
+					ctrl = v6SetTag(ctrl, lane, tag)
+					v6EndWriteModified(b, ctrl)
+					break
+				}
+				if probe > next.mask {
+					panic("cc: V6Map grow produced a full table")
+				}
+				copied++
 				if probe > copyMaxProbe {
 					copyMaxProbe = probe
 				}
 				full &= full - 1
 			}
+		}
+		if copied != 0 {
+			next.size.Add(v6CntOccupied, copied)
 		}
 		for {
 			cur := next.copyMaxProbe.Load()
@@ -1106,9 +1466,6 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 			observed := next.copyMaxProbe.Load() + 1
 			nextLen := next.bucketLen()
 			next.probeLimit = min(nextLen, max(observed<<1, calcProbeLimit(nextLen)))
-			occupied := m.size.Reset(v6CntOccupied)
-			tombstones := m.size.Reset(v6CntTombstones)
-			m.size.Add(v6CntOccupied, occupied-tombstones)
 			m.table.CompareAndSwap(old, next)
 		}
 	}
@@ -1149,27 +1506,27 @@ func (m *V6Map[K, V]) hashKey(key *K) uintptr {
 	return m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
 }
 
-func newV6Table[K comparable, V any](bucketLen uintptr, intKey bool) *v6Table[K, V] {
+func newV6Table[K comparable, V any](bucketLen uintptr) *v6Table[K, V] {
 	bucketLen = nextPowOf2(max(bucketLen, uintptr(v6MinBuckets)))
 	slotLen := bucketLen * v6SlotsPerBucket
 	growCap := int(float64(slotLen) * v6LoadFactor)
-	// Stripe size in PLocalCounter is runtime.GOMAXPROCS(0).
 	cpus := maxProcs()
-	stripeCap := max(growCap/int(cpus), 1)
+	sizeLen := calcSizeLen(bucketLen, cpus)
 	chunks, chunkSz := v6ResizeChunks(bucketLen, cpus)
 	buckets := makeUnsafeSlice[v6Bucket](bucketLen)
 	entries := makeUnsafeSlice[SeqLockSlot[v6Entry[K, V]]](slotLen)
-	return &v6Table[K, V]{
+	table := &v6Table[K, V]{
 		buckets:    buckets,
 		entries:    entries,
 		mask:       bucketLen - 1,
 		probeLimit: min(bucketLen, calcProbeLimit(bucketLen)),
-		stripeCap:  stripeCap,
+		stripeCap:  max(growCap/int(sizeLen), 1),
 		growCap:    growCap,
-		intKey:     intKey,
+		size:       NewFixedLocalCounterN(sizeLen),
 		chunks:     chunks,
 		chunkSz:    chunkSz,
 	}
+	return table
 }
 
 //go:nosplit
@@ -1215,31 +1572,6 @@ func (table *v6Table[K, V]) bucketLen() uintptr {
 //go:nosplit
 func (table *v6Table[K, V]) entry(bucketIdx, lane uintptr) *SeqLockSlot[v6Entry[K, V]] {
 	return table.entries.At(bucketIdx*v6SlotsPerBucket + lane)
-}
-
-func (table *v6Table[K, V]) copyInsertConcurrent(e v6Entry[K, V], hash uintptr) uintptr {
-	tag, start := v6HashParts(hash, table.intKey, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		bi := (start + probe) & table.mask
-		b := table.buckets.At(bi)
-		ctrl, status := v6BeginWrite(b)
-		if status != v6OK {
-			probe--
-			continue
-		}
-		empty := v6EmptyBits(ctrl)
-		if empty == 0 {
-			v6EndWriteUnchanged(b, ctrl)
-			continue
-		}
-		lane := v6FirstMarkedLane(empty)
-		dst := table.entry(bi, lane)
-		dst.WriteUnfenced(e)
-		ctrl = v6SetTag(ctrl, lane, tag)
-		v6EndWriteModified(b, ctrl)
-		return probe
-	}
-	panic("cc: V6Map grow produced a full table")
 }
 
 func v6BeginWrite(b *v6Bucket) (uint64, v6Status) {
