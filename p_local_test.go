@@ -521,8 +521,8 @@ func TestPLocalCounter_Reset(t *testing.T) {
 	}
 }
 
-func TestLocalCounterN_Basic(t *testing.T) {
-	var c LocalCounterN
+func TestFixedLocalCounterN_Basic(t *testing.T) {
+	var c FixedLocalCounterN
 	if v := c.Value(0); v != 0 {
 		t.Fatalf("zero Value(0) = %d, want 0", v)
 	}
@@ -557,8 +557,8 @@ func TestLocalCounterN_Basic(t *testing.T) {
 	}
 }
 
-func TestLocalCounterN_SlotCount(t *testing.T) {
-	c := NewLocalCounterN(4)
+func TestFixedLocalCounterN_SlotCount(t *testing.T) {
+	c := NewFixedLocalCounterN(4)
 	if c.mask+1 != 4 {
 		t.Fatalf("slots after NewLocalCounterN(4) = %d, want 4", c.mask+1)
 	}
@@ -566,7 +566,7 @@ func TestLocalCounterN_SlotCount(t *testing.T) {
 		t.Fatalf("Size after NewLocalCounterN(4) = %d, want 4", size)
 	}
 
-	zero := NewLocalCounterN(0)
+	zero := NewFixedLocalCounterN(0)
 	if size := zero.Size(); size != 0 {
 		t.Fatalf("zero Size = %d, want 0", size)
 	}
