@@ -326,7 +326,7 @@ func (p *PLocalCounter) Reset() uintptr {
 // =============================================================================
 
 // PLocalCounterNLen is the number of uintptr counters packed into each
-// PLocalCounterN P-local cache-line slot.
+// LocalCounterN/PLocalCounterN P-local cache-line slot.
 const PLocalCounterNLen = int(opt.CacheLineSize_ / unsafe.Sizeof(atomic.Uintptr{}))
 
 // PLocalCounterN is a P-local group of uintptr counters.
@@ -777,4 +777,146 @@ func (p *PLocalCounter64N) Clear() {
 	p.mu.Lock()
 	p.shards.Store(nil)
 	p.mu.Unlock()
+}
+
+// =============================================================================
+// LocalCounterN
+// =============================================================================
+
+// LocalCounterN is a fixed-size, P-indexed group of uintptr counters.
+//
+// It is intended for table-owned hot counters: construction chooses a fixed
+// number of cache-line slots, and each Add maps the current P to a slot with
+// pid&mask. When the slot count is below GOMAXPROCS, multiple Ps may share a
+// slot; when it reaches GOMAXPROCS, it behaves like a full P-local counter.
+//
+// The zero value can be embedded and then initialized with Init. Add/Get require
+// prior initialization; Value/Reset/Clear tolerate the zero value.
+type LocalCounterN struct {
+	slots   unsafeSlice[localCounterNSlot]
+	mask    uintptr
+	backing unsafe.Pointer // keeps backing memory alive if slots is non-nil
+}
+
+type localCounterNSlot struct {
+	counters [PLocalCounterNLen]atomic.Uintptr
+}
+
+func (s *localCounterNSlot) slot(i int) *atomic.Uintptr {
+	return (*atomic.Uintptr)(unsafe.Add(unsafe.Pointer(&s.counters), uintptr(i)*unsafe.Sizeof(atomic.Uintptr{})))
+}
+
+// NewLocalCounterN creates a fixed-size local counter group with slotCountPower2
+// cache-line slots.
+//
+// slotCountPower2 must be a power of two. A zero value leaves the counter
+// uninitialized.
+func NewLocalCounterN(slotCountPower2 uintptr) LocalCounterN {
+	var c LocalCounterN
+	c.Init(slotCountPower2)
+	return c
+}
+
+// Size returns the number of counter slots.
+//
+//go:nosplit
+func (c *LocalCounterN) Size() uintptr {
+	if c.slots.ptr == nil {
+		return 0
+	}
+	return c.mask + 1
+}
+
+// Init initializes a zero-value LocalCounterN with slotCountPower2 cache-line
+// slots.
+//
+// slotCountPower2 must be a power of two. A zero value leaves the counter
+// uninitialized.
+//
+// Init is not safe to call concurrently with Add/Get/Value/Reset/Clear.
+func (c *LocalCounterN) Init(slotCountPower2 uintptr) {
+	if slotCountPower2 == 0 {
+		return
+	}
+	backing := make([]byte, slotCountPower2*opt.CacheLineSize_+opt.CacheLineSize_-1)
+	basePtr := unsafe.Pointer(unsafe.SliceData(backing))
+	base := uintptr(basePtr)
+	aligned := (base + opt.CacheLineSize_ - 1) &^ (opt.CacheLineSize_ - 1)
+	c.slots = unsafeSlice[localCounterNSlot]{
+		ptr: unsafe.Add(basePtr, aligned-base),
+	}
+	c.backing = basePtr
+	c.mask = slotCountPower2 - 1
+}
+
+// Add adds delta to counter i in the current P-mapped slot and returns that
+// slot's new value.
+func (c *LocalCounterN) Add(i int, delta uintptr) uintptr {
+	pid := uintptr(runtime_procPin())
+	s := c.slots.At(pid & c.mask)
+	v := s.slot(i).Add(delta)
+	runtime_procUnpin()
+	return v
+}
+
+// Add2 adds two deltas to two counters in the current P-mapped slot.
+func (c *LocalCounterN) Add2(i int, deltaI uintptr, j int, deltaJ uintptr) {
+	pid := uintptr(runtime_procPin())
+	s := c.slots.At(pid & c.mask)
+	s.slot(i).Add(deltaI)
+	s.slot(j).Add(deltaJ)
+	runtime_procUnpin()
+}
+
+// Get returns counter i from the current P-mapped slot.
+//
+//go:nosplit
+func (c *LocalCounterN) Get(i int) uintptr {
+	pid := uintptr(runtime_procPin())
+	v := c.slots.At(pid & c.mask).slot(i).Load()
+	runtime_procUnpin()
+	return v
+}
+
+// Value returns the aggregated value of counter i across all slots.
+//
+// Note: The result is an approximation if concurrent Adds are happening.
+//
+//go:nosplit
+func (c *LocalCounterN) Value(i int) uintptr {
+	if c.slots.ptr == nil {
+		return 0
+	}
+	var sum uintptr
+	for j := uintptr(0); j <= c.mask; j++ {
+		s := c.slots.At(j)
+		sum += s.slot(i).Load()
+	}
+	return sum
+}
+
+// Reset atomically reads counter i and resets it to zero in all slots.
+func (c *LocalCounterN) Reset(i int) uintptr {
+	if c.slots.ptr == nil {
+		return 0
+	}
+	var sum uintptr
+	for j := uintptr(0); j <= c.mask; j++ {
+		s := c.slots.At(j)
+		sum += s.slot(i).Swap(0)
+	}
+	return sum
+}
+
+// Clear resets every counter in every slot to zero.
+func (c *LocalCounterN) Clear() {
+	if c.slots.ptr == nil {
+		return
+	}
+	for j := uintptr(0); j <= c.mask; j++ {
+		s := c.slots.At(j)
+		for i := range PLocalCounterNLen {
+			s.slot(i).Store(0)
+		}
+	}
 }
