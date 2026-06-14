@@ -214,23 +214,23 @@ func (m *V4Map[K, V]) Load(key K) (value V, ok bool) {
 }
 
 func (m *V4Map[K, V]) Store(key K, value V) {
-	m.store(noEscape(&key), noEscape(&value), false)
+	m.store(&key, &value, false)
 }
 
 func (m *V4Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	return m.store(noEscape(&key), noEscape(&value), true)
+	return m.store(&key, &value, true)
 }
 
 func (m *V4Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	return m.update(noEscape(&key), noEscape(&value), false)
+	return m.update(&key, &value, false)
 }
 
 func (m *V4Map[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
-	return m.delete(noEscape(&key), true)
+	return m.delete(&key, true)
 }
 
 func (m *V4Map[K, V]) Delete(key K) {
-	m.delete(noEscape(&key), false)
+	m.delete(&key, false)
 }
 
 func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
@@ -250,7 +250,7 @@ func (m *V4Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			}
 			continue
 		}
-		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), noEscape(&new))
+		status, swapped := m.compareAndSwapIn(table, &key, hash, &old, &new)
 		switch status {
 		case v4OK:
 			return swapped
@@ -279,7 +279,7 @@ func (m *V4Map[K, V]) CompareAndDelete(key K, old V) bool {
 			}
 			continue
 		}
-		status, deleted := m.compareAndDeleteIn(table, noEscape(&key), hash, noEscape(&old))
+		status, deleted := m.compareAndDeleteIn(table, &key, hash, &old)
 		switch status {
 		case v4OK:
 			return deleted
@@ -299,7 +299,7 @@ func (m *V4Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, load
 			table = m.helpResizeInto(table, next)
 			continue
 		}
-		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
+		status, actual, loaded, shouldCheckResize := m.computeIn(table, &key, hash, fn)
 		switch status {
 		case v4OK:
 			if !loaded && shouldCheckResize && int(table.size.Get(v4CntOccupied)) >= table.stripeCap {

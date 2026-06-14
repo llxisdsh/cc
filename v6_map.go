@@ -224,14 +224,14 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 }
 
 func (m *V6Map[K, V]) Store(key K, value V) {
-	m.store(noEscape(&key), noEscape(&value), false, true)
+	m.store(&key, &value, false, true)
 }
 
 // LoadOrStore returns the existing value for the key if present.
 // Otherwise, it stores and returns the given value.
 // The loaded result is true if the value was loaded, false if stored.
 func (m *V6Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	return m.store(noEscape(&key), noEscape(&value), true, true)
+	return m.store(&key, &value, true, true)
 }
 
 // LoadOrStoreFn loads the value for a key if present.
@@ -248,13 +248,13 @@ func (m *V6Map[K, V]) LoadOrStoreFn(
 		}
 		e.Update(valueFn())
 	}
-	return m.compute(noEscape(&key), unsafe.Pointer(&fn), computeInit|computeSkipIfFound)
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit|computeSkipIfFound)
 }
 
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *V6Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	actual, loaded := m.store(noEscape(&key), noEscape(&value), false, false)
+	actual, loaded := m.store(&key, &value, false, false)
 	if !loaded {
 		return *new(V), false
 	}
@@ -262,15 +262,15 @@ func (m *V6Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 }
 
 func (m *V6Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	return m.update(noEscape(&key), noEscape(&value), false)
+	return m.update(&key, &value, false)
 }
 
 func (m *V6Map[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
-	return m.delete(noEscape(&key), true)
+	return m.delete(&key, true)
 }
 
 func (m *V6Map[K, V]) Delete(key K) {
-	m.delete(noEscape(&key), false)
+	m.delete(&key, false)
 }
 
 func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
@@ -293,7 +293,7 @@ func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			e.Update(new)
 		}
 	}
-	m.compute(noEscape(&key), unsafe.Pointer(&fn), computeSkipIfNotFound)
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
 	return swapped
 }
 
@@ -314,7 +314,7 @@ func (m *V6Map[K, V]) CompareAndDelete(key K, old V) bool {
 			deleted = true
 		}
 	}
-	m.compute(noEscape(&key), unsafe.Pointer(&fn), computeSkipIfNotFound)
+	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
 	return deleted
 }
 
@@ -334,7 +334,7 @@ func (m *V6Map[K, V]) CompareAndDelete(key K, old V) bool {
 //   - actual: the current value in the map after the operation
 //   - loaded: true if the key existed before the operation
 func (m *V6Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loaded bool) {
-	return m.compute(noEscape(&key), unsafe.Pointer(&fn), computeInit)
+	return m.compute(&key, unsafe.Pointer(&fn), computeInit)
 }
 
 // compute adapts Map.compute's shape so MapRebuild can dispatch to either
