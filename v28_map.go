@@ -1204,12 +1204,13 @@ func newV28Table[K comparable, V any](bucketLen uintptr) *v28Table[K, V] {
 	chunks, chunkSz := v28ResizeChunks(bucketLen, cpus)
 	buckets, bucketBacking := makeV28Buckets(bucketLen)
 	entries := makeUnsafeSlice[v28Entry[K, V]](slotLen)
+	activeSizeSlots := min(cpus, sizeLen)
 	table := &v28Table[K, V]{
 		buckets:       buckets,
 		entries:       entries,
 		mask:          bucketLen - 1,
 		probeLimit:    min(bucketLen, calcProbeLimit(bucketLen)),
-		stripeCap:     max(growCap/int(sizeLen), 1),
+		stripeCap:     (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:       growCap,
 		size:          NewFixedLocalCounterN(sizeLen),
 		chunks:        chunks,

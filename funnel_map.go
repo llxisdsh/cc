@@ -124,11 +124,12 @@ func newFunnelTable[K cmp.Ordered, V any](tableLen uintptr) *funnelTable[K, V] {
 	growCap := int(float64(tableLen) * capFactor)
 	cpus := maxProcs()
 	sizeLen := calcSizeLen(tableLen, cpus)
+	activeSizeSlots := min(cpus, sizeLen)
 	table := &funnelTable[K, V]{
 		buckets:   makeUnsafeSlice[funnelBucket](tableLen),
 		mask:      tableLen - 1,
 		growCap:   growCap,
-		stripeCap: max(growCap/int(sizeLen), 1),
+		stripeCap: (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		size:      NewFixedLocalCounterN(sizeLen),
 	}
 	return table

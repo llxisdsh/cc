@@ -1046,12 +1046,13 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 	cpus := maxProcs()
 	sizeLen := calcSizeLen(slotLen, cpus)
 	chunks, chunkSz := dwhtResizeChunks(slotLen, cpus)
+	activeSizeSlots := min(cpus, sizeLen)
 	table := &dwhtTable[K, V]{
 		slotsBase:  base,
 		slotsRaw:   raw,
 		mask:       slotLen - 1,
 		probeLimit: probeLimit,
-		stripeCap:  max(growCap/int(sizeLen), 1),
+		stripeCap:  (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:    growCap,
 		size:       NewFixedLocalCounterN(sizeLen),
 		chunks:     chunks,

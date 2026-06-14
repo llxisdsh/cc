@@ -1056,11 +1056,12 @@ func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	cpus := maxProcs()
 	sizeLen := calcSizeLen(slotLen, cpus)
 	chunks, chunkSz := ofhtResizeChunks(slotLen, cpus)
+	activeSizeSlots := min(cpus, sizeLen)
 	table := &ofhtTable[K, V]{
 		slots:      makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
 		mask:       slotLen - 1,
 		probeLimit: probeLimit,
-		stripeCap:  max(growCap/int(sizeLen), 1),
+		stripeCap:  (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:    growCap,
 		size:       NewFixedLocalCounterN(sizeLen),
 		chunks:     chunks,
