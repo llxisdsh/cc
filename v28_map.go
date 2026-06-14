@@ -231,15 +231,15 @@ func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
 }
 
 func (m *V28Map[K, V]) Store(key K, value V) {
-	m.store(noEscape(&key), noEscape(&value), false)
+	m.store(&key, &value, false)
 }
 
 func (m *V28Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	return m.store(noEscape(&key), noEscape(&value), true)
+	return m.store(&key, &value, true)
 }
 
 func (m *V28Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
-	return m.update(noEscape(&key), noEscape(&value), false)
+	return m.update(noEscape(&key), &value, false)
 }
 
 func (m *V28Map[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
@@ -267,7 +267,7 @@ func (m *V28Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 			}
 			continue
 		}
-		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), noEscape(&new))
+		status, swapped := m.compareAndSwapIn(table, noEscape(&key), hash, noEscape(&old), &new)
 		switch status {
 		case v28OK:
 			return swapped
@@ -316,7 +316,7 @@ func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loa
 			table = m.helpResizeInto(table, next)
 			continue
 		}
-		status, actual, loaded, shouldCheckResize := m.computeIn(table, noEscape(&key), hash, fn)
+		status, actual, loaded, shouldCheckResize := m.computeIn(table, &key, hash, fn)
 		switch status {
 		case v28OK:
 			if !loaded && shouldCheckResize && int(table.size.Get(v28CntOccupied)) >= table.stripeCap {

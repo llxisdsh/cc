@@ -68,6 +68,37 @@ func TestV6MapZeroValue(t *testing.T) {
 	}
 }
 
+func TestV6MapStorePointerKeyValueEscapes(t *testing.T) {
+	var keyMap V6Map[*int, int]
+	for i := range 10 {
+		key := i
+		keyMap.Store(&key, i)
+	}
+	foundKeys := make(map[int]int)
+	keyMap.Range(func(key *int, value int) bool {
+		foundKeys[value] = *key
+		return true
+	})
+	for i := range 10 {
+		if got := foundKeys[i]; got != i {
+			t.Fatalf("key for value %d = %d, want %d", i, got, i)
+		}
+	}
+
+	var valueMap V6Map[int, *string]
+	for i := range 10 {
+		value := "value_" + strconv.Itoa(i)
+		valueMap.Store(i, &value)
+	}
+	for i := range 10 {
+		got, ok := valueMap.Load(i)
+		want := "value_" + strconv.Itoa(i)
+		if !ok || got == nil || *got != want {
+			t.Fatalf("value for key %d = (%v, %v), want %q", i, got, ok, want)
+		}
+	}
+}
+
 func TestV6MapBasicOperations(t *testing.T) {
 	m := NewV6Map[string, int](WithCapacity(8))
 

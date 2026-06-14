@@ -252,7 +252,7 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
-		status, _, _ := m.storeInto(table, noEscape(&key), noEscape(&value), h, false)
+		status, _, _ := m.storeInto(table, &key, &value, h, false)
 		switch status {
 		case ofhtStoreOK:
 			m.resizeIfNeeded(table)
@@ -280,7 +280,7 @@ func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
-		status, actual, loaded := m.storeInto(table, noEscape(&key), noEscape(&value), h, true)
+		status, actual, loaded := m.storeInto(table, &key, &value, h, true)
 		switch status {
 		case ofhtStoreOK:
 			if !loaded {
@@ -312,7 +312,7 @@ func (m *OFHTMap[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) 
 		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
-		status, prev, loaded := m.loadAndUpdateIn(table, noEscape(&key), noEscape(&value), h)
+		status, prev, loaded := m.loadAndUpdateIn(table, &key, &value, h)
 		switch status {
 		case ofhtStoreOK:
 			return prev, loaded
@@ -340,7 +340,7 @@ func (m *OFHTMap[K, V]) Delete(key K) {
 		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
-		status, _, _ := m.deleteFrom(table, noEscape(&key), h, false)
+		status, _, _ := m.deleteFrom(table, &key, h, false)
 		switch status {
 		case ofhtStoreOK:
 			return
@@ -368,7 +368,7 @@ func (m *OFHTMap[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 		h = uint32(hash ^ (hash >> 32))
 	}
 	for {
-		status, prev, loaded := m.deleteFrom(table, noEscape(&key), h, true)
+		status, prev, loaded := m.deleteFrom(table, &key, h, true)
 		switch status {
 		case ofhtStoreOK:
 			return prev, loaded
@@ -398,9 +398,9 @@ func (m *OFHTMap[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	for {
 		status, swapped := m.compareAndSwapIn(
 			table,
-			noEscape(&key),
-			noEscape(&old),
-			noEscape(&new),
+			&key,
+			&old,
+			&new,
 			h,
 		)
 		switch status {
@@ -433,8 +433,8 @@ func (m *OFHTMap[K, V]) CompareAndDelete(key K, old V) bool {
 	for {
 		status, deleted := m.compareAndDeleteIn(
 			table,
-			noEscape(&key),
-			noEscape(&old),
+			&key,
+			&old,
 			h,
 		)
 		switch status {

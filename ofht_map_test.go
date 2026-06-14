@@ -74,6 +74,52 @@ func TestOFHTMapBasic(t *testing.T) {
 	m.Delete("b")
 }
 
+func TestOFHTMapPointerKeyValueEscapes(t *testing.T) {
+	var keyMap OFHTMap[*int, int]
+	for i := range 10 {
+		key := i
+		keyMap.Store(&key, i)
+	}
+	foundKeys := make(map[int]int)
+	keyMap.Range(func(key *int, value int) bool {
+		foundKeys[value] = *key
+		return true
+	})
+	for i := range 10 {
+		if got := foundKeys[i]; got != i {
+			t.Fatalf("key for value %d = %d, want %d", i, got, i)
+		}
+	}
+
+	var valueMap OFHTMap[int, *int]
+	for i := range 10 {
+		value := i
+		actual, loaded := valueMap.LoadOrStore(i, &value)
+		if loaded || actual == nil || *actual != i {
+			t.Fatalf("LoadOrStore(%d) = (%v, %v), want (%d, false)", i, actual, loaded, i)
+		}
+	}
+	for i := range 10 {
+		got, ok := valueMap.Load(i)
+		if !ok || got == nil || *got != i {
+			t.Fatalf("Load(%d) = (%v, %v), want %d", i, got, ok, i)
+		}
+	}
+
+	update := 20
+	if prev, ok := valueMap.LoadAndUpdate(0, &update); !ok || prev == nil || *prev != 0 {
+		t.Fatalf("LoadAndUpdate = (%v, %v), want (0, true)", prev, ok)
+	}
+	loaded, _ := valueMap.Load(0)
+	swap := 30
+	if !valueMap.CompareAndSwap(0, loaded, &swap) {
+		t.Fatal("CompareAndSwap failed")
+	}
+	if got, ok := valueMap.Load(0); !ok || got == nil || *got != 30 {
+		t.Fatalf("Load after CompareAndSwap = (%v, %v), want 30", got, ok)
+	}
+}
+
 func TestOFHTMapGrow(t *testing.T) {
 	m := NewOFHTMap[int, int](WithCapacity(1))
 	for i := range 4096 {
