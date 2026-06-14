@@ -122,11 +122,13 @@ func maxProcs() uintptr {
 // counterStripe represents a striped counter to reduce contention.
 //
 // Padding strategy:
-//   - amd64: Padding is omitted by default — performance is identical
-//     with or without padding on this architecture.
-//   - Other 64‑bit arches: Padding is automatically enabled by default
-//     to prevent false sharing.
+//   - amd64: Padding is omitted by default as a size/performance trade-off;
+//     project benchmarks have not shown enough benefit to justify larger
+//     counter stripes on common amd64 CPUs.
+//   - Other architectures: Padding is automatically enabled by default
+//     to prevent false sharing, unless listed below.
 //   - 32‑bit arches: Padding is automatically disabled to save memory.
+//   - wasm: Padding is automatically disabled because there is no physical cache.
 //
 // Manual override via build options:
 //   - cc_enable_padding – force padding on any architecture.

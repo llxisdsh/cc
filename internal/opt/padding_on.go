@@ -1,7 +1,8 @@
-//go:build cc_enable_padding || (!cc_disable_padding && (arm64 || loong64 || mips64 || mips64le || ppc64 || ppc64le || riscv64 || s390x))
+//go:build !cc_disable_padding && (cc_enable_padding || !(amd64 || 386 || arm || mips || mipsle || wasm))
 
 package opt
 
 // Padding_ controls cache line padding for Map's internal counter.
-// Enabled on specific 64-bit architectures to prevent false sharing.
+// Enabled by default on architectures where padding is the safer choice to
+// prevent false sharing. Use cc_disable_padding to force it off.
 const Padding_ = 1
