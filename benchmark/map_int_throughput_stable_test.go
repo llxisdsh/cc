@@ -64,15 +64,6 @@ func TestIntThroughputStable(t *testing.T) {
 		// stableLoadOrStoreFactory("cc.V28Map", func(capHint int) *cc.V28Map[int, int] {
 		// 	return cc.NewV28Map[int, int](cc.WithCapacity(capHint))
 		// }),
-		stableLoadOrStoreFactory("cc.V4Map", func(capHint int) *cc.V4Map[int, int] {
-			return cc.NewV4Map[int, int](cc.WithCapacity(capHint))
-		}),
-		stableLoadOrStoreFactory("cc.V8Map", func(capHint int) *cc.V8Map[int, int] {
-			return cc.NewV8Map[int, int](cc.WithCapacity(capHint))
-		}),
-		stableLoadOrStoreFactory("cc.V6Map", func(capHint int) *cc.V6Map[int, int] {
-			return cc.NewV6Map[int, int](cc.WithCapacity(capHint))
-		}),
 	}
 
 	modes := []struct {
@@ -266,7 +257,7 @@ func TestIntThroughputStable(t *testing.T) {
 			}
 			return rows[i].insertMops > rows[j].insertMops
 		})
-		fmt.Printf("===== mode %s final summary (total-based, sorted by insert throughput) =====\n", mode.name)
+		fmt.Printf("\n===== mode %s final summary (total-based, sorted by insert throughput) =====\n\n", mode.name)
 		for _, r := range rows {
 			fmt.Printf(
 				"%s(total n=%d) \n throughput(mops): insert=%.2f [%.2f..%.2f], load=%.2f [%.2f..%.2f], delete=%.2f [%.2f..%.2f] \n memory: retained=%.2f MiB (%.1f B/entry), allocated=%.2f MiB (%.1f B/entry)\n",
