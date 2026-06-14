@@ -276,19 +276,19 @@ func NewPLocalCounter() *PLocalCounter {
 
 // Add adds delta to the P-local counter.
 // This is faster than With() because it avoids the callback overhead.
-func (p *PLocalCounter) Add(delta uintptr) {
+func (p *PLocalCounter) Add(delta uintptr) uintptr {
 	shards := p.shards.Load()
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
 			s := *shards.slice.At(uintptr(pid))
-			s.val.Add(delta)
+			val := s.val.Add(delta)
 			runtime_procUnpin()
-			return
+			return val
 		}
 		runtime_procUnpin()
 	}
-	p.slowGet().Add(delta)
+	return p.slowGet().Add(delta)
 }
 
 // Value returns the aggregated value of the P-local counter across all shards.
@@ -365,19 +365,19 @@ func NewPLocalCounterN() *PLocalCounterN {
 }
 
 // Add adds delta to counter i in the current P-local cache-line slot.
-func (p *PLocalCounterN) Add(i int, delta uintptr) {
+func (p *PLocalCounterN) Add(i int, delta uintptr) uintptr {
 	shards := p.shards.Load()
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
 			s := *shards.slice.At(uintptr(pid))
-			s.slot(i).Add(delta)
+			val := s.slot(i).Add(delta)
 			runtime_procUnpin()
-			return
+			return val
 		}
 		runtime_procUnpin()
 	}
-	p.slowGet().slot(i).Add(delta)
+	return p.slowGet().slot(i).Add(delta)
 }
 
 func (p *PLocalCounterN) Add2(i int, deltaI uintptr, j int, deltaJ uintptr) {
@@ -538,19 +538,19 @@ func NewPLocalCounter64() *PLocalCounter64 {
 
 // Add adds delta to the P-local counter.
 // This is faster than With() because it avoids the callback overhead.
-func (p *PLocalCounter64) Add(delta uint64) {
+func (p *PLocalCounter64) Add(delta uint64) uint64 {
 	shards := p.shards.Load()
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
 			s := *shards.slice.At(uintptr(pid))
-			s.val.Add(delta)
+			val := s.val.Add(delta)
 			runtime_procUnpin()
-			return
+			return val
 		}
 		runtime_procUnpin()
 	}
-	p.slowGet().Add(delta)
+	return p.slowGet().Add(delta)
 }
 
 // Value returns the aggregated value of the P-local counter across all shards.
@@ -627,19 +627,19 @@ func NewPLocalCounter64N() *PLocalCounter64N {
 }
 
 // Add adds delta to counter i in the current P-local cache-line slot.
-func (p *PLocalCounter64N) Add(i int, delta uint64) {
+func (p *PLocalCounter64N) Add(i int, delta uint64) uint64 {
 	shards := p.shards.Load()
 	if shards != nil {
 		pid := runtime_procPin()
 		if pid < shards.len {
 			s := *shards.slice.At(uintptr(pid))
-			s.slot(i).Add(delta)
+			val := s.slot(i).Add(delta)
 			runtime_procUnpin()
-			return
+			return val
 		}
 		runtime_procUnpin()
 	}
-	p.slowGet().slot(i).Add(delta)
+	return p.slowGet().slot(i).Add(delta)
 }
 
 func (p *PLocalCounter64N) Add2(i int, deltaI uint64, j int, deltaJ uint64) {
