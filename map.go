@@ -54,8 +54,7 @@ type rebuildState struct {
 type mapTable struct {
 	buckets   unsafeSlice[bucket]
 	mask      uintptr
-	size      unsafeSlice[counterStripe]
-	sizeMask  uintptr
+	size      FixedLocalCounterN
 	stripeCap int
 	growCap   int
 }
@@ -149,12 +148,12 @@ func newMapTable(tableLen, cpus uintptr) *mapTable {
 	sizeLen := calcSizeLen(tableLen, cpus)
 	const capFactor = float64(entriesPerBucket) * loadFactor
 	growCap := int(float64(tableLen) * capFactor)
+	activeSizeSlots := min(cpus, sizeLen)
 	return &mapTable{
 		buckets:   makeUnsafeSlice[bucket](tableLen),
 		mask:      tableLen - 1,
-		size:      makeUnsafeSlice[counterStripe](sizeLen),
-		sizeMask:  sizeLen - 1,
-		stripeCap: int(growCap >> bits.TrailingZeros32(uint32(sizeLen))),
+		size:      NewFixedLocalCounterN(sizeLen),
+		stripeCap: (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:   growCap,
 	}
 }
@@ -367,9 +366,8 @@ slowPath:
 			root.Unlock()
 		}
 
-		// localSize := int(table.AddSize(idx, 1))
 		// Check if the table needs to grow
-		if int(table.AddSize(idx, 1)) >= table.stripeCap {
+		if int(table.AddSize(1)) >= table.stripeCap {
 			if loadPtr(&m.rs) == nil {
 				if table.SumSize() >= table.growCap {
 					m.tryResize(mapGrowHint, (table.mask+1)<<1)
@@ -392,7 +390,7 @@ slowPath:
 		storeUint64(&emptyB.meta, newMeta)
 		root.Unlock()
 	}
-	table.AddSize(idx, 1)
+	table.AddSize(1)
 }
 
 // LoadOrStore retrieves an existing value or stores a new one if the key
@@ -769,7 +767,7 @@ findLoop:
 				root.Unlock()
 			}
 
-			localSize := int(table.AddSize(idx, 1))
+			localSize := int(table.AddSize(1))
 			// Check if the table needs to grow
 			if localSize >= table.stripeCap {
 				if loadPtr(&m.rs) == nil {
@@ -789,7 +787,7 @@ findLoop:
 			storeUint64(&emptyB.meta, newMeta)
 			root.Unlock()
 		}
-		table.AddSize(idx, 1)
+		table.AddSize(1)
 		return retV, it.loaded
 	case deleteOp:
 		if !it.loaded {
@@ -806,7 +804,7 @@ findLoop:
 			storeUint64(&lastB.meta, newMeta)
 			root.Unlock()
 		}
-		table.AddSize(idx, ^uintptr(0))
+		table.AddSize(^uintptr(0))
 
 		// Check if table shrinking is needed
 		if m.shrinkOn {
@@ -1013,7 +1011,7 @@ restart:
 					storePtr(b.At(j), nil)
 					meta = setByte(meta, h2Empty, j)
 					storeUint64(&b.meta, meta)
-					table.AddSize(i, ^uintptr(0))
+					table.AddSize(^uintptr(0))
 				default:
 					// cancelOp: no-op
 				}
@@ -1397,27 +1395,23 @@ func (m *Map[K, V]) copyBucket(
 		}
 	}
 	if copied != 0 {
-		newTable.AddSize(start, copied)
+		newTable.AddSize(copied)
 	}
 }
 
-// AddSize atomically adds delta to the size counter for the given bucket index.
+// AddSize atomically adds delta to the current P-mapped size counter.
 //
 //go:nosplit
-func (t *mapTable) AddSize(idx, delta uintptr) uintptr {
-	return atomic.AddUintptr(&t.size.At(t.sizeMask&idx).c, delta)
+func (t *mapTable) AddSize(delta uintptr) uintptr {
+	return t.size.Add(0, delta)
 }
 
 // SumSize calculates the total number of entries in the table
-// by summing all counter-stripes.
+// by summing all local counter slots.
 //
 //go:nosplit
 func (t *mapTable) SumSize() int {
-	var sum uintptr
-	for i := uintptr(0); i <= t.sizeMask; i++ {
-		sum += loadUintptr(&t.size.At(i).c)
-	}
-	return int(sum)
+	return int(t.size.Value(0))
 }
 
 //go:nosplit
