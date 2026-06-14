@@ -1211,7 +1211,7 @@ func newV28Table[K comparable, V any](bucketLen uintptr) *v28Table[K, V] {
 		probeLimit:    min(bucketLen, calcProbeLimit(bucketLen)),
 		stripeCap:     max(growCap/int(sizeLen), 1),
 		growCap:       growCap,
-		size:          NewLocalCounterN(sizeLen),
+		size:          NewFixedLocalCounterN(sizeLen),
 		chunks:        chunks,
 		chunkSz:       chunkSz,
 		bucketBacking: bucketBacking,
