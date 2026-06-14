@@ -52,6 +52,21 @@ func keyIndex(i int) int {
 // ============================================================================
 // Int Key - Store
 // ============================================================================
+func BenchmarkConcurrent_IntStore_cc_V6Map(b *testing.B) {
+	b.ReportAllocs()
+	m := cc.NewV6Map[int, int]()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(runtime_cheaprand()) % benchKeyCount
+		for pb.Next() {
+			key := preGenIntKeys[i]
+			m.Store(key, key)
+			i = keyIndex(i + 1)
+		}
+	})
+}
+
 func BenchmarkConcurrent_IntStore_cc_DWHTMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewDWHTMap[int, int]()
@@ -235,6 +250,25 @@ func BenchmarkConcurrent_IntStore_RWShardedMap(b *testing.B) {
 // ============================================================================
 // Int Key - Load (pre-populated data)
 // ============================================================================
+
+func BenchmarkConcurrent_IntLoad_cc_V6Map(b *testing.B) {
+	m := cc.NewV6Map[int, int]()
+	for _, key := range preGenIntKeys {
+		m.Store(key, key)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(runtime_cheaprand()) % benchKeyCount
+		for pb.Next() {
+			key := preGenIntKeys[i]
+			_, _ = m.Load(key)
+			i = keyIndex(i + 1)
+		}
+	})
+}
+
 func BenchmarkConcurrent_IntLoad_cc_DWHTMap(b *testing.B) {
 	m := cc.NewDWHTMap[int, int]()
 	for _, key := range preGenIntKeys {
@@ -454,6 +488,25 @@ func BenchmarkConcurrent_IntLoad_RWShardedMap(b *testing.B) {
 // ============================================================================
 // Int Key - Delete (continuous Store + Delete)
 // ============================================================================
+
+func BenchmarkConcurrent_IntDelete_cc_V6Map(b *testing.B) {
+	m := cc.NewV6Map[int, int]()
+	for _, key := range preGenIntKeys {
+		m.Store(key, key)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(runtime_cheaprand()) % benchKeyCount
+		for pb.Next() {
+			key := preGenIntKeys[i]
+			m.Delete(key)
+			i = keyIndex(i + 1)
+		}
+	})
+}
+
 func BenchmarkConcurrent_IntDelete_cc_DWHTMap(b *testing.B) {
 	m := cc.NewDWHTMap[int, int]()
 	for _, key := range preGenIntKeys {
@@ -673,6 +726,22 @@ func BenchmarkConcurrent_IntDelete_RWShardedMap(b *testing.B) {
 // ============================================================================
 // Int Key - Range (concurrent read all data)
 // ============================================================================
+
+func BenchmarkConcurrent_IntRange_cc_V6Map(b *testing.B) {
+	m := cc.NewV6Map[int, int]()
+	for _, key := range preGenIntKeys[:1000] { // Range test uses less data
+		m.Store(key, key)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m.Range(func(k, v int) bool { return true })
+		}
+	})
+}
+
 func BenchmarkConcurrent_IntRange_cc_DWHTMap(b *testing.B) {
 	m := cc.NewDWHTMap[int, int]()
 	for _, key := range preGenIntKeys[:1000] { // Range test uses less data
@@ -931,6 +1000,22 @@ func BenchmarkConcurrent_IntMatchDelete_CCFunnelMap(b *testing.B) {
 // ============================================================================
 // String Key - Store
 // ============================================================================
+
+func BenchmarkConcurrent_StrStore_cc_V6Map(b *testing.B) {
+	b.ReportAllocs()
+	m := cc.NewV6Map[string, int]()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(runtime_cheaprand()) % benchKeyCount
+		for pb.Next() {
+			key := preGenStringKeys[i]
+			m.Store(key, i)
+			i = keyIndex(i + 1)
+		}
+	})
+}
+
 func BenchmarkConcurrent_StrStore_cc_DWHTMap(b *testing.B) {
 	b.ReportAllocs()
 	m := cc.NewDWHTMap[string, int]()
@@ -1114,6 +1199,25 @@ func BenchmarkConcurrent_StrStore_RWShardedMap(b *testing.B) {
 // ============================================================================
 // String Key - Load (pre-populated data)
 // ============================================================================
+
+func BenchmarkConcurrent_StrLoad_cc_V6Map(b *testing.B) {
+	m := cc.NewV6Map[string, int]()
+	for i, key := range preGenStringKeys {
+		m.Store(key, i)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(runtime_cheaprand()) % benchKeyCount
+		for pb.Next() {
+			key := preGenStringKeys[i]
+			_, _ = m.Load(key)
+			i = keyIndex(i + 1)
+		}
+	})
+}
+
 func BenchmarkConcurrent_StrLoad_cc_DWHTMap(b *testing.B) {
 	m := cc.NewDWHTMap[string, int]()
 	for i, key := range preGenStringKeys {
@@ -1333,6 +1437,24 @@ func BenchmarkConcurrent_StrLoad_RWShardedMap(b *testing.B) {
 // ============================================================================
 // String Key - Delete
 // ============================================================================
+func BenchmarkConcurrent_StrDelete_cc_V6Map(b *testing.B) {
+	m := cc.NewV6Map[string, int]()
+	for i, key := range preGenStringKeys {
+		m.Store(key, i)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(runtime_cheaprand()) % benchKeyCount
+		for pb.Next() {
+			key := preGenStringKeys[i]
+			m.Delete(key)
+			i = keyIndex(i + 1)
+		}
+	})
+}
+
 func BenchmarkConcurrent_StrDelete_cc_DWHTMap(b *testing.B) {
 	m := cc.NewDWHTMap[string, int]()
 	for i, key := range preGenStringKeys {
@@ -1552,6 +1674,22 @@ func BenchmarkConcurrent_StrDelete_RWShardedMap(b *testing.B) {
 // ============================================================================
 // String Key - Range
 // ============================================================================
+
+func BenchmarkConcurrent_StrRange_cc_V6Map(b *testing.B) {
+	m := cc.NewV6Map[string, int]()
+	for i, key := range preGenStringKeys[:1000] {
+		m.Store(key, i)
+	}
+	b.ReportAllocs()
+	runtime.GC()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m.Range(func(k string, v int) bool { return true })
+		}
+	})
+}
+
 func BenchmarkConcurrent_StrRange_cc_DWHTMap(b *testing.B) {
 	m := cc.NewDWHTMap[string, int]()
 	for i, key := range preGenStringKeys[:1000] {
