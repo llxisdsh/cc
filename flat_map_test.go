@@ -11,47 +11,46 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unsafe"
 )
 
 // ============================================================================
 // go1.22
 // ============================================================================
 
-func TestFlatMap_BucketOfStructSize(t *testing.T) {
-	t.Logf("CacheLineSize : %d", cacheLineSize)
-	t.Logf("entriesPerBucket : %d", entriesPerBucket)
+// func TestFlatMap_BucketOfStructSize(t *testing.T) {
+// 	t.Logf("CacheLineSize : %d", cacheLineSize)
+// 	t.Logf("entriesPerBucket : %d", entriesPerBucket)
 
-	size := unsafe.Sizeof(FlatMap[int, int]{})
-	t.Log("FlatMap size:", size)
-	if size != cacheLineSize {
-		t.Logf("FlatMap doesn't meet CacheLineSize: %d", size)
-	}
+// 	size := unsafe.Sizeof(FlatMap[int, int]{})
+// 	t.Log("FlatMap size:", size)
+// 	if size != cacheLineSize {
+// 		t.Logf("FlatMap doesn't meet CacheLineSize: %d", size)
+// 	}
 
-	size = unsafe.Sizeof(flatRebuildState[int, int]{})
-	t.Log("flatRebuildState size:", size)
-	if size != cacheLineSize {
-		t.Logf("flatRebuildState doesn't meet CacheLineSize: %d", size)
-	}
+// 	size = unsafe.Sizeof(flatRebuildState[int, int]{})
+// 	t.Log("flatRebuildState size:", size)
+// 	if size != cacheLineSize {
+// 		t.Logf("flatRebuildState doesn't meet CacheLineSize: %d", size)
+// 	}
 
-	size = unsafe.Sizeof(flatTable[int, int]{})
-	t.Log("flatTable size:", size)
-	if size != cacheLineSize {
-		t.Logf("flatTable doesn't meet CacheLineSize: %d", size)
-	}
+// 	size = unsafe.Sizeof(flatTable[int, int]{})
+// 	t.Log("flatTable size:", size)
+// 	if size != cacheLineSize {
+// 		t.Logf("flatTable doesn't meet CacheLineSize: %d", size)
+// 	}
 
-	size = unsafe.Sizeof(flatBucketNoHash[int, int]{})
-	t.Log("flatBucketNoHash size:", size)
-	if size != cacheLineSize {
-		t.Logf("flatBucketNoHash doesn't meet CacheLineSize: %d", size)
-	}
+// 	size = unsafe.Sizeof(flatBucketNoHash[int, int]{})
+// 	t.Log("flatBucketNoHash size:", size)
+// 	if size != cacheLineSize {
+// 		t.Logf("flatBucketNoHash doesn't meet CacheLineSize: %d", size)
+// 	}
 
-	size = unsafe.Sizeof(flatBucketWithHash[int, int]{})
-	t.Log("flatBucketWithHash size:", size)
-	if size != cacheLineSize {
-		t.Logf("flatBucketWithHash doesn't meet CacheLineSize: %d", size)
-	}
-}
+// 	size = unsafe.Sizeof(flatBucketWithHash[int, int]{})
+// 	t.Log("flatBucketWithHash size:", size)
+// 	if size != cacheLineSize {
+// 		t.Logf("flatBucketWithHash doesn't meet CacheLineSize: %d", size)
+// 	}
+// }
 
 // TestFlatMap_BasicOperations tests basic Load and Compute operations
 func TestFlatMap_BasicOperations(t *testing.T) {

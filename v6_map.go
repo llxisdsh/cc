@@ -83,9 +83,9 @@ const (
 // are kept in a separate flat array and addressed by bucket/lane, so probing
 // stays compact while key/value storage remains contiguous. Reads use a bucket
 // version snapshot; writes publish through a short per-bucket writing window,
-// and resize freezes old buckets cooperatively. Like [OFHTMap] and [FlatMap],
-// entry payloads are copied through SeqLockSlot so weak-memory architectures
-// do not move large key/value reads outside the version-checked window.
+// and resize freezes old buckets cooperatively. Like [OFHTMap],entry payloads
+// are copied through SeqLockSlot so weak-memory architectures do not move
+// large key/value reads outside the version-checked window.
 //
 // Integer keys use the fast integer hash path. Other comparable key shapes
 // keep Go's built-in hasher to preserve == semantics. Use [WithKeyHasherUnsafe]
@@ -685,7 +685,7 @@ func (m *V6Map[K, V]) Rebuild(fn func(m *MapRebuild[K, V])) {
 			continue
 		}
 		m.drainResize()
-		fn(noEscape(&MapRebuild[K, V]{v6: m}))
+		fn(noEscape(&MapRebuild[K, V]{f: m}))
 		m.endRebuild(rs)
 		return
 	}

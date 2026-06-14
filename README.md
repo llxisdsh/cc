@@ -19,15 +19,15 @@ State-of-the-art concurrent map implementations, delivering extreme performance 
 | Component                        | Description                                                                      | Ideal Use Case                                                                   |
 | -------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | [**Map**](./map.go)              | **Lock-free reads**, fine-grained write locking. Drop-in `sync.Map` replacement. | General purpose, mixed R/W workloads.                                            |
-| [**FlatMap**](./flat_map.go)     | **Seqlock-based**, inline open-addressing. Heavily optimized for cold starts.    | Cache-sensitive, extremely low tail latency.                                     |
+| [**FlatMap**](./flat_map.go)     | **Flat-storage map**, compact open-addressing with low GC pressure.              | Performance-sensitive workloads that benefit from fast reads and iteration.      |
 | [**SkipMap**](./skip_map.go)     | **Ordered map**, providing lock-free concurrent lookups, reads, and iteration.   | Highly concurrent ordered data access.                                           |
 | [**FunnelMap**](./funnel_map.go) | **Highly robust**, utilizes SkipMap for collisions and PLocal for size tracking. | Extreme resilience against poor hash distributions without degradation.          |
 | [**OFHTMap**](./ofht_map.go)     | **Experimental**, optimistic open-addressing with inline key/value storage.      | Lowest GC overhead for allocation-sensitive workloads.                           |
 | [**DWHTMap**](./dwht_map.go)     | **Experimental**, fully lock-free open-addressing with DWCAS slot publication.   | Low-latency reads and writes under high concurrency.                             |
-| [**V28Map**](./v28_map.go)       | **Experimental**, AVX2/SIMD-probed open-addressing with separate flat entries.   | Minimal GC pressure, high load factor, and compact memory use on supported CPUs. |
+| [**V28Map**](./v28_map.go)       | **Experimental**, SIMD-probed open-addressing with separate entries.             | High load factor and compact memory use on amd64 AVX2/SIMD builds only.         |
 | [**V6Map**](./v6_map.go)         | **Experimental**, SWAR-probed open-addressing with compact 6-slot buckets.       | Low-GC flat storage with portable fast probing and moderate load factor.         |
 
-> **Note**: `Map` and `FlatMap` are streamlined versions of the high-performance [llxisdsh/pb](https://github.com/llxisdsh/pb) project. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [benchmark](./benchmark) directory or the upstream repository.
+> **Note**: `Map` is a streamlined version of the high-performance [llxisdsh/pb](https://github.com/llxisdsh/pb) map. `FlatMap` is the stable flat-storage API, currently backed by `V6Map`. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [benchmark](./benchmark) directory.
 
 ### ⚡ Processor Local
 
@@ -86,7 +86,7 @@ func main() {
     var m cc.Map[string, int]
     m.Store("foo", 1)
 
-    // 2. FlatMap (Seqlock-based, inline open-addressing)
+    // 2. FlatMap (Flat-storage map)
     fm := cc.NewFlatMap[string, int](cc.WithCapacity(1000))
     fm.Store("bar", 2)
 

@@ -5,7 +5,7 @@ import (
 )
 
 // MapRebuild provides access to map operations during a rebuild.
-// It wraps a Map, a FlatMap, or a V6Map, delegating operations to the underlying map.
+// It delegates operations to the map currently being rebuilt.
 // All operations on this struct ignore the rebuild hint (assuming the caller holds the rebuild lock).
 //
 // WARNING:
@@ -13,9 +13,8 @@ import (
 // - Not safe across goroutines.
 // 警告：仅在回调期间有效；不可保存或让其指针逃逸，也不可跨协程使用。
 type MapRebuild[K comparable, V any] struct {
-	m  *Map[K, V]
-	f  *FlatMap[K, V]
-	v6 *V6Map[K, V]
+	m *Map[K, V]
+	f *FlatMap[K, V]
 }
 
 // Load returns the value stored in the map for a key, or nil if no
@@ -24,9 +23,6 @@ type MapRebuild[K comparable, V any] struct {
 func (m *MapRebuild[K, V]) Load(key K) (value V, ok bool) {
 	if m.m != nil {
 		return m.m.Load(key)
-	}
-	if m.v6 != nil {
-		return m.v6.Load(key)
 	}
 	return m.f.Load(key)
 }
@@ -112,9 +108,6 @@ func (m *MapRebuild[K, V]) Compute(
 	if m.m != nil {
 		return m.m.compute(&key, unsafe.Pointer(&fn), computeInit|computeIgnoreHint)
 	}
-	if m.v6 != nil {
-		return m.v6.compute(&key, unsafe.Pointer(&fn), computeInit|computeIgnoreHint)
-	}
 	return m.f.compute(&key, unsafe.Pointer(&fn), computeInit|computeIgnoreHint)
 }
 
@@ -123,10 +116,6 @@ func (m *MapRebuild[K, V]) Compute(
 func (m *MapRebuild[K, V]) Range(yield func(key K, value V) bool) {
 	if m.m != nil {
 		m.m.Range(yield)
-		return
-	}
-	if m.v6 != nil {
-		m.v6.Range(yield)
 		return
 	}
 	m.f.Range(yield)
@@ -145,10 +134,6 @@ func (m *MapRebuild[K, V]) ComputeRange(yield func(e *MapEntry[K, V]) bool) {
 		m.m.computeRange(yield, true)
 		return
 	}
-	if m.v6 != nil {
-		m.v6.computeRange(yield, true)
-		return
-	}
 	m.f.computeRange(yield, true)
 }
 
@@ -165,9 +150,6 @@ func (m *MapRebuild[K, V]) Size() int {
 	if m.m != nil {
 		return m.m.Size()
 	}
-	if m.v6 != nil {
-		return m.v6.Size()
-	}
 	return m.f.Size()
 }
 
@@ -176,9 +158,6 @@ func (m *MapRebuild[K, V]) Size() int {
 func (m *MapRebuild[K, V]) ToMap(limit ...int) map[K]V {
 	if m.m != nil {
 		return m.m.ToMap(limit...)
-	}
-	if m.v6 != nil {
-		return m.v6.ToMap(limit...)
 	}
 	return m.f.ToMap(limit...)
 }

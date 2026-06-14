@@ -64,9 +64,6 @@ func TestIntThroughputStable(t *testing.T) {
 		// stableLoadOrStoreFactory("cc.V28Map", func(capHint int) *cc.V28Map[int, int] {
 		// 	return cc.NewV28Map[int, int](cc.WithCapacity(capHint))
 		// }),
-		stableLoadOrStoreFactory("cc.V6Map", func(capHint int) *cc.V6Map[int, int] {
-			return cc.NewV6Map[int, int](cc.WithCapacity(capHint))
-		}),
 	}
 
 	modes := []struct {
