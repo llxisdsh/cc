@@ -187,22 +187,22 @@ func (c *PerfPLocalUintptrCounterN) Value() uintptr {
 	return c.p.Value(0)
 }
 
-// 6. FixedLocalCounterN Counter (Fixed-size, P-mapped slots)
-type PerfFixedLocalCounterN struct {
-	c cc.FixedLocalCounterN
+// 6. PooledLocalCounterN Counter (Fixed-size, P-mapped slots)
+type PerfPooledLocalCounterN struct {
+	c cc.PooledLocalCounterN
 }
 
-func NewPerfFixedLocalCounterN(slotCountPower2 uintptr) *PerfFixedLocalCounterN {
-	return &PerfFixedLocalCounterN{
-		c: cc.NewFixedLocalCounterN(slotCountPower2),
+func NewPerfPooledLocalCounterN(slotCountPower2 uintptr) *PerfPooledLocalCounterN {
+	return &PerfPooledLocalCounterN{
+		c: cc.NewPooledLocalCounterN(slotCountPower2),
 	}
 }
 
-func (c *PerfFixedLocalCounterN) Add(delta uintptr) {
+func (c *PerfPooledLocalCounterN) Add(delta uintptr) {
 	c.c.Add(0, delta)
 }
 
-func (c *PerfFixedLocalCounterN) Value() uintptr {
+func (c *PerfPooledLocalCounterN) Value() uintptr {
 	return c.c.Value(0)
 }
 
@@ -292,9 +292,8 @@ func BenchmarkPLocalCounterN_Add(b *testing.B) {
 	})
 }
 
-func BenchmarkFixedLocalCounterN_Add(b *testing.B) {
-	cpus := runtime.GOMAXPROCS(0)
-	c := NewPerfFixedLocalCounterN(uintptr(nextPowOf2(cpus)))
+func BenchmarkPooledLocalCounterN_Add(b *testing.B) {
+	c := NewPerfPooledLocalCounterN(1)
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -390,9 +389,8 @@ func BenchmarkPLocalCounterN_Value(b *testing.B) {
 	})
 }
 
-func BenchmarkFixedLocalCounterN_Value(b *testing.B) {
-	cpus := runtime.GOMAXPROCS(0)
-	l := cc.NewFixedLocalCounterN(uintptr(nextPowOf2(cpus)))
+func BenchmarkPooledLocalCounterN_Value(b *testing.B) {
+	l := cc.NewPooledLocalCounterN(1)
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {

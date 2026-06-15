@@ -115,7 +115,7 @@ type v28Table[K comparable, V any] struct {
 	probeLimit    uintptr
 	stripeCap     int
 	growCap       int
-	size          FixedLocalCounterN
+	size          PooledLocalCounterN
 	chunkSz       uintptr
 	chunks        uint32
 	allocating    atomic.Uint32
@@ -1200,11 +1200,10 @@ func newV28Table[K comparable, V any](bucketLen uintptr) *v28Table[K, V] {
 	slotLen := bucketLen * v28SlotsPerBucket
 	growCap := int(float64(slotLen) * v28LoadFactor)
 	cpus := maxProcs()
-	sizeLen := calcSizeLen(bucketLen, cpus)
 	chunks, chunkSz := v28ResizeChunks(bucketLen, cpus)
 	buckets, bucketBacking := makeV28Buckets(bucketLen)
 	entries := makeUnsafeSlice[v28Entry[K, V]](slotLen)
-	activeSizeSlots := min(cpus, sizeLen)
+	activeSizeSlots := cpus
 	table := &v28Table[K, V]{
 		buckets:       buckets,
 		entries:       entries,
@@ -1212,7 +1211,7 @@ func newV28Table[K comparable, V any](bucketLen uintptr) *v28Table[K, V] {
 		probeLimit:    min(bucketLen, calcProbeLimit(bucketLen)),
 		stripeCap:     (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:       growCap,
-		size:          NewFixedLocalCounterN(sizeLen),
+		size:          NewPooledLocalCounterN(v28CntTombstones + 1),
 		chunks:        chunks,
 		chunkSz:       chunkSz,
 		bucketBacking: bucketBacking,

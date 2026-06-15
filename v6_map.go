@@ -115,7 +115,7 @@ type v6Table[K comparable, V any] struct {
 	probeLimit   uintptr
 	stripeCap    int
 	growCap      int
-	size         FixedLocalCounterN
+	size         PooledLocalCounterN
 	chunkSz      uintptr
 	chunks       uint32
 	allocating   atomic.Uint32
@@ -1511,11 +1511,10 @@ func newV6Table[K comparable, V any](bucketLen uintptr) *v6Table[K, V] {
 	slotLen := bucketLen * v6SlotsPerBucket
 	growCap := int(float64(slotLen) * v6LoadFactor)
 	cpus := maxProcs()
-	sizeLen := calcSizeLen(bucketLen, cpus)
 	chunks, chunkSz := v6ResizeChunks(bucketLen, cpus)
 	buckets := makeUnsafeSlice[v6Bucket](bucketLen)
 	entries := makeUnsafeSlice[SeqLockSlot[v6Entry[K, V]]](slotLen)
-	activeSizeSlots := min(cpus, sizeLen)
+	activeSizeSlots := cpus
 	table := &v6Table[K, V]{
 		buckets:    buckets,
 		entries:    entries,
@@ -1523,7 +1522,7 @@ func newV6Table[K comparable, V any](bucketLen uintptr) *v6Table[K, V] {
 		probeLimit: min(bucketLen, calcProbeLimit(bucketLen)),
 		stripeCap:  (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:    growCap,
-		size:       NewFixedLocalCounterN(sizeLen),
+		size:       NewPooledLocalCounterN(v6CntTombstones + 1),
 		chunks:     chunks,
 		chunkSz:    chunkSz,
 	}

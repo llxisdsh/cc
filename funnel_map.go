@@ -54,7 +54,7 @@ type funnelTable[K cmp.Ordered, V any] struct {
 	overflow  SkipMap[K, V]
 	stripeCap int
 	growCap   int
-	size      FixedLocalCounterN // counter 0 tracks bucket-resident entries
+	size      PooledLocalCounterN // counter 0 tracks bucket-resident entries
 }
 
 // funnelBucket represents a hash table bucket with cache-line alignment.
@@ -123,14 +123,13 @@ func newFunnelTable[K cmp.Ordered, V any](tableLen uintptr) *funnelTable[K, V] {
 	const capFactor = float64(fEntriesPerBucket) * loadFactor
 	growCap := int(float64(tableLen) * capFactor)
 	cpus := maxProcs()
-	sizeLen := calcSizeLen(tableLen, cpus)
-	activeSizeSlots := min(cpus, sizeLen)
+	activeSizeSlots := cpus
 	table := &funnelTable[K, V]{
 		buckets:   makeUnsafeSlice[funnelBucket](tableLen),
 		mask:      tableLen - 1,
 		growCap:   growCap,
 		stripeCap: (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
-		size:      NewFixedLocalCounterN(sizeLen),
+		size:      NewPooledLocalCounterN(1),
 	}
 	return table
 }

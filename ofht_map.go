@@ -92,7 +92,7 @@ type ofhtTable[K comparable, V any] struct {
 	probeLimit   uintptr
 	stripeCap    int
 	growCap      int
-	size         FixedLocalCounterN
+	size         PooledLocalCounterN
 	chunkSz      uintptr
 	chunks       uint32
 	allocating   atomic.Uint32 // 0: no one is allocating, 1: allocating
@@ -150,7 +150,7 @@ const (
 
 const (
 	// occupied tracks physical slots that are no longer Empty.
-	ofhtCntOccupied int = iota
+	ofhtCntOccupied = iota
 	ofhtCntTombstones
 )
 
@@ -1054,16 +1054,15 @@ func newOFHTTable[K comparable, V any](slotLen uintptr) *ofhtTable[K, V] {
 	probeLimit := min(slotLen, calcProbeLimit(slotLen))
 	growCap := int(float64(slotLen) * ofhtLoadFactor)
 	cpus := maxProcs()
-	sizeLen := calcSizeLen(slotLen, cpus)
 	chunks, chunkSz := ofhtResizeChunks(slotLen, cpus)
-	activeSizeSlots := min(cpus, sizeLen)
+	activeSizeSlots := cpus
 	table := &ofhtTable[K, V]{
 		slots:      makeUnsafeSlice[ofhtSlot[K, V]](slotLen),
 		mask:       slotLen - 1,
 		probeLimit: probeLimit,
 		stripeCap:  (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:    growCap,
-		size:       NewFixedLocalCounterN(sizeLen),
+		size:       NewPooledLocalCounterN(ofhtCntTombstones + 1),
 		chunks:     chunks,
 		chunkSz:    chunkSz,
 	}

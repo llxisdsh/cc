@@ -54,7 +54,7 @@ type rebuildState struct {
 type mapTable struct {
 	buckets   unsafeSlice[bucket]
 	mask      uintptr
-	size      FixedLocalCounterN
+	size      PooledLocalCounterN
 	stripeCap int
 	growCap   int
 }
@@ -145,14 +145,13 @@ func (m *Map[K, V]) init(
 }
 
 func newMapTable(tableLen, cpus uintptr) *mapTable {
-	sizeLen := calcSizeLen(tableLen, cpus)
 	const capFactor = float64(entriesPerBucket) * loadFactor
 	growCap := int(float64(tableLen) * capFactor)
-	activeSizeSlots := min(cpus, sizeLen)
+	activeSizeSlots := cpus
 	return &mapTable{
 		buckets:   makeUnsafeSlice[bucket](tableLen),
 		mask:      tableLen - 1,
-		size:      NewFixedLocalCounterN(sizeLen),
+		size:      NewPooledLocalCounterN(1),
 		stripeCap: (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:   growCap,
 	}

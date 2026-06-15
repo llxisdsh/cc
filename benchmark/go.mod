@@ -8,15 +8,15 @@ require (
 	github.com/Snawoot/lfmap v0.1.2
 	github.com/alphadose/haxmap v1.4.1
 	github.com/fufuok/cmap v1.19.3
-	github.com/jeremiah-masters/dlht v0.0.0-20260507233412-e7a3bb1532f6
-	github.com/llxisdsh/cc v0.0.0
+	github.com/jeremiah-masters/dlht v0.0.0-20260611042516-5d42ede3c230
+	github.com/llxisdsh/cc v0.0.0-00010101000000-000000000000
 	github.com/llxisdsh/pb v1.5.25
 	github.com/mhmtszr/concurrent-swiss-map v1.0.10
 	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/zhangyunhao116/skipmap v0.10.1
-	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.44.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/sys v0.46.0
 )
 
 require (

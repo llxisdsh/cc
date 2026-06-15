@@ -47,9 +47,8 @@ type mapStats struct {
 	// to the internal atomic counter. In the case of concurrent map
 	// modifications, this number may be different from Size.
 	Counter int
-	// CounterLen is the number of internal atomic counter stripes.
-	// This number may grow with the map capacity to improve
-	// multithreaded scalability.
+	// CounterLen is the number of shared P-local counter stripes backing this
+	// table's pooled counter.
 	CounterLen uintptr
 	// MinEntries is the minimum number of entries per a chain of
 	// buckets, i.e., a root bucket and its chained buckets.
@@ -4202,6 +4201,7 @@ func TestMapDoesNotLoseEntriesOnResize(t *testing.T) {
 
 func TestMapStats(t *testing.T) {
 	m := NewMap[int, int]()
+	expectedCounterLen := nextPowOf2(uintptr(runtime.GOMAXPROCS(0)))
 
 	stats := m.stats()
 	if stats.RootBuckets != minTableLen {
@@ -4222,7 +4222,7 @@ func TestMapStats(t *testing.T) {
 	if stats.Counter != 0 {
 		t.Fatalf("unexpected counter: %s", stats.String())
 	}
-	if stats.CounterLen != 1 {
+	if stats.CounterLen != expectedCounterLen {
 		t.Fatalf("unexpected counter length: %s", stats.String())
 	}
 
@@ -4250,7 +4250,7 @@ func TestMapStats(t *testing.T) {
 	if stats.Counter != 200 {
 		t.Fatalf("unexpected counter: %s", stats.String())
 	}
-	if stats.CounterLen != 1 {
+	if stats.CounterLen != expectedCounterLen {
 		t.Fatalf("unexpected counter length: %s", stats.String())
 	}
 }

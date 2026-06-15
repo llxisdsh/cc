@@ -380,24 +380,6 @@ func (p *PLocalCounterN) Add(i int, delta uintptr) uintptr {
 	return p.slowGet().slot(i).Add(delta)
 }
 
-func (p *PLocalCounterN) Add2(i int, deltaI uintptr, j int, deltaJ uintptr) {
-	shards := p.shards.Load()
-	if shards != nil {
-		pid := runtime_procPin()
-		if pid < shards.len {
-			s := *shards.slice.At(uintptr(pid))
-			s.slot(i).Add(deltaI)
-			s.slot(j).Add(deltaJ)
-			runtime_procUnpin()
-			return
-		}
-		runtime_procUnpin()
-	}
-	s := p.slowGet()
-	s.slot(i).Add(deltaI)
-	s.slot(j).Add(deltaJ)
-}
-
 // Get returns counter i from the current P-local cache-line slot.
 func (p *PLocalCounterN) Get(i int) uintptr {
 	shards := p.shards.Load()
@@ -642,24 +624,6 @@ func (p *PLocalCounter64N) Add(i int, delta uint64) uint64 {
 	return p.slowGet().slot(i).Add(delta)
 }
 
-func (p *PLocalCounter64N) Add2(i int, deltaI uint64, j int, deltaJ uint64) {
-	shards := p.shards.Load()
-	if shards != nil {
-		pid := runtime_procPin()
-		if pid < shards.len {
-			s := *shards.slice.At(uintptr(pid))
-			s.slot(i).Add(deltaI)
-			s.slot(j).Add(deltaJ)
-			runtime_procUnpin()
-			return
-		}
-		runtime_procUnpin()
-	}
-	s := p.slowGet()
-	s.slot(i).Add(deltaI)
-	s.slot(j).Add(deltaJ)
-}
-
 // Get returns counter i from the current P-local cache-line slot.
 func (p *PLocalCounter64N) Get(i int) uint64 {
 	shards := p.shards.Load()
@@ -780,143 +744,219 @@ func (p *PLocalCounter64N) Clear() {
 }
 
 // =============================================================================
-// FixedLocalCounterN
+// PooledLocalCounterN
 // =============================================================================
 
-// FixedLocalCounterN is a fixed-size, P-indexed group of uintptr counters.
+const (
+	// pooledLocalCounterNRowBytes is one matrix row per P slot. It is exactly
+	// one cache line so different P slots do not false-share.
+	pooledLocalCounterNRowBytes = opt.CacheLineSize_
+
+	// pooledLocalCounterNRowShift is log2(pooledLocalCounterNRowBytes).
+	// Supported cache-line sizes are 32/64/128/256, so this constant maps them
+	// to 5/6/7/8 without runtime bits.TrailingZeros work.
+	pooledLocalCounterNRowShift = 5 + pooledLocalCounterNRowBytes/64 - pooledLocalCounterNRowBytes/256
+
+	// pooledLocalCounterNChunkLen is the number of uintptr counters that fit in
+	// one cache-line row. It is 8 on 64-byte cache-line 64-bit platforms and 16
+	// on 64-byte cache-line 32-bit platforms.
+	pooledLocalCounterNChunkLen = pooledLocalCounterNRowBytes / unsafe.Sizeof(atomic.Uintptr{})
+)
+
+// pooledLocalCounterNPool allocates P-local uintptr counter groups from shared
+// matrix chunks. Each chunk stores one cache-line row per P slot, so Add can
+// compute a counter address directly and Value can scan one counter with a
+// fixed cache-line stride.
 //
-// It is intended for table-owned hot counters: construction chooses a fixed
-// number of cache-line slots, and each Add maps the current P to a slot with
-// pid&mask. When the slot count is below GOMAXPROCS, multiple Ps may share a
-// slot; when it reaches GOMAXPROCS, it behaves like a full P-local counter.
-//
-// The zero value can be embedded and then initialized with Init. Add/Get require
-// prior initialization; Value/Reset/Clear tolerate the zero value.
-type FixedLocalCounterN struct {
-	slots   unsafeSlice[localCounterNSlot]
-	mask    uintptr
-	backing unsafe.Pointer // keeps backing memory alive if slots is non-nil
+// The zero value is ready to use.
+type pooledLocalCounterNPool struct {
+	allocMu sync.Mutex
+	next    uintptr // next small-counter id in pooled cache-line chunks
+
+	mask      uintptr
+	slotCount uintptr
+	chunks    []*pooledLocalCounterNChunk
 }
 
-type localCounterNSlot struct {
-	counters [PLocalCounterNLen]atomic.Uintptr
+type pooledLocalCounterNChunk struct {
+	counters unsafe.Pointer
+	backing  unsafe.Pointer
 }
 
-func (s *localCounterNSlot) slot(i int) *atomic.Uintptr {
-	return (*atomic.Uintptr)(unsafe.Add(unsafe.Pointer(&s.counters), uintptr(i)*unsafe.Sizeof(atomic.Uintptr{})))
-}
-
-// NewFixedLocalCounterN creates a fixed-size local counter group with slotCountPower2
-// cache-line slots.
+// PooledLocalCounterN is a P-local group of uintptr counters backed by a shared
+// pool. Each allocated group owns n logical counters, and each active P stores
+// its own atomic.Uintptr for every logical counter.
 //
-// slotCountPower2 must be a power of two. A zero value leaves the counter
-// uninitialized.
-func NewFixedLocalCounterN(slotCountPower2 uintptr) FixedLocalCounterN {
-	var c FixedLocalCounterN
-	c.Init(slotCountPower2)
-	return c
+// PooledLocalCounterN must be created by NewPooledLocalCounterN; its
+// zero value is not usable.
+type PooledLocalCounterN struct {
+	base unsafe.Pointer
+	mask uintptr
+	n    uintptr
 }
 
-// Size returns the number of counter slots.
+// NewPooledLocalCounterN allocates n logical uintptr counters from p.
 //
-//go:nosplit
-func (c *FixedLocalCounterN) Size() uintptr {
-	if c.slots.ptr == nil {
+// n must be a power of two and must not exceed the number of uintptr counters
+// that fit in one cache line. Counter groups share a matrix chunk across maps:
+// each P owns one cache-line row, and Value scans the same counter with a fixed
+// cache-line stride so hardware prefetch can help.
+//
+// The P slot count is fixed at the pool's first allocation from GOMAXPROCS(0),
+// rounded up to a power of two. If GOMAXPROCS grows later, Add/Get remain safe
+// by mapping pid with a mask, but multiple Ps may share a slot.
+//
+// Memory layout for one chunk:
+//
+//	                         Add(i, delta) / Value(i)
+//	                  i=0        i=1               i=chunkLen-1
+//	               ┌────────┬────────┬───────┬────────┐
+//	pid&mask == 0  │ ctr[0] │ ctr[1] │  ...  │ ctr[n] │  ← one cache-line row
+//	               ├────────┼────────┼───────┼────────┤
+//	pid&mask == 1  │ ctr[0] │ ctr[1] │  ...  │ ctr[n] │  ← +1 cache line
+//	               ├────────┼────────┼───────┼────────┤
+//	...            │  ...   │  ...   │  ...  │  ...   │
+//	               ├────────┼────────┼───────┼────────┤
+//	pid&mask == m  │ ctr[0] │ ctr[1] │  ...  │ ctr[n] │  ← +m cache lines
+//	               └────────┴────────┴───────┴────────┘
+//
+// A PooledLocalCounterN handle points base at its first counter id inside a
+// chunk. Add maps the current P to a row with pid&mask and writes ctr[i].
+// Different rows are one cache line apart, so different P slots do not
+// false-share. Value(i) walks one vertical column with a cache-line stride.
+func NewPooledLocalCounterN(n uintptr) PooledLocalCounterN {
+	return defaultPooledLocalCounterNPool.New(n)
+}
+
+var defaultPooledLocalCounterNPool pooledLocalCounterNPool
+
+func (p *pooledLocalCounterNPool) New(n uintptr) PooledLocalCounterN {
+	if n == 0 {
+		panic("PooledLocalCounterN: n must be greater than zero")
+	}
+	if n&(n-1) != 0 {
+		panic("PooledLocalCounterN: n must be a power of two")
+	}
+	if n > pooledLocalCounterNChunkLen {
+		panic("PooledLocalCounterN: n exceeds cache-line chunk length")
+	}
+
+	p.allocMu.Lock()
+	if p.slotCount == 0 {
+		// Freeze the P slot count once per pool. Later GOMAXPROCS growth is
+		// handled by pid&mask, which is safe but may introduce slot sharing.
+		p.slotCount = nextPowOf2(uintptr(runtime.GOMAXPROCS(0)))
+		p.mask = p.slotCount - 1
+	}
+	mask := p.mask
+	slotCount := p.slotCount
+	rowBytes := opt.CacheLineSize_
+
+	// Keep every allocation inside a single cache-line row chunk. If the
+	// current chunk cannot fit n counters, skip the remainder and start at the
+	// next chunk so base+i never crosses into a different backing object.
+	if chunkOffset := p.next & (pooledLocalCounterNChunkLen - 1); chunkOffset+n > pooledLocalCounterNChunkLen {
+		p.next += pooledLocalCounterNChunkLen - chunkOffset
+	}
+
+	// p.next is counted in logical counter ids. Every chunk contains
+	// pooledLocalCounterNChunkLen ids, and each id has one counter per P row.
+	chunkIdx := p.next / pooledLocalCounterNChunkLen
+	for uintptr(len(p.chunks)) <= chunkIdx {
+		// One chunk is a matrix:
+		//   row 0: id0 id1 ...
+		//   row 1: id0 id1 ...
+		// Rows are cache-line aligned/strided so Add avoids false sharing and
+		// Value walks one id with a predictable cache-line stride.
+		backing := make([]byte, slotCount*rowBytes+opt.CacheLineSize_-1)
+		basePtr := unsafe.Pointer(unsafe.SliceData(backing))
+		base := uintptr(basePtr)
+		aligned := (base + opt.CacheLineSize_ - 1) &^ (opt.CacheLineSize_ - 1)
+		p.chunks = append(p.chunks, &pooledLocalCounterNChunk{
+			counters: unsafe.Add(basePtr, aligned-base),
+			backing:  basePtr,
+		})
+	}
+	chunk := p.chunks[chunkIdx]
+
+	// Fold this group's id offset into base. Hot paths then address counter i as
+	// base + pid*rowBytes + i*sizeof(uintptr), with no separate offset field.
+	offset := (p.next & (pooledLocalCounterNChunkLen - 1)) * unsafe.Sizeof(atomic.Uintptr{})
+	p.next += n
+	p.allocMu.Unlock()
+
+	return PooledLocalCounterN{
+		base: unsafe.Add(chunk.counters, offset),
+		mask: mask,
+		n:    n,
+	}
+}
+
+// Add adds delta to counter i in the current P-local slot and returns that
+// slot's new value.
+func (c *PooledLocalCounterN) Add(i uintptr, delta uintptr) uintptr {
+	rawPid := uintptr(runtime_procPin())
+	pid := rawPid & c.mask
+	p := (*uintptr)(unsafe.Add(c.base, (pid<<pooledLocalCounterNRowShift)+i*unsafe.Sizeof(atomic.Uintptr{})))
+	v := atomic.AddUintptr(p, delta)
+	runtime_procUnpin()
+	return v
+}
+
+// Get returns counter i from the current P-local slot.
+func (c *PooledLocalCounterN) Get(i uintptr) uintptr {
+	pid := uintptr(runtime_procPin()) & c.mask
+	counter := (*atomic.Uintptr)(unsafe.Add(c.base, (pid<<pooledLocalCounterNRowShift)+i*unsafe.Sizeof(atomic.Uintptr{})))
+	v := counter.Load()
+	runtime_procUnpin()
+	return v
+}
+
+// Value returns the aggregated value of counter i across all P-local slots.
+//
+// Note: The result is an approximation if concurrent Adds are happening.
+func (c *PooledLocalCounterN) Value(i uintptr) uintptr {
+	var sum uintptr
+	offset := i * unsafe.Sizeof(atomic.Uintptr{})
+	const rowBytes = uintptr(1) << pooledLocalCounterNRowShift
+	ptr := unsafe.Add(c.base, offset)
+	for pid := uintptr(0); pid <= c.mask; pid++ {
+		sum += (*atomic.Uintptr)(ptr).Load()
+		ptr = unsafe.Add(ptr, rowBytes)
+	}
+	return sum
+}
+
+// Reset atomically reads counter i and resets it to zero in all P-local slots.
+func (c *PooledLocalCounterN) Reset(i uintptr) uintptr {
+	var sum uintptr
+	offset := i * unsafe.Sizeof(atomic.Uintptr{})
+	const rowBytes = uintptr(1) << pooledLocalCounterNRowShift
+	ptr := unsafe.Add(c.base, offset)
+	for pid := uintptr(0); pid <= c.mask; pid++ {
+		sum += (*atomic.Uintptr)(ptr).Swap(0)
+		ptr = unsafe.Add(ptr, rowBytes)
+	}
+	return sum
+}
+
+// Clear resets this counter group in all allocated P-local slots.
+func (c *PooledLocalCounterN) Clear() {
+	const rowBytes = uintptr(1) << pooledLocalCounterNRowShift
+	for i := uintptr(0); i < c.n; i++ {
+		offset := i * unsafe.Sizeof(atomic.Uintptr{})
+		ptr := unsafe.Add(c.base, offset)
+		for pid := uintptr(0); pid <= c.mask; pid++ {
+			(*atomic.Uintptr)(ptr).Store(0)
+			ptr = unsafe.Add(ptr, rowBytes)
+		}
+	}
+}
+
+// Size returns the number of shared P-local slots in the pool backing c.
+func (c *PooledLocalCounterN) Size() uintptr {
+	if c.base == nil {
 		return 0
 	}
 	return c.mask + 1
-}
-
-// Init initializes a zero-value FixedLocalCounterN with slotCountPower2 cache-line
-// slots.
-//
-// slotCountPower2 must be a power of two. A zero value leaves the counter
-// uninitialized.
-//
-// Init is not safe to call concurrently with Add/Get/Value/Reset/Clear.
-func (c *FixedLocalCounterN) Init(slotCountPower2 uintptr) {
-	if slotCountPower2 == 0 {
-		return
-	}
-	backing := make([]byte, slotCountPower2*opt.CacheLineSize_+opt.CacheLineSize_-1)
-	basePtr := unsafe.Pointer(unsafe.SliceData(backing))
-	base := uintptr(basePtr)
-	aligned := (base + opt.CacheLineSize_ - 1) &^ (opt.CacheLineSize_ - 1)
-	c.slots = unsafeSlice[localCounterNSlot]{
-		ptr: unsafe.Add(basePtr, aligned-base),
-	}
-	c.backing = basePtr
-	c.mask = slotCountPower2 - 1
-}
-
-// Add adds delta to counter i in the current P-mapped slot and returns that
-// slot's new value.
-func (c *FixedLocalCounterN) Add(i int, delta uintptr) uintptr {
-	pid := uintptr(runtime_procPin())
-	s := c.slots.At(pid & c.mask)
-	v := s.slot(i).Add(delta)
-	runtime_procUnpin()
-	return v
-}
-
-// Add2 adds two deltas to two counters in the current P-mapped slot.
-func (c *FixedLocalCounterN) Add2(i int, deltaI uintptr, j int, deltaJ uintptr) {
-	pid := uintptr(runtime_procPin())
-	s := c.slots.At(pid & c.mask)
-	s.slot(i).Add(deltaI)
-	s.slot(j).Add(deltaJ)
-	runtime_procUnpin()
-}
-
-// Get returns counter i from the current P-mapped slot.
-//
-//go:nosplit
-func (c *FixedLocalCounterN) Get(i int) uintptr {
-	pid := uintptr(runtime_procPin())
-	v := c.slots.At(pid & c.mask).slot(i).Load()
-	runtime_procUnpin()
-	return v
-}
-
-// Value returns the aggregated value of counter i across all slots.
-//
-// Note: The result is an approximation if concurrent Adds are happening.
-//
-//go:nosplit
-func (c *FixedLocalCounterN) Value(i int) uintptr {
-	if c.slots.ptr == nil {
-		return 0
-	}
-	var sum uintptr
-	for j := uintptr(0); j <= c.mask; j++ {
-		s := c.slots.At(j)
-		sum += s.slot(i).Load()
-	}
-	return sum
-}
-
-// Reset atomically reads counter i and resets it to zero in all slots.
-func (c *FixedLocalCounterN) Reset(i int) uintptr {
-	if c.slots.ptr == nil {
-		return 0
-	}
-	var sum uintptr
-	for j := uintptr(0); j <= c.mask; j++ {
-		s := c.slots.At(j)
-		sum += s.slot(i).Swap(0)
-	}
-	return sum
-}
-
-// Clear resets every counter in every slot to zero.
-func (c *FixedLocalCounterN) Clear() {
-	if c.slots.ptr == nil {
-		return
-	}
-	for j := uintptr(0); j <= c.mask; j++ {
-		s := c.slots.At(j)
-		for i := range PLocalCounterNLen {
-			s.slot(i).Store(0)
-		}
-	}
 }

@@ -521,55 +521,145 @@ func TestPLocalCounter_Reset(t *testing.T) {
 	}
 }
 
-func TestFixedLocalCounterN_Basic(t *testing.T) {
-	var c FixedLocalCounterN
-	if v := c.Value(0); v != 0 {
-		t.Fatalf("zero Value(0) = %d, want 0", v)
-	}
-	if v := c.Reset(0); v != 0 {
-		t.Fatalf("zero Reset(0) = %d, want 0", v)
-	}
-	c.Clear()
+func TestPooledLocalCounterN_Basic(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	c := pool.New(2)
+	c.Add(0, 10)
+	c.Add(0, 20)
+	c.Add(1, 7)
 
-	c.Init(1)
-	if c.mask != 0 {
-		t.Fatalf("mask after Init(1) = %d, want 0", c.mask)
+	if val := c.Value(0); val != 30 {
+		t.Fatalf("Value(0) = %d, want 30", val)
 	}
-	if v := c.Add(0, 1); v != 1 {
-		t.Fatalf("Add(0, 1) = %d, want 1", v)
+	if val := c.Get(1); val != 7 {
+		t.Fatalf("Get(1) = %d, want 7", val)
 	}
-	c.Add2(0, 2, 1, 3)
-	if v := c.Get(0); v != 3 {
-		t.Fatalf("Get(0) = %d, want 3", v)
+	if val := c.Reset(0); val != 30 {
+		t.Fatalf("Reset(0) = %d, want 30", val)
 	}
-	if v := c.Value(1); v != 3 {
-		t.Fatalf("Value(1) = %d, want 3", v)
-	}
-	if v := c.Reset(0); v != 3 {
-		t.Fatalf("Reset(0) = %d, want 3", v)
-	}
-	if v := c.Value(0); v != 0 {
-		t.Fatalf("Value(0) after Reset = %d, want 0", v)
+	if val := c.Value(0); val != 0 {
+		t.Fatalf("Value(0) after Reset = %d, want 0", val)
 	}
 	c.Clear()
-	if v := c.Value(1); v != 0 {
-		t.Fatalf("Value(1) after Clear = %d, want 0", v)
+	if val := c.Value(1); val != 0 {
+		t.Fatalf("Value(1) after Clear = %d, want 0", val)
 	}
 }
 
-func TestFixedLocalCounterN_SlotCount(t *testing.T) {
-	c := NewFixedLocalCounterN(4)
-	if c.mask+1 != 4 {
-		t.Fatalf("slots after NewLocalCounterN(4) = %d, want 4", c.mask+1)
-	}
-	if size := c.Size(); size != 4 {
-		t.Fatalf("Size after NewLocalCounterN(4) = %d, want 4", size)
-	}
+func TestPooledLocalCounterN_Isolation(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	a := pool.New(2)
+	b := pool.New(2)
 
-	zero := NewFixedLocalCounterN(0)
-	if size := zero.Size(); size != 0 {
-		t.Fatalf("zero Size = %d, want 0", size)
+	a.Add(0, 1)
+	a.Add(1, 2)
+	b.Add(0, 4)
+	b.Add(1, 8)
+
+	if val := a.Value(0); val != 1 {
+		t.Fatalf("a.Value(0) = %d, want 1", val)
 	}
+	if val := a.Value(1); val != 2 {
+		t.Fatalf("a.Value(1) = %d, want 2", val)
+	}
+	if val := b.Value(0); val != 4 {
+		t.Fatalf("b.Value(0) = %d, want 4", val)
+	}
+	if val := b.Value(1); val != 8 {
+		t.Fatalf("b.Value(1) = %d, want 8", val)
+	}
+}
+
+func TestPooledLocalCounterN_Race(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	c := pool.New(2)
+	var wg sync.WaitGroup
+	workers := 32
+	loops := 1000
+
+	wg.Add(workers)
+	for w := range workers {
+		go func(w int) {
+			defer wg.Done()
+			idx := uintptr(w & 1)
+			for range loops {
+				c.Add(idx, 1)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	total := c.Value(0) + c.Value(1)
+	if want := uintptr(workers * loops); total != want {
+		t.Fatalf("total = %d, want %d", total, want)
+	}
+}
+
+func TestPooledLocalCounterN_Alignment(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	c := pool.New(2)
+	c.Add(0, 1)
+
+	if len(pool.chunks) == 0 {
+		t.Fatal("expected initialized chunks")
+	}
+	for chunkIdx, chunk := range pool.chunks {
+		if addr := uintptr(chunk.counters); addr%opt.CacheLineSize_ != 0 {
+			t.Fatalf("chunk %d is not cache-line aligned: addr=%#x cacheLine=%d", chunkIdx, addr, opt.CacheLineSize_)
+		}
+	}
+	for pid := uintptr(0); pid <= c.mask; pid++ {
+		row := uintptr(c.base) + (pid << pooledLocalCounterNRowShift)
+		if row%opt.CacheLineSize_ != 0 {
+			t.Fatalf("row %d is not cache-line aligned: addr=%#x cacheLine=%d", pid, row, opt.CacheLineSize_)
+		}
+	}
+}
+
+func TestPooledLocalCounterN_DoesNotCrossChunk(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	first := pool.New(pooledLocalCounterNChunkLen / 2)
+	second := pool.New(pooledLocalCounterNChunkLen)
+
+	if len(pool.chunks) < 2 {
+		t.Fatalf("chunks = %d, want at least 2", len(pool.chunks))
+	}
+	if first.base != pool.chunks[0].counters {
+		t.Fatalf("first counter base = %p, want first chunk %p", first.base, pool.chunks[0].counters)
+	}
+	if second.base != pool.chunks[1].counters {
+		t.Fatalf("second counter base = %p, want next chunk %p", second.base, pool.chunks[1].counters)
+	}
+}
+
+func TestPooledLocalCounterN_PanicWhenTooWide(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	_ = pool.New(pooledLocalCounterNChunkLen + 1)
+}
+
+func TestPooledLocalCounterN_PanicWhenZero(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	_ = pool.New(0)
+}
+
+func TestPooledLocalCounterN_PanicWhenNotPowerOfTwo(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	_ = pool.New(3)
 }
 
 func TestPLocalCounterN_Basic(t *testing.T) {

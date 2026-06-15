@@ -94,7 +94,7 @@ type dwhtTable[K comparable, V any] struct {
 	probeLimit   uintptr
 	stripeCap    int
 	growCap      int
-	size         FixedLocalCounterN
+	size         PooledLocalCounterN
 	chunkSz      uintptr
 	chunks       uint32
 	allocating   atomic.Uint32 // 0: no one is allocating, 1: allocating
@@ -189,7 +189,7 @@ const (
 
 const (
 	// occupied tracks physical slots that are no longer Empty.
-	dwhtCntOccupied int = iota
+	dwhtCntOccupied = iota
 	dwhtCntTombstones
 )
 
@@ -1044,9 +1044,8 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 	base, raw := makeDWHTSlots(slotLen)
 	growCap := int(float64(slotLen) * dwhtLoadFactor)
 	cpus := maxProcs()
-	sizeLen := calcSizeLen(slotLen, cpus)
 	chunks, chunkSz := dwhtResizeChunks(slotLen, cpus)
-	activeSizeSlots := min(cpus, sizeLen)
+	activeSizeSlots := cpus
 	table := &dwhtTable[K, V]{
 		slotsBase:  base,
 		slotsRaw:   raw,
@@ -1054,7 +1053,7 @@ func newDWHTTable[K comparable, V any](slotLen uintptr) *dwhtTable[K, V] {
 		probeLimit: probeLimit,
 		stripeCap:  (growCap + int(activeSizeSlots) - 1) / int(activeSizeSlots),
 		growCap:    growCap,
-		size:       NewFixedLocalCounterN(sizeLen),
+		size:       NewPooledLocalCounterN(dwhtCntTombstones + 1),
 		chunks:     chunks,
 		chunkSz:    chunkSz,
 	}
