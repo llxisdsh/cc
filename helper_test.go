@@ -25,7 +25,7 @@ func TestHelperWait(t *testing.T) {
 	err = Wait(ctx, func() {
 		time.Sleep(time.Hour)
 	})
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected Canceled, got %v", err)
 	}
 }
@@ -43,7 +43,7 @@ func TestHelperWaitTimeout(t *testing.T) {
 	err = WaitTimeout(10*time.Millisecond, func() {
 		time.Sleep(100 * time.Millisecond)
 	})
-	if err != context.DeadlineExceeded {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected DeadlineExceeded, got %v", err)
 	}
 }
@@ -62,7 +62,7 @@ func TestHelperDo(t *testing.T) {
 	err = Do(context.Background(), func() error {
 		return expectedErr
 	})
-	if err != expectedErr {
+	if !errors.Is(expectedErr, err) {
 		t.Errorf("expected %v, got %v", expectedErr, err)
 	}
 
@@ -73,7 +73,7 @@ func TestHelperDo(t *testing.T) {
 		time.Sleep(time.Hour)
 		return nil
 	})
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected Canceled, got %v", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestHelperDoTimeout(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		return nil
 	})
-	if err != context.DeadlineExceeded {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected DeadlineExceeded, got %v", err)
 	}
 
@@ -101,7 +101,7 @@ func TestHelperDoTimeout(t *testing.T) {
 	err = DoTimeout(time.Second, func() error {
 		return expectedErr
 	})
-	if err != expectedErr {
+	if !errors.Is(err, expectedErr) {
 		t.Errorf("expected %v, got %v", expectedErr, err)
 	}
 }
@@ -119,7 +119,7 @@ func TestRepeat(t *testing.T) {
 		return nil
 	})
 
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected Canceled, got %v", err)
 	}
 	if count < 3 {
@@ -134,7 +134,7 @@ func TestRepeat(t *testing.T) {
 		return expectedErr
 	})
 
-	if err != expectedErr {
+	if !errors.Is(expectedErr, err) {
 		t.Errorf("expected error %v, got %v", expectedErr, err)
 	}
 	if count != 1 {
@@ -165,7 +165,7 @@ func TestParallel(t *testing.T) {
 		}
 		return nil
 	})
-	if err != expectedErr {
+	if !errors.Is(expectedErr, err) {
 		t.Errorf("expected error %v, got %v", expectedErr, err)
 	}
 
@@ -176,7 +176,7 @@ func TestParallel(t *testing.T) {
 		time.Sleep(time.Hour)
 		return nil
 	})
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected Canceled, got %v", err)
 	}
 }

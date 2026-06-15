@@ -54,9 +54,9 @@ type rebuildState struct {
 type mapTable struct {
 	buckets   unsafeSlice[bucket]
 	mask      uintptr
-	size      PooledLocalCounterN
 	stripeCap int
 	growCap   int
+	size      PooledLocalCounterN
 }
 
 // bucket represents a hash table bucket with cache-line alignment.
