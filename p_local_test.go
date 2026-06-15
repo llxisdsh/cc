@@ -600,13 +600,14 @@ func TestPooledLocalCounterN_Alignment(t *testing.T) {
 	c := pool.New(2)
 	c.Add(0, 1)
 
-	if len(pool.chunks) == 0 {
-		t.Fatal("expected initialized chunks")
+	if pool.currentBase == nil {
+		t.Fatal("expected initialized current chunk")
 	}
-	for chunkIdx, chunk := range pool.chunks {
-		if addr := uintptr(chunk.counters); addr%opt.CacheLineSize_ != 0 {
-			t.Fatalf("chunk %d is not cache-line aligned: addr=%#x cacheLine=%d", chunkIdx, addr, opt.CacheLineSize_)
-		}
+	if addr := uintptr(pool.currentBase); addr%opt.CacheLineSize_ != 0 {
+		t.Fatalf("current chunk is not cache-line aligned: addr=%#x cacheLine=%d", addr, opt.CacheLineSize_)
+	}
+	if c.chunkBacking == nil {
+		t.Fatal("expected counter handle to keep backing alive")
 	}
 	for pid := uintptr(0); pid <= c.mask; pid++ {
 		row := uintptr(c.base) + (pid << pooledLocalCounterNRowShift)
@@ -619,16 +620,36 @@ func TestPooledLocalCounterN_Alignment(t *testing.T) {
 func TestPooledLocalCounterN_DoesNotCrossChunk(t *testing.T) {
 	var pool pooledLocalCounterNPool
 	first := pool.New(pooledLocalCounterNChunkLen / 2)
+	firstChunk := pool.currentBase
 	second := pool.New(pooledLocalCounterNChunkLen)
+	secondChunk := pool.currentBase
 
-	if len(pool.chunks) < 2 {
-		t.Fatalf("chunks = %d, want at least 2", len(pool.chunks))
+	if firstChunk == nil || secondChunk == nil {
+		t.Fatalf("expected initialized chunks: first=%p second=%p", firstChunk, secondChunk)
 	}
-	if first.base != pool.chunks[0].counters {
-		t.Fatalf("first counter base = %p, want first chunk %p", first.base, pool.chunks[0].counters)
+	if firstChunk == secondChunk {
+		t.Fatalf("expected second allocation to move to next chunk, got %p", secondChunk)
 	}
-	if second.base != pool.chunks[1].counters {
-		t.Fatalf("second counter base = %p, want next chunk %p", second.base, pool.chunks[1].counters)
+	if first.base != firstChunk {
+		t.Fatalf("first counter base = %p, want first chunk %p", first.base, firstChunk)
+	}
+	if second.base != secondChunk {
+		t.Fatalf("second counter base = %p, want next chunk %p", second.base, secondChunk)
+	}
+}
+
+func TestPooledLocalCounterN_OldChunkKeptAliveByHandle(t *testing.T) {
+	var pool pooledLocalCounterNPool
+	first := pool.New(pooledLocalCounterNChunkLen)
+	first.Add(0, 7)
+
+	for range 3 {
+		_ = pool.New(pooledLocalCounterNChunkLen)
+		runtime.GC()
+	}
+
+	if val := first.Value(0); val != 7 {
+		t.Fatalf("old chunk value = %d, want 7", val)
 	}
 }
 

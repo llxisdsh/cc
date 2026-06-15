@@ -771,16 +771,12 @@ const (
 // The zero value is ready to use.
 type pooledLocalCounterNPool struct {
 	allocMu sync.Mutex
-	next    uintptr // next small-counter id in pooled cache-line chunks
+	next    uintptr // next small-counter id in current pooled cache-line chunk
 
-	mask      uintptr
-	slotCount uintptr
-	chunks    []*pooledLocalCounterNChunk
-}
-
-type pooledLocalCounterNChunk struct {
-	counters unsafe.Pointer
-	backing  unsafe.Pointer
+	mask           uintptr
+	slotCount      uintptr
+	currentBase    unsafe.Pointer // cache-line aligned row-0 base of the current active chunk
+	currentBacking unsafe.Pointer // start of the raw backing array of the current active chunk
 }
 
 // PooledLocalCounterN is a P-local group of uintptr counters backed by a shared
@@ -790,9 +786,10 @@ type pooledLocalCounterNChunk struct {
 // PooledLocalCounterN must be created by NewPooledLocalCounterN; its
 // zero value is not usable.
 type PooledLocalCounterN struct {
-	base unsafe.Pointer
-	mask uintptr
-	n    uintptr
+	base         unsafe.Pointer
+	mask         uintptr
+	n            uintptr
+	chunkBacking unsafe.Pointer // keeps this counter group's chunk backing array alive
 }
 
 // NewPooledLocalCounterN allocates n logical uintptr counters from p.
@@ -805,6 +802,13 @@ type PooledLocalCounterN struct {
 // The P slot count is fixed at the pool's first allocation from GOMAXPROCS(0),
 // rounded up to a power of two. If GOMAXPROCS grows later, Add/Get remain safe
 // by mapping pid with a mask, but multiple Ps may share a slot.
+//
+// Garbage Collection (GC) Behavior:
+// The pool only keeps the current active chunk. Each PooledLocalCounterN handle
+// keeps a pointer to its chunk's raw backing array in chunkBacking, so old
+// chunks remain alive while their handles are alive. When the pool has moved on
+// and all handles referencing an old chunk become unreachable, the runtime GC
+// can reclaim that old chunk.
 //
 // Memory layout for one chunk:
 //
@@ -850,19 +854,13 @@ func (p *pooledLocalCounterNPool) New(n uintptr) PooledLocalCounterN {
 	}
 	mask := p.mask
 	slotCount := p.slotCount
-	rowBytes := opt.CacheLineSize_
+	const rowBytes = opt.CacheLineSize_
 
 	// Keep every allocation inside a single cache-line row chunk. If the
-	// current chunk cannot fit n counters, skip the remainder and start at the
-	// next chunk so base+i never crosses into a different backing object.
-	if chunkOffset := p.next & (pooledLocalCounterNChunkLen - 1); chunkOffset+n > pooledLocalCounterNChunkLen {
-		p.next += pooledLocalCounterNChunkLen - chunkOffset
-	}
-
-	// p.next is counted in logical counter ids. Every chunk contains
-	// pooledLocalCounterNChunkLen ids, and each id has one counter per P row.
-	chunkIdx := p.next / pooledLocalCounterNChunkLen
-	for uintptr(len(p.chunks)) <= chunkIdx {
+	// current chunk cannot fit n counters, replace it with a new current chunk.
+	// Existing handles keep their old chunk backing alive through their backing
+	// pointer; the pool only keeps the newest chunk for subsequent allocations.
+	if p.currentBase == nil || p.next+n > pooledLocalCounterNChunkLen {
 		// One chunk is a matrix:
 		//   row 0: id0 id1 ...
 		//   row 1: id0 id1 ...
@@ -872,23 +870,24 @@ func (p *pooledLocalCounterNPool) New(n uintptr) PooledLocalCounterN {
 		basePtr := unsafe.Pointer(unsafe.SliceData(backing))
 		base := uintptr(basePtr)
 		aligned := (base + opt.CacheLineSize_ - 1) &^ (opt.CacheLineSize_ - 1)
-		p.chunks = append(p.chunks, &pooledLocalCounterNChunk{
-			counters: unsafe.Add(basePtr, aligned-base),
-			backing:  basePtr,
-		})
+		p.currentBase = unsafe.Add(basePtr, aligned-base)
+		p.currentBacking = basePtr
+		p.next = 0
 	}
-	chunk := p.chunks[chunkIdx]
 
 	// Fold this group's id offset into base. Hot paths then address counter i as
 	// base + pid*rowBytes + i*sizeof(uintptr), with no separate offset field.
-	offset := (p.next & (pooledLocalCounterNChunkLen - 1)) * unsafe.Sizeof(atomic.Uintptr{})
+	offset := p.next * unsafe.Sizeof(atomic.Uintptr{})
+	base := unsafe.Add(p.currentBase, offset)
+	backing := p.currentBacking
 	p.next += n
 	p.allocMu.Unlock()
 
 	return PooledLocalCounterN{
-		base: unsafe.Add(chunk.counters, offset),
-		mask: mask,
-		n:    n,
+		base:         base,
+		mask:         mask,
+		n:            n,
+		chunkBacking: backing,
 	}
 }
 
@@ -897,7 +896,8 @@ func (p *pooledLocalCounterNPool) New(n uintptr) PooledLocalCounterN {
 func (c *PooledLocalCounterN) Add(i uintptr, delta uintptr) uintptr {
 	rawPid := uintptr(runtime_procPin())
 	pid := rawPid & c.mask
-	p := (*uintptr)(unsafe.Add(c.base, (pid<<pooledLocalCounterNRowShift)+i*unsafe.Sizeof(atomic.Uintptr{})))
+	p := (*uintptr)(unsafe.Add(c.base,
+		(pid<<pooledLocalCounterNRowShift)+i*unsafe.Sizeof(atomic.Uintptr{})))
 	v := atomic.AddUintptr(p, delta)
 	runtime_procUnpin()
 	return v
@@ -906,7 +906,8 @@ func (c *PooledLocalCounterN) Add(i uintptr, delta uintptr) uintptr {
 // Get returns counter i from the current P-local slot.
 func (c *PooledLocalCounterN) Get(i uintptr) uintptr {
 	pid := uintptr(runtime_procPin()) & c.mask
-	counter := (*atomic.Uintptr)(unsafe.Add(c.base, (pid<<pooledLocalCounterNRowShift)+i*unsafe.Sizeof(atomic.Uintptr{})))
+	counter := (*atomic.Uintptr)(unsafe.Add(c.base,
+		(pid<<pooledLocalCounterNRowShift)+i*unsafe.Sizeof(atomic.Uintptr{})))
 	v := counter.Load()
 	runtime_procUnpin()
 	return v
