@@ -836,13 +836,13 @@ var defaultPooledLocalCounterNPool pooledLocalCounterNPool
 
 func (p *pooledLocalCounterNPool) New(n uintptr) PooledLocalCounterN {
 	if n == 0 {
-		panic("PooledLocalCounterN: n must be greater than zero")
+		panicNewPooledLocalCounterNZero()
 	}
 	if n&(n-1) != 0 {
-		panic("PooledLocalCounterN: n must be a power of two")
+		panicNewPooledLocalCounterNNotPowerOfTwo()
 	}
 	if n > pooledLocalCounterNChunkLen {
-		panic("PooledLocalCounterN: n exceeds cache-line chunk length")
+		panicNewPooledLocalCounterNTooWide()
 	}
 
 	p.allocMu.Lock()
@@ -960,4 +960,19 @@ func (c *PooledLocalCounterN) Size() uintptr {
 		return 0
 	}
 	return c.mask + 1
+}
+
+//go:noinline
+func panicNewPooledLocalCounterNZero() {
+	panic("PooledLocalCounterN: n must be greater than zero")
+}
+
+//go:noinline
+func panicNewPooledLocalCounterNNotPowerOfTwo() {
+	panic("PooledLocalCounterN: n must be a power of two")
+}
+
+//go:noinline
+func panicNewPooledLocalCounterNTooWide() {
+	panic("PooledLocalCounterN: n exceeds cache-line chunk length")
 }

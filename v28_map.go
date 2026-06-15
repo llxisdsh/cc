@@ -162,7 +162,7 @@ func NewV28Map[K comparable, V any](options ...func(*MapConfig)) *V28Map[K, V] {
 
 func (m *V28Map[K, V]) init(cfg *MapConfig) {
 	if !archsimd.X86.AVX2() {
-		panic("cc: V28Map requires AVX2")
+		panicV28MapRequiresAVX2()
 	}
 	if cfg.keyHash == nil {
 		cfg.keyHash = parseKeyInterface[K]()
@@ -256,7 +256,7 @@ func (m *V28Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("cc: value is not comparable; use WithValueEqual")
+		panicV28ValueNotComparable()
 	}
 	hash := m.hashKey(noEscape(&key))
 	for {
@@ -285,7 +285,7 @@ func (m *V28Map[K, V]) CompareAndDelete(key K, old V) bool {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("cc: value is not comparable; use WithValueEqual")
+		panicV28ValueNotComparable()
 	}
 	hash := m.hashKey(noEscape(&key))
 	for {
@@ -1306,7 +1306,7 @@ func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintpt
 		v28EndWriteModified(b, ctrl)
 		return probe
 	}
-	panic("cc: V28Map grow produced a full table")
+	panicV28GrowFullTable()
 }
 
 func v28BeginWrite(b *v28Bucket) (uint32, v28Status) {
@@ -1517,4 +1517,19 @@ func wyRead64(ptr *byte, i int) uint64 {
 //go:nosplit
 func wyRead32(ptr *byte, i int) uint32 {
 	return *(*uint32)(unsafe.Add(unsafe.Pointer(ptr), i))
+}
+
+//go:noinline
+func panicV28MapRequiresAVX2() {
+	panic("cc: V28Map requires AVX2")
+}
+
+//go:noinline
+func panicV28ValueNotComparable() {
+	panic("cc: value is not comparable; use WithValueEqual")
+}
+
+//go:noinline
+func panicV28GrowFullTable() {
+	panic("cc: V28Map grow produced a full table")
 }

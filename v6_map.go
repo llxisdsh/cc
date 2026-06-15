@@ -278,7 +278,7 @@ func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("cc: value is not comparable; use WithValueEqual")
+		panicV6ValueNotComparable()
 	}
 	swapped := false
 	fn := func(e *MapEntry[K, V]) {
@@ -302,7 +302,7 @@ func (m *V6Map[K, V]) CompareAndDelete(key K, old V) bool {
 		return false
 	}
 	if m.valEqual == nil {
-		panic("cc: value is not comparable; use WithValueEqual")
+		panicV6ValueNotComparable()
 	}
 	deleted := false
 	fn := func(e *MapEntry[K, V]) {
@@ -1437,7 +1437,7 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 					break
 				}
 				if probe > next.mask {
-					panic("cc: V6Map grow produced a full table")
+					panicV6GrowFullTable()
 				}
 				copied++
 				if probe > copyMaxProbe {
@@ -1679,4 +1679,14 @@ func v6ZeroByteBits(words uint64) uint64 {
 //go:nosplit
 func v6FirstMarkedLane(marked uint64) uintptr {
 	return uintptr(bits.TrailingZeros64(marked)) >> 3
+}
+
+//go:noinline
+func panicV6ValueNotComparable() {
+	panic("cc: value is not comparable; use WithValueEqual")
+}
+
+//go:noinline
+func panicV6GrowFullTable() {
+	panic("cc: V6Map grow produced a full table")
 }
