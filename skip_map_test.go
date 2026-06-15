@@ -1,6 +1,8 @@
 package cc
 
 import (
+	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -357,5 +359,54 @@ func TestSkipMap_ConcurrentDelete(t *testing.T) {
 
 	if m.Size() != 0 {
 		t.Fatalf("expected size 0, got %d", m.Size())
+	}
+}
+
+// TestSkipMap_ConcurrentStoreStress tests SkipMap's concurrent Store
+func TestSkipMap_ConcurrentStoreStress(t *testing.T) {
+	for _, total := range []int{1024, 4096, 16384, 65536} {
+		t.Run(strconv.Itoa(total), func(t *testing.T) {
+			for attempt := 0; attempt < 100; attempt++ {
+				m := NewSkipMap[string, int]()
+				workers := runtime.GOMAXPROCS(0)
+				keys := make([]string, total)
+				for i := range total {
+					keys[i] = strconv.Itoa(i)
+				}
+
+				var wg sync.WaitGroup
+				wg.Add(workers)
+				batch := (total + workers - 1) / workers
+				for w := range workers {
+					go func(id int) {
+						defer wg.Done()
+						s := id * batch
+						e := min((id+1)*batch, total)
+						for i := s; i < e; i++ {
+							m.Store(keys[i], i)
+						}
+					}(w)
+				}
+				wg.Wait()
+
+				if got := m.Size(); got != total {
+					// Count via Range
+					rangeCount := 0
+					m.Range(func(k string, v int) bool {
+						rangeCount++
+						return true
+					})
+
+					missing := make([]int, 0)
+					for i := range total {
+						if _, ok := m.Load(keys[i]); !ok {
+							missing = append(missing, i)
+						}
+					}
+					t.Fatalf("attempt %d: SkipMap want=%d got_size=%d got_range=%d missing=%d first=%v",
+						attempt, total, got, rangeCount, len(missing), missing[:min(len(missing), 10)])
+				}
+			}
+		})
 	}
 }
