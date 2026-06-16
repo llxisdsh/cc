@@ -1307,6 +1307,7 @@ func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintpt
 		return probe
 	}
 	panicV28GrowFullTable()
+	return 0
 }
 
 func v28BeginWrite(b *v28Bucket) (uint32, v28Status) {
