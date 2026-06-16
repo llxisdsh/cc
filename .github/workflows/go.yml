@@ -76,6 +76,38 @@ jobs:
 #          token: ${{ secrets.CODECOV_TOKEN }}
 #          slug: llxisdsh/pb
 
+  test-amd64-simd:
+    name: Run tests on linux/amd64 with goexperiment.simd
+    runs-on: ubuntu-latest
+    env:
+      GOOS: linux
+      GOARCH: amd64
+      GOEXPERIMENT: simd
+      CGO_ENABLED: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Build with SIMD experiment
+        run: |
+          go version
+          go env GOOS GOARCH GOEXPERIMENT
+          go build -v ./...
+
+      - name: Run SIMD tests
+        run: go test -v -run '^TestV28Map' ./...
+
   test-arm32:
     name: Run tests on linux/arm32
     runs-on: ubuntu-latest
