@@ -788,9 +788,6 @@ func (m *V28Map[K, V]) compareAndSwapIn(
 				if !m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(old))) {
 					return v28OK, false
 				}
-				if m.valEqual(noescape(unsafe.Pointer(&cur)), noescape(unsafe.Pointer(new))) {
-					return v28OK, true
-				}
 				ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
 				if status != v28OK {
 					if status == v28Retry {

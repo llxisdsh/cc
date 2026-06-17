@@ -230,7 +230,7 @@ func TestV28MapHashPartsTagsAvoidReservedStates(t *testing.T) {
 	}
 }
 
-func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
+func TestV28MapSkippedWritesDoNotPublish(t *testing.T) {
 	var m V28Map[int, int]
 	const key = 42
 
@@ -269,14 +269,27 @@ func TestV28MapNoOpWritesDoNotPublish(t *testing.T) {
 	if !m.CompareAndSwap(key, key, key) {
 		t.Fatal("CompareAndSwap with equal old/new failed")
 	}
-	if got := b.ctrl.Load(); got != ctrl {
-		t.Fatalf("same-value CompareAndSwap bumped ctrl: got %#x, want %#x", got, ctrl)
+	if value, ok := m.Load(key); !ok || value != key {
+		t.Fatalf("Load after same-value CompareAndSwap = (%d, %v), want (%d, true)", value, ok, key)
 	}
+	ctrl = b.ctrl.Load()
 	if m.CompareAndDelete(key, key+1) {
 		t.Fatal("CompareAndDelete with mismatched old succeeded")
 	}
 	if got := b.ctrl.Load(); got != ctrl {
 		t.Fatalf("failed CompareAndDelete bumped ctrl: got %#x, want %#x", got, ctrl)
+	}
+}
+
+func TestV28MapCompareAndSwapStoresDespiteCustomEquality(t *testing.T) {
+	m := NewV28Map[string, int](WithValueEqual(func(int, int) bool { return true }))
+
+	m.Store("a", 1)
+	if !m.CompareAndSwap("a", 99, 2) {
+		t.Fatal("CompareAndSwap should succeed with custom equality")
+	}
+	if v, ok := m.Load("a"); !ok || v != 2 {
+		t.Fatalf("Load after CompareAndSwap = (%d, %v), want (2, true)", v, ok)
 	}
 }
 
