@@ -196,7 +196,7 @@ func TestV6MapHashPartsFullTagsUseHighBit(t *testing.T) {
 	}
 }
 
-func TestV6MapNoOpWritesDoNotPublish(t *testing.T) {
+func TestV6MapSkippedWritesDoNotPublish(t *testing.T) {
 	var m V6Map[int, int]
 	const key = 42
 
@@ -235,9 +235,10 @@ func TestV6MapNoOpWritesDoNotPublish(t *testing.T) {
 	if !m.CompareAndSwap(key, key, key) {
 		t.Fatal("CompareAndSwap with equal old/new failed")
 	}
-	if got := b.state.Load(); got != ctrl {
-		t.Fatalf("same-value CompareAndSwap bumped ctrl: got %#x, want %#x", got, ctrl)
+	if value, ok := m.Load(key); !ok || value != key {
+		t.Fatalf("Load after same-value CompareAndSwap = (%d, %v), want (%d, true)", value, ok, key)
 	}
+	ctrl = b.state.Load()
 	if m.CompareAndDelete(key, key+1) {
 		t.Fatal("CompareAndDelete with mismatched old succeeded")
 	}
@@ -582,6 +583,20 @@ func TestV6MapSwapStoresDespiteCustomEquality(t *testing.T) {
 	}
 	if v, ok := m.Load("a"); !ok || v != 2 {
 		t.Fatalf("Load after Swap = (%d, %v), want (2, true)", v, ok)
+	}
+}
+
+func TestV6MapCompareAndSwapStoresDespiteCustomEquality(t *testing.T) {
+	// CompareAndSwap should match Map: once old matches according to EqualFunc,
+	// it replaces the value with new even if EqualFunc also considers new equal.
+	m := NewV6Map[string, int](WithValueEqual(func(int, int) bool { return true }))
+
+	m.Store("a", 1)
+	if !m.CompareAndSwap("a", 99, 2) {
+		t.Fatal("CompareAndSwap should succeed with custom equality")
+	}
+	if v, ok := m.Load("a"); !ok || v != 2 {
+		t.Fatalf("Load after CompareAndSwap = (%d, %v), want (2, true)", v, ok)
 	}
 }
 

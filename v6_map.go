@@ -273,45 +273,44 @@ func (m *V6Map[K, V]) Delete(key K) {
 	m.delete(&key, false)
 }
 
-func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
+func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	if m.table.Load() == nil {
 		return false
 	}
 	if m.valEqual == nil {
 		panicV6ValueNotComparable()
 	}
-	swapped := false
 	fn := func(e *MapEntry[K, V]) {
-		if !e.Loaded() {
-			return
-		}
-		if !m.valEqual(noescape(unsafe.Pointer(&e.entry.value)), noescape(unsafe.Pointer(&old))) {
-			return
-		}
-		swapped = true
-		if !m.valEqual(noescape(unsafe.Pointer(&e.entry.value)), noescape(unsafe.Pointer(&new))) {
-			e.Update(new)
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old)),
+			) {
+				e.Update(new)
+				swapped = true
+			}
 		}
 	}
 	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
 	return swapped
 }
 
-func (m *V6Map[K, V]) CompareAndDelete(key K, old V) bool {
+func (m *V6Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	if m.table.Load() == nil {
 		return false
 	}
 	if m.valEqual == nil {
 		panicV6ValueNotComparable()
 	}
-	deleted := false
 	fn := func(e *MapEntry[K, V]) {
-		if !e.Loaded() {
-			return
-		}
-		if m.valEqual(noescape(unsafe.Pointer(&e.entry.value)), noescape(unsafe.Pointer(&old))) {
-			e.Delete()
-			deleted = true
+		if e.Loaded() {
+			if m.valEqual(
+				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&old)),
+			) {
+				e.Delete()
+				deleted = true
+			}
 		}
 	}
 	m.compute(&key, unsafe.Pointer(&fn), computeSkipIfNotFound)
@@ -344,15 +343,6 @@ func (m *V6Map[K, V]) compute(
 	val unsafe.Pointer, // *func(e *MapEntry[K, V])
 	flags computeFlags,
 ) (actual V, loaded bool) {
-	fn := *(*func(e *MapEntry[K, V]))(val)
-	return m.computeLoop(key, fn, flags)
-}
-
-func (m *V6Map[K, V]) computeLoop(
-	key *K,
-	fn func(e *MapEntry[K, V]),
-	flags computeFlags,
-) (actual V, loaded bool) {
 	table := m.table.Load()
 	if table == nil {
 		if flags&computeInit == 0 {
@@ -361,6 +351,7 @@ func (m *V6Map[K, V]) computeLoop(
 		table = m.ensureTable()
 	}
 	hash := m.hashKey(key)
+	fn := *(*func(e *MapEntry[K, V]))(val)
 	for {
 		if flags&computeIgnoreHint == 0 {
 			if rs := m.rs.Load(); rs != nil {
