@@ -5641,6 +5641,19 @@ func TestMapEdgeCases(t *testing.T) {
 	})
 }
 
+func TestMapSwapDedupsWithCustomEquality(t *testing.T) {
+	m := NewMap[string, int](WithValueEqual(func(int, int) bool { return true }))
+
+	m.Store("a", 1)
+	prev, loaded := m.Swap("a", 2)
+	if !loaded || prev != 1 {
+		t.Fatalf("Swap = (%d, %v), want (1, true)", prev, loaded)
+	}
+	if v, ok := m.Load("a"); !ok || v != 1 {
+		t.Fatalf("Load after deduped Swap = (%d, %v), want (1, true)", v, ok)
+	}
+}
+
 func TestMapCompareAndSwap(t *testing.T) { // Test with comparable values
 	t.Run("ComparableValues", func(t *testing.T) {
 		m := NewMap[string, int]()

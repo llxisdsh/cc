@@ -524,7 +524,7 @@ func (m *FunnelMap[K, V]) compute(
 	idx := table.mask & h1v
 	root := table.buckets.At(idx)
 	// Fast path: lock-free read
-	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
+	if flags&(computeSkipIfFound|computeSkipIfNotFound|computeUsesValue) != 0 {
 		meta := loadUint64(&root.meta)
 		for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
@@ -572,6 +572,16 @@ func (m *FunnelMap[K, V]) compute(
 			if v, ok := table.overflow.Load(*key); ok {
 				if flags&computeSkipIfFound != 0 {
 					return v, true
+				}
+				if flags&computeUsesValue != 0 {
+					if val != nil {
+						if m.valEqual != nil && m.valEqual(
+							noescape(unsafe.Pointer(&v)),
+							noescape(val),
+						) {
+							return v, true
+						}
+					}
 				}
 				goto slowPath
 			}

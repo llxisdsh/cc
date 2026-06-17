@@ -564,7 +564,7 @@ func (m *Map[K, V]) compute(
 	root := table.buckets.At(idx)
 
 	// Fast path: lock-free read
-	if flags&(computeSkipIfFound|computeSkipIfNotFound) != 0 {
+	if flags&(computeSkipIfFound|computeSkipIfNotFound|computeUsesValue) != 0 {
 		b := root
 		for {
 			meta := loadUint64(&b.meta)

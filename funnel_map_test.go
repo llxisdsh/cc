@@ -101,6 +101,19 @@ func TestFunnelMap_Swap(t *testing.T) {
 	}
 }
 
+func TestFunnelMap_SwapDedupsWithCustomEquality(t *testing.T) {
+	m := NewFunnelMap[string, int](WithValueEqual(func(int, int) bool { return true }))
+
+	m.Store("a", 1)
+	prev, loaded := m.Swap("a", 2)
+	if !loaded || prev != 1 {
+		t.Fatalf("Swap = (%d, %v), want (1, true)", prev, loaded)
+	}
+	if v, ok := m.Load("a"); !ok || v != 1 {
+		t.Fatalf("Load after deduped Swap = (%d, %v), want (1, true)", v, ok)
+	}
+}
+
 func TestFunnelMap_LoadAndUpdate(t *testing.T) {
 	m := NewFunnelMap[int, int]()
 

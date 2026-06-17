@@ -224,14 +224,14 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 }
 
 func (m *V6Map[K, V]) Store(key K, value V) {
-	m.store(&key, &value, false, true)
+	m.store(&key, &value, false)
 }
 
 // LoadOrStore returns the existing value for the key if present.
 // Otherwise, it stores and returns the given value.
 // The loaded result is true if the value was loaded, false if stored.
 func (m *V6Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	return m.store(&key, &value, true, true)
+	return m.store(&key, &value, true)
 }
 
 // LoadOrStoreFn loads the value for a key if present.
@@ -254,7 +254,7 @@ func (m *V6Map[K, V]) LoadOrStoreFn(
 // Swap stores value for key and returns the previous value if any.
 // The loaded result reports whether the key was present.
 func (m *V6Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
-	actual, loaded := m.store(&key, &value, false, false)
+	actual, loaded := m.store(&key, &value, false)
 	if !loaded {
 		return *new(V), false
 	}
@@ -718,7 +718,7 @@ func (m *V6Map[K, V]) drainResize() {
 	}
 }
 
-func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent, dedup bool) (actual V, loaded bool) {
+func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
 	table := m.ensureTable()
 	hash := m.hashKey(key)
 	for {
@@ -731,7 +731,7 @@ func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent, dedup bool) (actual V,
 			table = m.helpResizeInto(table, next)
 			continue
 		}
-		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent, dedup)
+		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v6OK:
 			if !loaded && shouldCheckResize && int(table.size.Get(v6CntOccupied)) >= table.stripeCap {
@@ -785,7 +785,7 @@ func (m *V6Map[K, V]) storeIn(
 	key *K,
 	val *V,
 	hash uintptr,
-	onlyIfAbsent, dedup bool,
+	onlyIfAbsent bool,
 ) (v6Status, V, bool, bool) {
 	tag, start := v6HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
@@ -811,7 +811,7 @@ func (m *V6Map[K, V]) storeIn(
 				if onlyIfAbsent {
 					return v6OK, e.val, true, false
 				}
-				if v6EnableDedupVal && dedup && m.valEqual != nil &&
+				if v6EnableDedupVal && m.valEqual != nil &&
 					m.valEqual(noescape(unsafe.Pointer(&e.val)), noescape(unsafe.Pointer(val))) {
 					return v6OK, e.val, true, false
 				}

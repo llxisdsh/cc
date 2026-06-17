@@ -572,17 +572,16 @@ func TestV6MapSwap(t *testing.T) {
 	}
 }
 
-func TestV6MapSwapStoresDespiteCustomEquality(t *testing.T) {
-	// A coarse EqualFunc must not let Swap skip the store (value dedup applies
-	// to Store, not Swap).
+func TestV6MapSwapDedupsWithCustomEquality(t *testing.T) {
+	// Swap should follow the same value dedup rule as Store/LoadAndUpdate.
 	m := NewV6Map[string, int](WithValueEqual(func(int, int) bool { return true }))
 
 	m.Store("a", 1)
 	if previous, loaded := m.Swap("a", 2); !loaded || previous != 1 {
 		t.Fatalf("Swap = (%d, %v), want (1, true)", previous, loaded)
 	}
-	if v, ok := m.Load("a"); !ok || v != 2 {
-		t.Fatalf("Load after Swap = (%d, %v), want (2, true)", v, ok)
+	if v, ok := m.Load("a"); !ok || v != 1 {
+		t.Fatalf("Load after deduped Swap = (%d, %v), want (1, true)", v, ok)
 	}
 }
 
