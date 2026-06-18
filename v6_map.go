@@ -131,13 +131,19 @@ type v6Table[K comparable, V any] struct {
 // Alignment: 8-byte aligned (due to atomic.Uint64).
 // Padding: Perfectly packed, 0 bytes of padding.
 //
-// ABA Resistance: By packing the 14-bit version counter and 48-bit tags into a
-// single 64-bit state, reads and CAS operations are strictly tear-free. Even
-// though the version counter wraps after 16,384 writes, an ABA requires the
-// entire 64-bit state to match. This yields an effective ~62-bit ABA resistance,
-// because both the version counter MUST wrap AND the exact 48-bit tag layout
-// MUST be perfectly restored simultaneously. This is structurally safer than
-// splitting tags and control words across separate atomic loads.
+// ABA boundary: the single atomic state makes tag and control snapshots
+// tear-free, but the 14-bit version is not a formal ABA-proof sequence counter.
+// Same-key updates leave the tag layout unchanged, so the state can repeat
+// after 16,384 completed writes to the same bucket. A stale equal snapshot is
+// only dangerous if the reader's unfenced entry copy overlaps such a wrap and
+// observes a torn K/V value.
+//
+// In normal small-K/V workloads this is an extremely narrow window: the entry
+// copy is usually only a few machine-word loads, while a full version wrap
+// requires sustained concurrent writes. The risk grows with larger K/V types,
+// very hot keys, long scheduler or OS pauses, and workloads that mutate the
+// same bucket at very high frequency. V6 intentionally favors compact buckets
+// and read-path speed over formal ABA immunity for arbitrary K/V sizes.
 //
 // ┌───────────────────┬──────┬───────┬─────────────────────────────────────┐
 // │ version (14 bits) │frozen│writing│     6 × 8-bit h2 tags (48 bits)     │
