@@ -79,11 +79,11 @@ const (
 
 // V6Map is an experimental SWAR-probed open-addressed map.
 //
-// Each bucket stores four one-byte tags plus a compact control word. Entries
+// Each bucket stores six one-byte tags plus a compact control word. Entries
 // are kept in a separate flat array and addressed by bucket/lane, so probing
 // stays compact while key/value storage remains contiguous. Reads use a bucket
 // version snapshot; writes publish through a short per-bucket writing window,
-// and resize freezes old buckets cooperatively. Like [OFHTMap],entry payloads
+// and resize freezes old buckets cooperatively. Like [OFHTMap], entry payloads
 // are copied through SeqLockSlot so weak-memory architectures do not move
 // large key/value reads outside the version-checked window.
 //
