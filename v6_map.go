@@ -28,6 +28,9 @@ const (
 	// the same key. When disabled, deletes clear both key and value while the
 	// tombstone remains as a probe-continuation marker until resize compaction.
 	v6EnableSameKeyTombstoneReuse = true
+	// v6EnableTerminalTombstoneReuse lets an insert reuse a deleted lane in the
+	// same bucket after an empty lane proves the key absent.
+	v6EnableTerminalTombstoneReuse = true
 )
 
 const (
@@ -839,6 +842,28 @@ func (m *V6Map[K, V]) storeIn(
 			}
 			match &= match - 1
 		}
+		if empty := v6EmptyBits(ctrl); empty != 0 {
+			if ctrl != b.state.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
+			if status != v6OK {
+				if status == v6Retry {
+					goto retryBucket
+				}
+				return status, *new(V), false, false
+			}
+			lane, reuseDeleted := v6InsertLane(ctrl, empty)
+			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: *val})
+			ctrl = v6SetTag(ctrl, lane, tag)
+			v6EndWriteModified(b, ctrl)
+			if reuseDeleted {
+				table.size.Add(v6CntTombstones, ^uintptr(0))
+				return v6OK, *val, false, false
+			}
+			table.size.Add(v6CntOccupied, 1)
+			return v6OK, *val, false, empty&(empty-1) == 0
+		}
 		if v6EnableSameKeyTombstoneReuse {
 			tombstones := v6DeletedBits(ctrl)
 			for tombstones != 0 {
@@ -864,24 +889,6 @@ func (m *V6Map[K, V]) storeIn(
 				}
 				tombstones &= tombstones - 1
 			}
-		}
-		if empty := v6EmptyBits(ctrl); empty != 0 {
-			if ctrl != b.state.Load() {
-				goto retryBucket
-			}
-			ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
-			if status != v6OK {
-				if status == v6Retry {
-					goto retryBucket
-				}
-				return status, *new(V), false, false
-			}
-			lane := v6FirstMarkedLane(empty)
-			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: *val})
-			ctrl = v6SetTag(ctrl, lane, tag)
-			v6EndWriteModified(b, ctrl)
-			table.size.Add(v6CntOccupied, 1)
-			return v6OK, *val, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.state.Load() {
 			goto retryBucket
@@ -1115,6 +1122,39 @@ func (m *V6Map[K, V]) computeIn(
 			}
 			match &= match - 1
 		}
+		if empty := v6EmptyBits(ctrl); empty != 0 {
+			if ctrl != b.state.Load() {
+				goto retryBucket
+			}
+			if flags&computeSkipIfNotFound != 0 {
+				return v6OK, *new(V), false, false
+			}
+			ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
+			if status != v6OK {
+				if status == v6Retry {
+					goto retryBucket
+				}
+				return status, *new(V), false, false
+			}
+			lane, reuseDeleted := v6InsertLane(ctrl, empty)
+			it := MapEntry[K, V]{
+				entry: entry_[K, V]{hash: hash, key: *key},
+			}
+			fn(noEscape(&it))
+			if it.op != updateOp {
+				v6EndWriteUnchanged(b, ctrl)
+				return v6OK, *new(V), false, false
+			}
+			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: it.entry.value})
+			ctrl = v6SetTag(ctrl, lane, tag)
+			v6EndWriteModified(b, ctrl)
+			if reuseDeleted {
+				table.size.Add(v6CntTombstones, ^uintptr(0))
+				return v6OK, it.entry.value, false, false
+			}
+			table.size.Add(v6CntOccupied, 1)
+			return v6OK, it.entry.value, false, empty&(empty-1) == 0
+		}
 		if v6EnableSameKeyTombstoneReuse {
 			tombstones := v6DeletedBits(ctrl)
 			for tombstones != 0 {
@@ -1151,35 +1191,6 @@ func (m *V6Map[K, V]) computeIn(
 				}
 				tombstones &= tombstones - 1
 			}
-		}
-		if empty := v6EmptyBits(ctrl); empty != 0 {
-			if ctrl != b.state.Load() {
-				goto retryBucket
-			}
-			if flags&computeSkipIfNotFound != 0 {
-				return v6OK, *new(V), false, false
-			}
-			ctrl, status := v6BeginWriteWithCtrl(b, ctrl)
-			if status != v6OK {
-				if status == v6Retry {
-					goto retryBucket
-				}
-				return status, *new(V), false, false
-			}
-			lane := v6FirstMarkedLane(empty)
-			it := MapEntry[K, V]{
-				entry: entry_[K, V]{hash: hash, key: *key},
-			}
-			fn(noEscape(&it))
-			if it.op != updateOp {
-				v6EndWriteUnchanged(b, ctrl)
-				return v6OK, *new(V), false, false
-			}
-			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: it.entry.value})
-			ctrl = v6SetTag(ctrl, lane, tag)
-			v6EndWriteModified(b, ctrl)
-			table.size.Add(v6CntOccupied, 1)
-			return v6OK, it.entry.value, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.state.Load() {
 			goto retryBucket
@@ -1650,6 +1661,21 @@ func v6EmptyBits(words uint64) uint64 {
 //go:nosplit
 func v6DeletedBits(words uint64) uint64 {
 	return v6ZeroByteBits(words ^ v6BroadcastTag(v6TagDeleted))
+}
+
+// v6InsertLane prefers a deleted lane in the same bucket snapshot when the
+// bucket also has an empty lane, so absence is still proven by that snapshot.
+// Reusing deleted lanes from earlier buckets would need a cross-bucket proof
+// under concurrent delete/insert races.
+//
+//go:nosplit
+func v6InsertLane(ctrl, empty uint64) (uintptr, bool) {
+	if v6EnableTerminalTombstoneReuse {
+		if deleted := v6DeletedBits(ctrl); deleted != 0 {
+			return v6FirstMarkedLane(deleted), true
+		}
+	}
+	return v6FirstMarkedLane(empty), false
 }
 
 //go:nosplit

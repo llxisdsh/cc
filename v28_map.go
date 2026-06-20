@@ -29,6 +29,9 @@ const (
 	// the same key. When disabled, deletes clear both key and value while the
 	// tombstone remains as a probe-continuation marker until resize compaction.
 	v28EnableSameKeyTombstoneReuse = true
+	// v28EnableTerminalTombstoneReuse lets an insert reuse a deleted lane in
+	// the same bucket after an empty lane proves the key absent.
+	v28EnableTerminalTombstoneReuse = true
 	// v28EnableAutoWyHash replaces Go's built-in hasher for safe non-integer
 	// key shapes where wyHash preserves == semantics.
 	v28EnableAutoWyHash = true
@@ -553,6 +556,30 @@ func (m *V28Map[K, V]) storeIn(
 			}
 			match &= match - 1
 		}
+		if empty := v28EmptyBits(words); empty != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+			if status != v28OK {
+				if status == v28Retry {
+					goto retryBucket
+				}
+				return status, *new(V), false, false
+			}
+			lane, reuseDeleted := v28InsertLane(words, empty)
+			e := table.entry(bi, lane)
+			e.key = *key
+			e.val = *val
+			v28StoreTag(b, lane, tag)
+			v28EndWriteModified(b, ctrl)
+			if reuseDeleted {
+				table.size.Add(v28CntTombstones, ^uintptr(0))
+				return v28OK, *val, false, false
+			}
+			table.size.Add(v28CntOccupied, 1)
+			return v28OK, *val, false, empty&(empty-1) == 0
+		}
 		if v28EnableSameKeyTombstoneReuse {
 			tombstones := v28DeletedBits(words)
 			for tombstones != 0 {
@@ -578,26 +605,6 @@ func (m *V28Map[K, V]) storeIn(
 				}
 				tombstones &= tombstones - 1
 			}
-		}
-		if empty := v28EmptyBits(words); empty != 0 {
-			if ctrl != b.ctrl.Load() {
-				goto retryBucket
-			}
-			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
-			if status != v28OK {
-				if status == v28Retry {
-					goto retryBucket
-				}
-				return status, *new(V), false, false
-			}
-			lane := uintptr(bits.TrailingZeros32(empty))
-			e := table.entry(bi, lane)
-			e.key = *key
-			e.val = *val
-			v28StoreTag(b, lane, tag)
-			v28EndWriteModified(b, ctrl)
-			table.size.Add(v28CntOccupied, 1)
-			return v28OK, *val, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
 			goto retryBucket
@@ -937,6 +944,38 @@ func (m *V28Map[K, V]) computeIn(
 			}
 			match &= match - 1
 		}
+		if empty := v28EmptyBits(words); empty != 0 {
+			if ctrl != b.ctrl.Load() {
+				goto retryBucket
+			}
+			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
+			if status != v28OK {
+				if status == v28Retry {
+					goto retryBucket
+				}
+				return status, *new(V), false, false
+			}
+			lane, reuseDeleted := v28InsertLane(words, empty)
+			it := MapEntry[K, V]{
+				entry: entry_[K, V]{hash: hash, key: *key},
+			}
+			fn(noEscape(&it))
+			if it.op != updateOp {
+				v28EndWriteUnchanged(b, ctrl)
+				return v28OK, *new(V), false, false
+			}
+			e := table.entry(bi, lane)
+			e.key = *key
+			e.val = it.entry.value
+			v28StoreTag(b, lane, tag)
+			v28EndWriteModified(b, ctrl)
+			if reuseDeleted {
+				table.size.Add(v28CntTombstones, ^uintptr(0))
+				return v28OK, it.entry.value, false, false
+			}
+			table.size.Add(v28CntOccupied, 1)
+			return v28OK, it.entry.value, false, empty&(empty-1) == 0
+		}
 		if v28EnableSameKeyTombstoneReuse {
 			tombstones := v28DeletedBits(words)
 			for tombstones != 0 {
@@ -970,34 +1009,6 @@ func (m *V28Map[K, V]) computeIn(
 				}
 				tombstones &= tombstones - 1
 			}
-		}
-		if empty := v28EmptyBits(words); empty != 0 {
-			if ctrl != b.ctrl.Load() {
-				goto retryBucket
-			}
-			ctrl, status := v28BeginWriteWithCtrl(b, ctrl)
-			if status != v28OK {
-				if status == v28Retry {
-					goto retryBucket
-				}
-				return status, *new(V), false, false
-			}
-			lane := uintptr(bits.TrailingZeros32(empty))
-			it := MapEntry[K, V]{
-				entry: entry_[K, V]{hash: hash, key: *key},
-			}
-			fn(noEscape(&it))
-			if it.op != updateOp {
-				v28EndWriteUnchanged(b, ctrl)
-				return v28OK, *new(V), false, false
-			}
-			e := table.entry(bi, lane)
-			e.key = *key
-			e.val = it.entry.value
-			v28StoreTag(b, lane, tag)
-			v28EndWriteModified(b, ctrl)
-			table.size.Add(v28CntOccupied, 1)
-			return v28OK, it.entry.value, false, empty&(empty-1) == 0
 		}
 		if ctrl != b.ctrl.Load() {
 			goto retryBucket
@@ -1382,6 +1393,21 @@ func v28EmptyBits(words archsimd.Uint8x32) uint32 {
 //go:nosplit
 func v28DeletedBits(words archsimd.Uint8x32) uint32 {
 	return words.Equal(archsimd.BroadcastUint8x32(v28TagDeleted)).ToBits() & v28LaneMask
+}
+
+// v28InsertLane prefers a deleted lane in the same bucket snapshot when the
+// bucket also has an empty lane, so absence is still proven by that snapshot.
+// Reusing deleted lanes from earlier buckets would need a cross-bucket proof
+// under concurrent delete/insert races.
+//
+//go:nosplit
+func v28InsertLane(words archsimd.Uint8x32, empty uint32) (uintptr, bool) {
+	if v28EnableTerminalTombstoneReuse {
+		if deleted := v28DeletedBits(words); deleted != 0 {
+			return uintptr(bits.TrailingZeros32(deleted)), true
+		}
+	}
+	return uintptr(bits.TrailingZeros32(empty)), false
 }
 
 //go:nosplit

@@ -373,23 +373,111 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
 	)
 
-	m.Store(1, 10)
+	for i := range v28SlotsPerBucket {
+		m.Store(i, i*10)
+	}
 	before := m.stats()
-	if prev, ok := m.LoadAndDelete(1); !ok || prev != 10 {
+	if before.Live != v28SlotsPerBucket || before.Occupied != v28SlotsPerBucket || before.Tombstones != 0 {
+		t.Fatalf("stats before delete = %+v, want live=%d occupied=%d tombstones=0", before, v28SlotsPerBucket, v28SlotsPerBucket)
+	}
+	if empty := v28EmptyBits(v28LoadTagWords(m.table.Load().buckets.At(0))); empty != 0 {
+		t.Fatalf("test bucket has empty lanes before delete: %#x", empty)
+	}
+
+	const key = 1
+	if prev, ok := m.LoadAndDelete(key); !ok || prev != 10 {
 		t.Fatalf("LoadAndDelete = (%d, %v), want (10, true)", prev, ok)
 	}
-	if stats := m.stats(); stats.Live != 0 || stats.Occupied != before.Occupied || stats.Tombstones != 1 {
-		t.Fatalf("stats after delete = %+v, want live=0 occupied=%d tombstones=1", stats, before.Occupied)
+	if empty := v28EmptyBits(v28LoadTagWords(m.table.Load().buckets.At(0))); empty != 0 {
+		t.Fatalf("test bucket has empty lanes after delete: %#x", empty)
 	}
-	if actual, loaded := m.LoadOrStore(1, 20); loaded || actual != 20 {
+	if stats := m.stats(); stats.Live != before.Live-1 || stats.Occupied != before.Occupied || stats.Tombstones != 1 {
+		t.Fatalf("stats after delete = %+v, want live=%d occupied=%d tombstones=1", stats, before.Live-1, before.Occupied)
+	}
+	if actual, loaded := m.LoadOrStore(key, 20); loaded || actual != 20 {
 		t.Fatalf("LoadOrStore after delete = (%d, %v), want (20, false)", actual, loaded)
 	}
-	if v, ok := m.Load(1); !ok || v != 20 {
+	if v, ok := m.Load(key); !ok || v != 20 {
 		t.Fatalf("Load revived key = (%d, %v), want (20, true)", v, ok)
 	}
-	if stats := m.stats(); stats.Live != 1 || stats.Occupied != before.Occupied || stats.Tombstones != 0 {
-		t.Fatalf("stats after reuse = %+v, want live=1 occupied=%d tombstones=0", stats, before.Occupied)
+	if stats := m.stats(); stats.Live != before.Live || stats.Occupied != before.Occupied || stats.Tombstones != 0 {
+		t.Fatalf("stats after reuse = %+v, want live=%d occupied=%d tombstones=0", stats, before.Live, before.Occupied)
 	}
+}
+
+func TestV28MapDifferentKeyTombstoneReuse(t *testing.T) {
+	if !v28EnableTerminalTombstoneReuse {
+		t.Skip("terminal tombstone reuse disabled")
+	}
+	m := NewV28Map[int, int](
+		WithCapacity(8),
+		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
+	)
+
+	m.Store(1, 10)
+	m.Store(2, 20)
+	before := m.stats()
+	if before.Live != 2 || before.Occupied != 2 || before.Tombstones != 0 {
+		t.Fatalf("stats before delete = %+v, want live=2 occupied=2 tombstones=0", before)
+	}
+
+	m.Delete(1)
+	afterDelete := m.stats()
+	if afterDelete.Live != 1 || afterDelete.Occupied != before.Occupied || afterDelete.Tombstones != 1 {
+		t.Fatalf("stats after delete = %+v, want live=1 occupied=%d tombstones=1", afterDelete, before.Occupied)
+	}
+
+	m.Store(3, 30)
+	afterReuse := m.stats()
+	if afterReuse.Live != 2 || afterReuse.Occupied != before.Occupied || afterReuse.Tombstones != 0 {
+		t.Fatalf("stats after different-key reuse = %+v, want live=2 occupied=%d tombstones=0", afterReuse, before.Occupied)
+	}
+	if _, ok := m.Load(1); ok {
+		t.Fatal("deleted key 1 was revived")
+	}
+	for key, want := range map[int]int{2: 20, 3: 30} {
+		got, ok := m.Load(key)
+		if !ok || got != want {
+			t.Fatalf("Load(%d) = (%d, %v), want (%d, true)", key, got, ok, want)
+		}
+	}
+}
+
+func BenchmarkV28MapDifferentKeyTombstoneChurn(b *testing.B) {
+	if !v28EnableTerminalTombstoneReuse {
+		b.Skip("terminal tombstone reuse disabled")
+	}
+	const bucketCount = 1024
+	m := NewV28Map[int, int](
+		WithCapacity(bucketCount*2),
+		WithKeyHasher(func(key int, _ uintptr) uintptr {
+			bucket := key & (bucketCount - 1)
+			tag := (key / bucketCount) & 0xff
+			return uintptr(bucket<<8) | uintptr(tag)
+		}),
+	)
+	current := make([]int, bucketCount)
+	for i := range bucketCount {
+		current[i] = i
+		m.Store(i, i)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bucket := i & (bucketCount - 1)
+		old := current[bucket]
+		next := old + bucketCount
+		m.Delete(old)
+		m.Store(next, next)
+		current[bucket] = next
+	}
+	b.StopTimer()
+
+	stats := m.stats()
+	b.ReportMetric(float64(stats.Buckets), "buckets")
+	b.ReportMetric(float64(stats.Occupied), "occupied")
+	b.ReportMetric(float64(stats.Tombstones), "tombstones")
+	b.ReportMetric(float64(stats.MaxProbe), "max_probe")
 }
 
 func TestV28MapRangeSnapshotDoesNotRepeatBucketAfterMutation(t *testing.T) {
