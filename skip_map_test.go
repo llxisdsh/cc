@@ -366,7 +366,7 @@ func TestSkipMap_ConcurrentDelete(t *testing.T) {
 func TestSkipMap_ConcurrentStoreStress(t *testing.T) {
 	for _, total := range []int{1024, 4096, 16384, 65536} {
 		t.Run(strconv.Itoa(total), func(t *testing.T) {
-			for attempt := 0; attempt < 100; attempt++ {
+			for attempt := range 100 {
 				m := NewSkipMap[string, int]()
 				workers := runtime.GOMAXPROCS(0)
 				keys := make([]string, total)

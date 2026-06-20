@@ -132,18 +132,21 @@ type v6Table[K comparable, V any] struct {
 // Padding: Perfectly packed, 0 bytes of padding.
 //
 // ABA boundary: the single atomic state makes tag and control snapshots
-// tear-free, but the 14-bit version is not a formal ABA-proof sequence counter.
-// Same-key updates leave the tag layout unchanged, so the state can repeat
-// after 16,384 completed writes to the same bucket. A stale equal snapshot is
-// only dangerous if the reader's unfenced entry copy overlaps such a wrap and
-// observes a torn K/V value.
+// tear-free. The 14-bit version is not a formal ABA-proof sequence counter, but
+// a harmful ABA requires all of these conditions at once:
+//  1. writes to the same bucket complete a full 16,384-version wrap;
+//  2. a reader keeps an unfenced entry copy from the old snapshot across that
+//     wrap; and
+//  3. the repeated state validates a torn K/V value from the entry copy.
 //
-// In normal small-K/V workloads this is an extremely narrow window: the entry
-// copy is usually only a few machine-word loads, while a full version wrap
-// requires sustained concurrent writes. The risk grows with larger K/V types,
-// very hot keys, long scheduler or OS pauses, and workloads that mutate the
-// same bucket at very high frequency. V6 intentionally favors compact buckets
-// and read-path speed over formal ABA immunity for arbitrary K/V sizes.
+// For normal small-K/V workloads this is a strong practical boundary: the entry
+// copy is usually only a few machine-word loads, while the version wrap requires
+// sustained concurrent writes to the same bucket. A public-API stress test using
+// string keys and string values ran for 30 minutes without reproducing a
+// failure. The remaining risk is concentrated in larger K/V types, extremely hot
+// buckets, long scheduler or OS pauses, and very high-frequency mutation of the
+// same bucket. V6 intentionally favors compact buckets and read-path speed over
+// formal ABA immunity for arbitrary K/V sizes.
 //
 // ┌───────────────────┬──────┬───────┬─────────────────────────────────────┐
 // │ version (14 bits) │frozen│writing│     6 × 8-bit h2 tags (48 bits)     │

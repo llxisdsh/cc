@@ -4,7 +4,10 @@ package cc
 
 import (
 	"math"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,6 +69,86 @@ func TestV6MapZeroValue(t *testing.T) {
 	if loaded || actual != 3 {
 		t.Fatalf("zero-value Compute = (%d, %v), want (3, false)", actual, loaded)
 	}
+}
+
+func TestV6MapPublicABAStringCrashHarness(t *testing.T) {
+	if os.Getenv("CC_V6_PUBLIC_ABA_STRING_CRASH_CHILD") == "1" {
+		runV6MapPublicABAStringCrashChild()
+		return
+	}
+	if os.Getenv("CC_V6_PUBLIC_ABA_STRING_CRASH") != "1" {
+		t.Skip("set CC_V6_PUBLIC_ABA_STRING_CRASH=1 to run the destructive public ABA crash harness")
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestV6MapPublicABAStringCrashHarness$")
+	cmd.Env = append(os.Environ(), "CC_V6_PUBLIC_ABA_STRING_CRASH_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("public ABA crash was not reproduced; output:\n%s", out)
+	}
+}
+
+func runV6MapPublicABAStringCrashChild() {
+	const key = "aba-key"
+
+	readers := 16
+	if s := os.Getenv("CC_V6_PUBLIC_ABA_STRING_CRASH_READERS"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			os.Exit(2)
+		}
+		readers = n
+	}
+	duration := 10 * time.Second
+	if s := os.Getenv("CC_V6_PUBLIC_ABA_STRING_CRASH_DURATION"); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			os.Exit(2)
+		}
+		duration = d
+	}
+
+	m := NewV6Map[string, string](WithCapacity(1))
+	shortInvalid := unsafe.String((*byte)(unsafe.Pointer(uintptr(1))), 1) //nolint:all
+	longValid := strings.Repeat("x", 1<<20)
+	m.Store(key, shortInvalid)
+
+	stopAt := time.Now().Add(duration)
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(readers + 1)
+
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			m.Store(key, longValid)
+			m.Store(key, shortInvalid)
+		}
+	}()
+
+	for range readers {
+		go func() {
+			defer wg.Done()
+			for !stop.Load() {
+				v, ok := m.Load(key)
+				if !ok {
+					continue
+				}
+				if len(v) > 1024 {
+					// A valid long value survives this read. A torn value with
+					// shortInvalid's data pointer and longValid's length faults.
+					_ = v[0]
+				}
+			}
+		}()
+	}
+
+	for time.Now().Before(stopAt) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	stop.Store(true)
+	wg.Wait()
+	os.Exit(0)
 }
 
 func TestV6MapStorePointerKeyValueEscapes(t *testing.T) {
@@ -163,7 +246,7 @@ func TestV6MapBuiltInHasherKeepsFloatSemantics(t *testing.T) {
 func TestV6MapIntHashPartsAvoidsPowerOfTwoStrideClustering(t *testing.T) {
 	const buckets = uintptr(1024)
 	counts := make([]int, buckets)
-	for i := uintptr(0); i < buckets*v6SlotsPerBucket; i++ {
+	for i := range buckets * v6SlotsPerBucket {
 		_, start := v6HashParts(i*v6SlotsPerBucket*buckets, true, buckets-1)
 		counts[start]++
 	}
@@ -184,7 +267,7 @@ func TestV6MapIntHashPartsAvoidsPowerOfTwoStrideClustering(t *testing.T) {
 
 func TestV6MapHashPartsFullTagsUseHighBit(t *testing.T) {
 	const mask = uintptr(1023)
-	for i := uintptr(0); i < 4096; i++ {
+	for i := range uintptr(4096) {
 		intTag, _ := v6HashParts(i, true, mask)
 		if intTag&0x80 == 0 {
 			t.Fatalf("int tag %#x for hash %d does not use high bit", intTag, i)
