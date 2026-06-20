@@ -389,7 +389,7 @@ func (m *V6Map[K, V]) compute(
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, key, hash, fn, flags)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(table.size.Get(v6CntOccupied)) >= table.stripeCap {
+			if shouldCheckResize {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
@@ -763,7 +763,7 @@ func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v6OK:
-			if !loaded && shouldCheckResize && int(table.size.Get(v6CntOccupied)) >= table.stripeCap {
+			if shouldCheckResize {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
@@ -883,8 +883,8 @@ func (m *V6Map[K, V]) storeIn(
 				table.size.Add(v6CntTombstones, ^uintptr(0))
 				return v6OK, *val, false, false
 			}
-			table.size.Add(v6CntOccupied, 1)
-			return v6OK, *val, false, empty&(empty-1) == 0
+			local := table.size.Add(v6CntOccupied, 1)
+			return v6OK, *val, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
 		}
 		if v6EnableSameKeyTombstoneReuse {
 			tombstones := v6DeletedBits(ctrl)
@@ -1179,8 +1179,8 @@ func (m *V6Map[K, V]) computeIn(
 				table.size.Add(v6CntTombstones, ^uintptr(0))
 				return v6OK, it.entry.value, false, false
 			}
-			table.size.Add(v6CntOccupied, 1)
-			return v6OK, it.entry.value, false, empty&(empty-1) == 0
+			local := table.size.Add(v6CntOccupied, 1)
+			return v6OK, it.entry.value, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
 		}
 		if v6EnableSameKeyTombstoneReuse {
 			tombstones := v6DeletedBits(ctrl)

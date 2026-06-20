@@ -345,7 +345,7 @@ func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loa
 		status, actual, loaded, shouldCheckResize := m.computeIn(table, &key, hash, fn)
 		switch status {
 		case v28OK:
-			if !loaded && shouldCheckResize && int(table.size.Get(v28CntOccupied)) >= table.stripeCap {
+			if shouldCheckResize {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
@@ -506,7 +506,7 @@ func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loade
 		status, actual, loaded, shouldCheckResize := m.storeIn(table, key, val, hash, onlyIfAbsent)
 		switch status {
 		case v28OK:
-			if !loaded && shouldCheckResize && int(table.size.Get(v28CntOccupied)) >= table.stripeCap {
+			if shouldCheckResize {
 				m.resizeIfNeeded(table)
 			}
 			return actual, loaded
@@ -618,8 +618,8 @@ func (m *V28Map[K, V]) storeIn(
 				table.size.Add(v28CntTombstones, ^uintptr(0))
 				return v28OK, *val, false, false
 			}
-			table.size.Add(v28CntOccupied, 1)
-			return v28OK, *val, false, empty&(empty-1) == 0
+			local := table.size.Add(v28CntOccupied, 1)
+			return v28OK, *val, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
 		}
 		if v28EnableSameKeyTombstoneReuse {
 			tombstones := v28DeletedBits(words)
@@ -1019,8 +1019,8 @@ func (m *V28Map[K, V]) computeIn(
 				table.size.Add(v28CntTombstones, ^uintptr(0))
 				return v28OK, it.entry.value, false, false
 			}
-			table.size.Add(v28CntOccupied, 1)
-			return v28OK, it.entry.value, false, empty&(empty-1) == 0
+			local := table.size.Add(v28CntOccupied, 1)
+			return v28OK, it.entry.value, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
 		}
 		if v28EnableSameKeyTombstoneReuse {
 			tombstones := v28DeletedBits(words)
