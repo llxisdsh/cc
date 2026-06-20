@@ -241,7 +241,10 @@ func (m *OFHTMap[K, V]) Load(key K) (value V, ok bool) {
 
 // Store sets the value for a key.
 func (m *OFHTMap[K, V]) Store(key K, value V) {
-	table := m.ensureTable()
+	table := m.table.Load()
+	if table == nil {
+		table = m.slowInit()
+	}
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
@@ -269,7 +272,10 @@ func (m *OFHTMap[K, V]) Store(key K, value V) {
 // LoadOrStore returns the existing value for the key if present. Otherwise it
 // stores and returns the given value.
 func (m *OFHTMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
-	table := m.ensureTable()
+	table := m.table.Load()
+	if table == nil {
+		table = m.slowInit()
+	}
 	// Inline hashKey()
 	var h uint32
 	if ofhtEnableIntKey && m.intKey {
@@ -503,14 +509,6 @@ func (m *OFHTMap[K, V]) Clear() {
 		return
 	}
 	m.table.Store(newOFHTTable[K, V](m.minLen))
-}
-
-func (m *OFHTMap[K, V]) ensureTable() *ofhtTable[K, V] {
-	table := m.table.Load()
-	if table != nil {
-		return table
-	}
-	return m.slowInit()
 }
 
 //go:noinline

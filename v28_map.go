@@ -196,7 +196,12 @@ func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
 	if table == nil {
 		return *new(V), false
 	}
-	hash := m.hashKey(noEscape(&key))
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+	}
 	tag, start := v28HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
@@ -261,7 +266,12 @@ func (m *V28Map[K, V]) CompareAndSwap(key K, old V, new V) bool {
 	if m.valEqual == nil {
 		panicV28ValueNotComparable()
 	}
-	hash := m.hashKey(noEscape(&key))
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+	}
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
@@ -290,7 +300,12 @@ func (m *V28Map[K, V]) CompareAndDelete(key K, old V) bool {
 	if m.valEqual == nil {
 		panicV28ValueNotComparable()
 	}
-	hash := m.hashKey(noEscape(&key))
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+	}
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
@@ -312,8 +327,16 @@ func (m *V28Map[K, V]) CompareAndDelete(key K, old V) bool {
 }
 
 func (m *V28Map[K, V]) Compute(key K, fn func(e *MapEntry[K, V])) (actual V, loaded bool) {
-	table := m.ensureTable()
-	hash := m.hashKey(noEscape(&key))
+	table := m.table.Load()
+	if table == nil {
+		table = m.slowInit()
+	}
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+	}
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
@@ -428,7 +451,12 @@ func (m *V28Map[K, V]) stats() v28MapStats {
 		for fullScan != 0 {
 			lane := uintptr(bits.TrailingZeros32(fullScan))
 			e := table.entry(i, lane)
-			hash := m.hashKey(noEscape(&e.key))
+			var hash uintptr
+			if m.intKey {
+				hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
+			} else {
+				hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+			}
 			_, start := v28HashParts(hash, m.intKey, table.mask)
 			probe := (i - start) & table.mask
 			stats.ProbeTotal += probe
@@ -460,8 +488,16 @@ func (m *V28Map[K, V]) Clear() {
 }
 
 func (m *V28Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
-	table := m.ensureTable()
-	hash := m.hashKey(key)
+	table := m.table.Load()
+	if table == nil {
+		table = m.slowInit()
+	}
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+	}
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
@@ -487,7 +523,12 @@ func (m *V28Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, lo
 	if table == nil {
 		return *new(V), false
 	}
-	hash := m.hashKey(key)
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+	}
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
@@ -679,7 +720,12 @@ func (m *V28Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) 
 	if table == nil {
 		return *new(V), false
 	}
-	hash := m.hashKey(key)
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+	}
 	for {
 		if next := table.nextTable.Load(); next != nil {
 			table = m.helpResizeInto(table, next)
@@ -1119,7 +1165,39 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 			for full != 0 {
 				lane := uintptr(bits.TrailingZeros32(full))
 				e := old.entry(i, lane)
-				probe := next.copyInsertConcurrent(e, m.hashKey(noEscape(&e.key)), m.intKey)
+				var hash uintptr
+				if m.intKey {
+					hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
+				} else {
+					hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+				}
+				tag, insertStart := v28HashParts(hash, m.intKey, next.mask)
+				var probe uintptr
+				for probe = 0; probe <= next.mask; probe++ {
+					bi := (insertStart + probe) & next.mask
+					b := next.buckets.At(bi)
+					ctrl, status := v28BeginWrite(b)
+					if status != v28OK {
+						probe--
+						continue
+					}
+					words := v28LoadTagWords(b)
+					empty := v28EmptyBits(words)
+					if empty == 0 {
+						v28EndWriteUnchanged(b, ctrl)
+						continue
+					}
+					lane := uintptr(bits.TrailingZeros32(empty))
+					dst := next.entry(bi, lane)
+					dst.key = e.key
+					dst.val = e.val
+					v28StoreTag(b, lane, tag)
+					v28EndWriteModified(b, ctrl)
+					break
+				}
+				if probe > next.mask {
+					panicV28GrowFullTable()
+				}
 				copied++
 				if probe > copyMaxProbe {
 					copyMaxProbe = probe
@@ -1150,13 +1228,6 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 			m.table.CompareAndSwap(old, next)
 		}
 	}
-}
-
-func (m *V28Map[K, V]) ensureTable() *v28Table[K, V] {
-	if table := m.table.Load(); table != nil {
-		return table
-	}
-	return m.slowInit()
 }
 
 //go:noinline
@@ -1288,34 +1359,6 @@ func (table *v28Table[K, V]) bucketLen() uintptr {
 //go:nosplit
 func (table *v28Table[K, V]) entry(bucketIdx, lane uintptr) *v28Entry[K, V] {
 	return table.entries.At(bucketIdx*v28SlotsPerBucket + lane)
-}
-
-func (table *v28Table[K, V]) copyInsertConcurrent(e *v28Entry[K, V], hash uintptr, intKey bool) uintptr {
-	tag, start := v28HashParts(hash, intKey, table.mask)
-	for probe := uintptr(0); probe <= table.mask; probe++ {
-		bi := (start + probe) & table.mask
-		b := table.buckets.At(bi)
-		ctrl, status := v28BeginWrite(b)
-		if status != v28OK {
-			probe--
-			continue
-		}
-		words := v28LoadTagWords(b)
-		empty := v28EmptyBits(words)
-		if empty == 0 {
-			v28EndWriteUnchanged(b, ctrl)
-			continue
-		}
-		lane := uintptr(bits.TrailingZeros32(empty))
-		dst := table.entry(bi, lane)
-		dst.key = e.key
-		dst.val = e.val
-		v28StoreTag(b, lane, tag)
-		v28EndWriteModified(b, ctrl)
-		return probe
-	}
-	panicV28GrowFullTable()
-	return 0
 }
 
 func v28BeginWrite(b *v28Bucket) (uint32, v28Status) {

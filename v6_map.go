@@ -200,7 +200,12 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 	if table == nil {
 		return *new(V), false
 	}
-	hash := m.hashKey(noEscape(&key))
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(&key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
+	}
 	tag, start := v6HashParts(hash, m.intKey, table.mask)
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
@@ -360,21 +365,20 @@ func (m *V6Map[K, V]) compute(
 		if flags&computeInit == 0 {
 			return *new(V), false
 		}
-		table = m.ensureTable()
+		table = m.slowInit()
 	}
-	hash := m.hashKey(key)
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+	}
 	fn := *(*func(e *MapEntry[K, V]))(val)
 	for {
 		if flags&computeIgnoreHint == 0 {
 			if rs := m.rs.Load(); rs != nil {
 				rs.latch.Wait()
 				table = m.table.Load()
-				if table == nil {
-					if flags&computeInit == 0 {
-						return *new(V), false
-					}
-					table = m.ensureTable()
-				}
 				continue
 			}
 		}
@@ -617,7 +621,12 @@ func (m *V6Map[K, V]) stats() v6MapStats {
 		for fullScan != 0 {
 			lane := v6FirstMarkedLane(fullScan)
 			e := table.entry(i, lane).ReadUnfenced()
-			hash := m.hashKey(noEscape(&e.key))
+			var hash uintptr
+			if m.intKey {
+				hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
+			} else {
+				hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+			}
 			_, start := v6HashParts(hash, m.intKey, table.mask)
 			probe := (i - start) & table.mask
 			stats.ProbeTotal += probe
@@ -731,12 +740,20 @@ func (m *V6Map[K, V]) drainResize() {
 }
 
 func (m *V6Map[K, V]) store(key *K, val *V, onlyIfAbsent bool) (actual V, loaded bool) {
-	table := m.ensureTable()
-	hash := m.hashKey(key)
+	table := m.table.Load()
+	if table == nil {
+		table = m.slowInit()
+	}
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+	}
 	for {
 		if rs := m.rs.Load(); rs != nil {
 			rs.latch.Wait()
-			table = m.ensureTable()
+			table = m.table.Load()
 			continue
 		}
 		if next := table.nextTable.Load(); next != nil {
@@ -763,7 +780,12 @@ func (m *V6Map[K, V]) update(key *K, val *V, onlyIfAbsent bool) (previous V, loa
 	if table == nil {
 		return *new(V), false
 	}
-	hash := m.hashKey(key)
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+	}
 	for {
 		if rs := m.rs.Load(); rs != nil {
 			rs.latch.Wait()
@@ -963,7 +985,12 @@ func (m *V6Map[K, V]) delete(key *K, needValue bool) (previous V, loaded bool) {
 	if table == nil {
 		return *new(V), false
 	}
-	hash := m.hashKey(key)
+	var hash uintptr
+	if m.intKey {
+		hash = intHash[K](noescape(unsafe.Pointer(key)))
+	} else {
+		hash = m.keyHash(noescape(unsafe.Pointer(key)), m.seed)
+	}
 	for {
 		if rs := m.rs.Load(); rs != nil {
 			rs.latch.Wait()
@@ -1244,12 +1271,14 @@ func (m *V6Map[K, V]) Grow(sizeAdd int) {
 	if sizeAdd <= 0 {
 		return
 	}
-
-	table := m.ensureTable()
+	table := m.table.Load()
+	if table == nil {
+		table = m.slowInit()
+	}
 	for {
 		if rs := m.rs.Load(); rs != nil {
 			rs.latch.Wait()
-			table = m.ensureTable()
+			table = m.table.Load()
 			continue
 		}
 		occupied := int(table.size.Value(v6CntOccupied))
@@ -1425,7 +1454,13 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 			for full != 0 {
 				lane := v6FirstMarkedLane(full)
 				e := old.entry(i, lane).ReadUnfenced()
-				tag, insertStart := v6HashParts(m.hashKey(noEscape(&e.key)), m.intKey, next.mask)
+				var hash uintptr
+				if m.intKey {
+					hash = intHash[K](noescape(unsafe.Pointer(&e.key)))
+				} else {
+					hash = m.keyHash(noescape(unsafe.Pointer(&e.key)), m.seed)
+				}
+				tag, insertStart := v6HashParts(hash, m.intKey, next.mask)
 				var probe uintptr
 				for probe = 0; probe <= next.mask; probe++ {
 					bi := (insertStart + probe) & next.mask
@@ -1480,13 +1515,6 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 			m.table.CompareAndSwap(old, next)
 		}
 	}
-}
-
-func (m *V6Map[K, V]) ensureTable() *v6Table[K, V] {
-	if table := m.table.Load(); table != nil {
-		return table
-	}
-	return m.slowInit()
 }
 
 //go:noinline
