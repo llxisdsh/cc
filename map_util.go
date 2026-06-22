@@ -149,17 +149,19 @@ type counterStripe struct {
 // ============================================================================
 
 // cacheHash determines whether the hash value of key type K should be cached
-// inside the map's internal container (buckets/entries) to optimize lookups.
+// inside pointer-based map entries.
 //
 // Heuristics:
 //   - Small Keys (< 2 words, e.g., integers, floats, pointers): Caching is disabled.
-//     Recalculating hash or comparing keys directly is extremely cheap. Omitting
-//     the cached hash saves 8 bytes per slot, packing entries tighter to maximize
-//     cache-line utilization and SWAR efficiency.
+//     Recalculating hash or comparing keys directly is extremely cheap, so the
+//     cached hash mostly adds memory traffic.
 //   - Large Keys (>= 2 words, e.g., strings, interfaces, structs): Caching is enabled.
-//     Comparing large keys directly or re-hashing them is expensive. Storing the
-//     precomputed hash allows cheap early-filtering (hash comparison) before executing
-//     the full key equality check.
+//     The main measured win is concurrent string-key insertion, especially paths
+//     that trigger resize/copy, because migration can reuse the stored hash
+//     instead of re-hashing every key. Hit loads still verify the full key after
+//     the metadata match, so cached hash has little effect there. Misses and hash
+//     collisions can benefit from the extra hash check before key equality, but
+//     that is secondary to the insert/resize gain.
 //
 // Compilation & Performance:
 // This function is a zero-cost abstraction. Since `unsafe.Sizeof(*new(K))` is a
@@ -169,9 +171,6 @@ type counterStripe struct {
 //
 //go:nosplit
 func cacheHash[K comparable]() bool {
-	// For short string keys, the cached hash provides less than a 5% write
-	// throughput improvement at the cost of an additional machine word per entry.
-	// It is currently disabled.
 	return unsafe.Sizeof(*new(K)) >= 2*unsafe.Sizeof(uintptr(0))
 }
 
