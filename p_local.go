@@ -565,6 +565,14 @@ func (p *PLocalCounter64) Reset() uint64 {
 	return sum
 }
 
+// Clear discards all P-local counter slots.
+// Subsequent accesses lazily allocate fresh zeroed slots.
+func (p *PLocalCounter64) Clear() {
+	p.mu.Lock()
+	p.shards.Store(nil)
+	p.mu.Unlock()
+}
+
 // =============================================================================
 // PLocalCounter64N
 // =============================================================================
@@ -893,6 +901,8 @@ func (p *pooledLocalCounterNPool) New(n uintptr) PooledLocalCounterN {
 
 // Add adds delta to counter i in the current P-local slot and returns that
 // slot's new value.
+//
+//go:nosplit
 func (c *PooledLocalCounterN) Add(i uintptr, delta uintptr) uintptr {
 	rawPid := uintptr(runtime_procPin())
 	pid := rawPid & c.mask
@@ -904,6 +914,8 @@ func (c *PooledLocalCounterN) Add(i uintptr, delta uintptr) uintptr {
 }
 
 // Get returns counter i from the current P-local slot.
+//
+//go:nosplit
 func (c *PooledLocalCounterN) Get(i uintptr) uintptr {
 	pid := uintptr(runtime_procPin()) & c.mask
 	counter := (*atomic.Uintptr)(unsafe.Add(c.base,
