@@ -8,7 +8,7 @@ package cc
 // - Not safe across goroutines.
 // 警告：仅在回调期间有效；不可保存或让其指针逃逸，也不可跨协程使用。
 type MapEntry[K comparable, V any] struct {
-	entry  entry_[K, V]
+	entry  entryNoHash[K, V]
 	loaded bool
 	op     computeOp
 }
@@ -24,7 +24,7 @@ func (e *MapEntry[K, V]) Key() K {
 //
 //go:nosplit
 func (e *MapEntry[K, V]) Value() V {
-	return e.entry.value
+	return e.entry.val
 }
 
 // Loaded reports whether the entry exists in the map.
@@ -38,7 +38,7 @@ func (e *MapEntry[K, V]) Loaded() bool {
 //
 //go:nosplit
 func (e *MapEntry[K, V]) Update(value V) {
-	e.entry.value = value
+	e.entry.val = value
 	e.op = updateOp
 }
 
@@ -46,20 +46,17 @@ func (e *MapEntry[K, V]) Update(value V) {
 //
 //go:nosplit
 func (e *MapEntry[K, V]) Delete() {
-	e.entry.value = *new(V)
+	e.entry.val = *new(V)
 	e.op = deleteOp
 }
 
-// entry_ is the internal representation of a map entry.
-type entry_[K comparable, V any] = entryWithHash[K, V]
-
 type entryNoHash[K comparable, V any] struct {
-	key   K
-	value V
+	key K
+	val V
 }
 
 type entryWithHash[K comparable, V any] struct {
-	hash  uintptr
-	key   K
-	value V
+	hash uintptr
+	key  K
+	val  V
 }

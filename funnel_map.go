@@ -62,7 +62,7 @@ type funnelBucket struct {
 	// meta: metadata for fast entry lookups, must be 64-bit aligned
 	_       [0]atomic.Uint64
 	meta    uint64
-	entries [fEntriesPerBucket]unsafe.Pointer // [*entry_]
+	entries [fEntriesPerBucket]unsafe.Pointer // [*entryNoHash or *entryWithHash]
 }
 
 // NewFunnelMap creates a new FunnelMap instance. Direct initialization is also
@@ -165,11 +165,11 @@ func (m *FunnelMap[K, V]) Load(key K) (value V, ok bool) {
 			if cacheHash[K]() {
 				e := (*entryWithHash[K, V])(ePtr)
 				if e.hash == hash && e.key == key {
-					return e.value, true
+					return e.val, true
 				}
 			} else {
 				if (*entryNoHash[K, V])(ePtr).key == key {
-					return (*entryNoHash[K, V])(ePtr).value, true
+					return (*entryNoHash[K, V])(ePtr).val, true
 				}
 			}
 		}
@@ -213,7 +213,7 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 					e := (*entryWithHash[K, V])(ePtr)
 					if e.hash == hash && e.key == key {
 						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&e.value)),
+							noescape(unsafe.Pointer(&e.val)),
 							noescape(unsafe.Pointer(&value)),
 						) {
 							return
@@ -223,7 +223,7 @@ func (m *FunnelMap[K, V]) Store(key K, value V) {
 				} else {
 					if (*entryNoHash[K, V])(ePtr).key == key {
 						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).value)),
+							noescape(unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).val)),
 							noescape(unsafe.Pointer(&value)),
 						) {
 							return
@@ -293,11 +293,7 @@ slowPath:
 				e := (*entryWithHash[K, V])(ePtr)
 				if e.hash == hash && e.key == key {
 					// Update
-					newEntry := unsafe.Pointer(&entryWithHash[K, V]{
-						hash:  hash,
-						key:   key,
-						value: value,
-					})
+					newEntry := unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: key, val: value})
 					storePtr(root.At(j), newEntry)
 					root.Unlock()
 					return
@@ -305,7 +301,7 @@ slowPath:
 			} else {
 				if (*entryNoHash[K, V])(ePtr).key == key {
 					// Update
-					newEntry := unsafe.Pointer(&entryNoHash[K, V]{key: key, value: value})
+					newEntry := unsafe.Pointer(&entryNoHash[K, V]{key: key, val: value})
 					storePtr(root.At(j), newEntry)
 					root.Unlock()
 					return
@@ -329,9 +325,9 @@ slowPath:
 			emptyIdx := firstMarkedByteIndex(empty)
 			var newEntry unsafe.Pointer
 			if cacheHash[K]() {
-				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: key, value: value})
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: key, val: value})
 			} else {
-				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: key, value: value})
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: key, val: value})
 			}
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
@@ -429,7 +425,7 @@ func (m *FunnelMap[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
-				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&e.entry.val)),
 				noescape(unsafe.Pointer(&old)),
 			) {
 				e.Update(new)
@@ -454,7 +450,7 @@ func (m *FunnelMap[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
-				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&e.entry.val)),
 				noescape(unsafe.Pointer(&old)),
 			) {
 				e.Delete()
@@ -533,15 +529,15 @@ func (m *FunnelMap[K, V]) compute(
 					e := (*entryWithHash[K, V])(ePtr)
 					if e.hash == hash && e.key == *key {
 						if flags&computeSkipIfFound != 0 {
-							return e.value, true
+							return e.val, true
 						}
 						if flags&computeUsesValue != 0 {
 							if val != nil {
 								if m.valEqual != nil && m.valEqual(
-									noescape(unsafe.Pointer(&e.value)),
+									noescape(unsafe.Pointer(&e.val)),
 									noescape(val),
 								) {
-									return e.value, true
+									return e.val, true
 								}
 							}
 						}
@@ -551,15 +547,15 @@ func (m *FunnelMap[K, V]) compute(
 					e := (*entryNoHash[K, V])(ePtr)
 					if e.key == *key {
 						if flags&computeSkipIfFound != 0 {
-							return e.value, true
+							return e.val, true
 						}
 						if flags&computeUsesValue != 0 {
 							if val != nil {
 								if m.valEqual != nil && m.valEqual(
-									noescape(unsafe.Pointer(&e.value)),
+									noescape(unsafe.Pointer(&e.val)),
 									noescape(val),
 								) {
-									return e.value, true
+									return e.val, true
 								}
 							}
 						}
@@ -634,7 +630,7 @@ slowPath:
 	}
 
 	var j uintptr
-	it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
+	it := MapEntry[K, V]{entry: entryNoHash[K, V]{key: *key}}
 	meta := loadUint64Fast(&root.meta)
 	for marked := fMarkZeroBytes(meta ^ h2w); marked != 0; marked &= marked - 1 {
 		j = firstMarkedByteIndex(marked)
@@ -642,12 +638,12 @@ slowPath:
 			if cacheHash[K]() {
 				e := (*entryWithHash[K, V])(ePtr)
 				if e.hash == hash && e.key == *key {
-					it.entry.value, it.loaded = e.value, true
+					it.entry.val, it.loaded = e.val, true
 					break
 				}
 			} else {
 				if (*entryNoHash[K, V])(ePtr).key == *key {
-					it.entry.value, it.loaded = (*entryNoHash[K, V])(ePtr).value, true
+					it.entry.val, it.loaded = (*entryNoHash[K, V])(ePtr).val, true
 					break
 				}
 			}
@@ -657,26 +653,26 @@ slowPath:
 	if !it.loaded {
 		if meta&opNextMask != 0 {
 			if v, ok := table.overflow.Load(*key); ok {
-				it.entry.value, it.loaded = v, true
+				it.entry.val, it.loaded = v, true
 				overflow = true
 			}
 		}
 	}
 
 	// --- Compute Logic ---
-	retV := it.entry.value
+	retV := it.entry.val
 	if flags == computeInit|computeSkipIfFound|computeUsesValue { //nolint:staticcheck
 		// LoadOrStore
 		if !it.loaded {
-			it.entry.value = *(*V)(val)
+			it.entry.val = *(*V)(val)
 			it.op = updateOp
-			retV = it.entry.value
+			retV = it.entry.val
 		}
 	} else if flags == computeSkipIfNotFound|computeUsesValue {
 		if it.loaded {
 			if val != nil {
 				// LoadAndUpdate
-				it.entry.value = *(*V)(val)
+				it.entry.val = *(*V)(val)
 				it.op = updateOp
 			} else {
 				// LoadAndDelete, Delete
@@ -685,28 +681,28 @@ slowPath:
 		}
 	} else if flags == computeInit|computeUsesValue {
 		// Swap, Store
-		it.entry.value = *(*V)(val)
+		it.entry.val = *(*V)(val)
 		it.op = updateOp
 	} else {
 		// Compute, LoadOrStoreFn, CompareAnd...
 		(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
-		retV = it.entry.value
+		retV = it.entry.val
 	}
 
 	switch it.op {
 	case updateOp:
 		if it.loaded {
 			if overflow {
-				table.overflow.Store(*key, it.entry.value)
+				table.overflow.Store(*key, it.entry.val)
 				root.Unlock()
 				return retV, it.loaded
 			}
 			// Update
 			var newEntry unsafe.Pointer
 			if cacheHash[K]() {
-				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: *key, value: it.entry.value})
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: *key, val: it.entry.val})
 			} else {
-				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, value: it.entry.value})
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, val: it.entry.val})
 			}
 			storePtr(root.At(j), newEntry)
 			root.Unlock()
@@ -722,9 +718,9 @@ slowPath:
 			// still nil
 			var newEntry unsafe.Pointer
 			if cacheHash[K]() {
-				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: *key, value: it.entry.value})
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: *key, val: it.entry.val})
 			} else {
-				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, value: it.entry.value})
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, val: it.entry.val})
 			}
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
@@ -732,7 +728,7 @@ slowPath:
 			table.size.Add(0, 1)
 			return retV, it.loaded
 		}
-		table.overflow.Store(*key, it.entry.value)
+		table.overflow.Store(*key, it.entry.val)
 		root.UnlockWithMeta(meta | opNextMask)
 
 		// Check if the table needs to grow
@@ -802,12 +798,12 @@ func (m *FunnelMap[K, V]) Range(yield func(key K, value V) bool) {
 			if ePtr := loadPtr(b.At(j)); ePtr != nil {
 				if cacheHash[K]() {
 					e := (*entryWithHash[K, V])(ePtr)
-					if !yield(e.key, e.value) {
+					if !yield(e.key, e.val) {
 						return
 					}
 				} else {
 					e := (*entryNoHash[K, V])(ePtr)
-					if !yield(e.key, e.value) {
+					if !yield(e.key, e.val) {
 						return
 					}
 				}
@@ -938,12 +934,14 @@ restart:
 		for marked := meta & fMetaMask; marked != 0; marked &= marked - 1 {
 			j := firstMarkedByteIndex(marked)
 			ePtr := *b.At(j)
+
+			var entryHash uintptr
 			if cacheHash[K]() {
 				e := (*entryWithHash[K, V])(ePtr)
-				it.entry.hash, it.entry.key, it.entry.value = e.hash, e.key, e.value
+				entryHash, it.entry.key, it.entry.val = e.hash, e.key, e.val
 			} else {
 				e := (*entryNoHash[K, V])(ePtr)
-				it.entry.key, it.entry.value = e.key, e.value
+				it.entry.key, it.entry.val = e.key, e.val
 			}
 
 			it.op = cancelOp
@@ -953,9 +951,9 @@ restart:
 			case updateOp:
 				var newEntry unsafe.Pointer
 				if cacheHash[K]() {
-					newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: it.entry.hash, key: it.entry.key, value: it.entry.value})
+					newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: entryHash, key: it.entry.key, val: it.entry.val})
 				} else {
-					newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: it.entry.key, value: it.entry.value})
+					newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: it.entry.key, val: it.entry.val})
 				}
 				storePtr(b.At(j), newEntry)
 			case deleteOp:
@@ -1000,12 +998,12 @@ restart:
 		}
 
 		it.entry.key = k
-		it.entry.value = v
+		it.entry.val = v
 		it.op = cancelOp
 		shouldContinue := yield(noEscape(&it))
 		switch it.op {
 		case updateOp:
-			overflow.Store(k, it.entry.value)
+			overflow.Store(k, it.entry.val)
 		case deleteOp:
 			overflow.Delete(k)
 		default:
@@ -1353,10 +1351,10 @@ func (m *FunnelMap[K, V]) copyBucket(
 					destB.meta = destMeta | opNextMask
 					if cacheHash[K]() {
 						e := (*entryWithHash[K, V])(ePtr)
-						newTable.overflow.Store(e.key, e.value)
+						newTable.overflow.Store(e.key, e.val)
 					} else {
 						e := (*entryNoHash[K, V])(ePtr)
-						newTable.overflow.Store(e.key, e.value)
+						newTable.overflow.Store(e.key, e.val)
 					}
 				}
 			}
@@ -1392,9 +1390,9 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 			destB.meta = setByte(destMeta, h2v, emptyIdx)
 			var newEntry unsafe.Pointer
 			if cacheHash[K]() {
-				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: k, value: v})
+				newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: k, val: v})
 			} else {
-				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: k, value: v})
+				newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: k, val: v})
 			}
 			*destB.At(emptyIdx) = newEntry
 			copied++

@@ -64,7 +64,7 @@ type bucket struct {
 	// meta: metadata for fast entry lookups, must be 64-bit aligned
 	_       [0]atomic.Uint64
 	meta    uint64
-	entries [entriesPerBucket]unsafe.Pointer // [*entry_]
+	entries [entriesPerBucket]unsafe.Pointer // [*entryNoHash or *entryWithHash]
 	next    unsafe.Pointer                   // [*bucket]
 }
 
@@ -188,11 +188,11 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
 				if cacheHash[K]() {
 					e := (*entryWithHash[K, V])(ePtr)
 					if e.hash == hash && e.key == key {
-						return e.value, true
+						return e.val, true
 					}
 				} else {
 					if (*entryNoHash[K, V])(ePtr).key == key {
-						return (*entryNoHash[K, V])(ePtr).value, true
+						return (*entryNoHash[K, V])(ePtr).val, true
 					}
 				}
 			}
@@ -236,7 +236,7 @@ func (m *Map[K, V]) Store(key K, value V) {
 					e := (*entryWithHash[K, V])(ePtr)
 					if e.hash == hash && e.key == key {
 						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&e.value)),
+							noescape(unsafe.Pointer(&e.val)),
 							noescape(unsafe.Pointer(&value)),
 						) {
 							return
@@ -246,7 +246,7 @@ func (m *Map[K, V]) Store(key K, value V) {
 				} else {
 					if (*entryNoHash[K, V])(ePtr).key == key {
 						if m.valEqual != nil && m.valEqual(
-							noescape(unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).value)),
+							noescape(unsafe.Pointer(&(*entryNoHash[K, V])(ePtr).val)),
 							noescape(unsafe.Pointer(&value)),
 						) {
 							return
@@ -311,9 +311,9 @@ slowPath:
 	// retry paths; benchmarks showed that tradeoff is not a stable win.
 	var newEntry unsafe.Pointer
 	if cacheHash[K]() {
-		newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: key, value: value})
+		newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: key, val: value})
 	} else {
-		newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: key, value: value})
+		newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: key, val: value})
 	}
 	lastB := root
 	for {
@@ -469,7 +469,7 @@ func (m *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
-				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&e.entry.val)),
 				noescape(unsafe.Pointer(&old)),
 			) {
 				e.Update(new)
@@ -494,7 +494,7 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
-				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&e.entry.val)),
 				noescape(unsafe.Pointer(&old)),
 			) {
 				e.Delete()
@@ -576,15 +576,15 @@ func (m *Map[K, V]) compute(
 						e := (*entryWithHash[K, V])(ePtr)
 						if e.hash == hash && e.key == *key {
 							if flags&computeSkipIfFound != 0 {
-								return e.value, true
+								return e.val, true
 							}
 							if flags&computeUsesValue != 0 {
 								if val != nil {
 									if m.valEqual != nil && m.valEqual(
-										noescape(unsafe.Pointer(&e.value)),
+										noescape(unsafe.Pointer(&e.val)),
 										noescape(val),
 									) {
-										return e.value, true
+										return e.val, true
 									}
 								}
 							}
@@ -594,15 +594,15 @@ func (m *Map[K, V]) compute(
 						e := (*entryNoHash[K, V])(ePtr)
 						if e.key == *key {
 							if flags&computeSkipIfFound != 0 {
-								return e.value, true
+								return e.val, true
 							}
 							if flags&computeUsesValue != 0 {
 								if val != nil {
 									if m.valEqual != nil && m.valEqual(
-										noescape(unsafe.Pointer(&e.value)),
+										noescape(unsafe.Pointer(&e.val)),
 										noescape(val),
 									) {
-										return e.value, true
+										return e.val, true
 									}
 								}
 							}
@@ -670,7 +670,7 @@ slowPath:
 		emptyB *bucket
 		emptyI uintptr
 	)
-	it := MapEntry[K, V]{entry: entry_[K, V]{key: *key}}
+	it := MapEntry[K, V]{entry: entryNoHash[K, V]{key: *key}}
 	lastB := root
 findLoop:
 	for {
@@ -682,12 +682,12 @@ findLoop:
 				if cacheHash[K]() {
 					e := (*entryWithHash[K, V])(ePtr)
 					if e.hash == hash && e.key == *key {
-						it.entry.value, it.loaded = e.value, true
+						it.entry.val, it.loaded = e.val, true
 						break findLoop
 					}
 				} else {
 					if (*entryNoHash[K, V])(ePtr).key == *key {
-						it.entry.value, it.loaded = (*entryNoHash[K, V])(ePtr).value, true
+						it.entry.val, it.loaded = (*entryNoHash[K, V])(ePtr).val, true
 						break findLoop
 					}
 				}
@@ -705,19 +705,19 @@ findLoop:
 	}
 
 	// --- Compute Logic ---
-	retV := it.entry.value
+	retV := it.entry.val
 	if flags == computeInit|computeSkipIfFound|computeUsesValue { //nolint:staticcheck
 		// LoadOrStore
 		if !it.loaded {
-			it.entry.value = *(*V)(val)
+			it.entry.val = *(*V)(val)
 			it.op = updateOp
-			retV = it.entry.value
+			retV = it.entry.val
 		}
 	} else if flags == computeSkipIfNotFound|computeUsesValue {
 		if it.loaded {
 			if val != nil {
 				// LoadAndUpdate
-				it.entry.value = *(*V)(val)
+				it.entry.val = *(*V)(val)
 				it.op = updateOp
 			} else {
 				// LoadAndDelete, Delete
@@ -726,12 +726,12 @@ findLoop:
 		}
 	} else if flags == computeInit|computeUsesValue {
 		// Swap, Store
-		it.entry.value = *(*V)(val)
+		it.entry.val = *(*V)(val)
 		it.op = updateOp
 	} else {
 		// Compute, LoadOrStoreFn, CompareAnd...
 		(*(*func(e *MapEntry[K, V]))(val))(noEscape(&it))
-		retV = it.entry.value
+		retV = it.entry.val
 	}
 
 	switch it.op {
@@ -739,13 +739,9 @@ findLoop:
 		// Update
 		var newEntry unsafe.Pointer
 		if cacheHash[K]() {
-			newEntry = unsafe.Pointer(&entryWithHash[K, V]{
-				hash:  hash,
-				key:   *key,
-				value: it.entry.value,
-			})
+			newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: hash, key: *key, val: it.entry.val})
 		} else {
-			newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, value: it.entry.value})
+			newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: *key, val: it.entry.val})
 		}
 		if it.loaded {
 			storePtr(lastB.At(j), newEntry)
@@ -848,12 +844,12 @@ func (m *Map[K, V]) Range(yield func(key K, value V) bool) {
 				if ePtr := loadPtr(b.At(j)); ePtr != nil {
 					if cacheHash[K]() {
 						e := (*entryWithHash[K, V])(ePtr)
-						if !yield(e.key, e.value) {
+						if !yield(e.key, e.val) {
 							return
 						}
 					} else {
 						e := (*entryNoHash[K, V])(ePtr)
-						if !yield(e.key, e.value) {
+						if !yield(e.key, e.val) {
 							return
 						}
 					}
@@ -989,12 +985,13 @@ restart:
 				j := firstMarkedByteIndex(marked)
 				ePtr := *b.At(j)
 
+				var entryHash uintptr
 				if cacheHash[K]() {
 					e := (*entryWithHash[K, V])(ePtr)
-					it.entry.hash, it.entry.key, it.entry.value = e.hash, e.key, e.value
+					entryHash, it.entry.key, it.entry.val = e.hash, e.key, e.val
 				} else {
 					e := (*entryNoHash[K, V])(ePtr)
-					it.entry.key, it.entry.value = e.key, e.value
+					it.entry.key, it.entry.val = e.key, e.val
 				}
 
 				it.op = cancelOp
@@ -1002,11 +999,13 @@ restart:
 
 				switch it.op {
 				case updateOp:
+					var newEntry unsafe.Pointer
 					if cacheHash[K]() {
-						storePtr(b.At(j), unsafe.Pointer(&entryWithHash[K, V]{hash: it.entry.hash, key: it.entry.key, value: it.entry.value}))
+						newEntry = unsafe.Pointer(&entryWithHash[K, V]{hash: entryHash, key: it.entry.key, val: it.entry.val})
 					} else {
-						storePtr(b.At(j), unsafe.Pointer(&entryNoHash[K, V]{key: it.entry.key, value: it.entry.value}))
+						newEntry = unsafe.Pointer(&entryNoHash[K, V]{key: it.entry.key, val: it.entry.val})
 					}
+					storePtr(b.At(j), newEntry)
 				case deleteOp:
 					storePtr(b.At(j), nil)
 					meta = setByte(meta, h2Empty, j)

@@ -965,15 +965,15 @@ func (m *V28Map[K, V]) computeIn(
 					return status, *new(V), false, false
 				}
 				it := MapEntry[K, V]{
-					entry:  entry_[K, V]{hash: hash, key: *key, value: v},
+					entry:  entryNoHash[K, V]{key: *key, val: v},
 					loaded: true,
 				}
 				fn(noEscape(&it))
 				switch it.op {
 				case updateOp:
-					e.val = it.entry.value
+					e.val = it.entry.val
 					v28EndWriteModified(b, ctrl)
-					return v28OK, it.entry.value, true, false
+					return v28OK, it.entry.val, true, false
 				case deleteOp:
 					if !v28EnableSameKeyTombstoneReuse {
 						e.key = *new(K)
@@ -982,10 +982,10 @@ func (m *V28Map[K, V]) computeIn(
 					v28StoreTag(b, lane, v28TagDeleted)
 					v28EndWriteModified(b, ctrl)
 					table.size.Add(v28CntTombstones, 1)
-					return v28OK, it.entry.value, true, false
+					return v28OK, it.entry.val, true, false
 				default:
 					v28EndWriteUnchanged(b, ctrl)
-					return v28OK, it.entry.value, true, false
+					return v28OK, it.entry.val, true, false
 				}
 			}
 			match &= match - 1
@@ -1003,7 +1003,7 @@ func (m *V28Map[K, V]) computeIn(
 			}
 			lane, reuseDeleted := v28InsertLane(words, empty)
 			it := MapEntry[K, V]{
-				entry: entry_[K, V]{hash: hash, key: *key},
+				entry: entryNoHash[K, V]{key: *key},
 			}
 			fn(noEscape(&it))
 			if it.op != updateOp {
@@ -1012,15 +1012,15 @@ func (m *V28Map[K, V]) computeIn(
 			}
 			e := table.entry(bi, lane)
 			e.key = *key
-			e.val = it.entry.value
+			e.val = it.entry.val
 			v28StoreTag(b, lane, tag)
 			v28EndWriteModified(b, ctrl)
 			if reuseDeleted {
 				table.size.Add(v28CntTombstones, ^uintptr(0))
-				return v28OK, it.entry.value, false, false
+				return v28OK, it.entry.val, false, false
 			}
 			local := table.size.Add(v28CntOccupied, 1)
-			return v28OK, it.entry.value, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
+			return v28OK, it.entry.val, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
 		}
 		if v28EnableSameKeyTombstoneReuse {
 			tombstones := v28DeletedBits(words)
@@ -1040,18 +1040,18 @@ func (m *V28Map[K, V]) computeIn(
 						return status, *new(V), false, false
 					}
 					it := MapEntry[K, V]{
-						entry: entry_[K, V]{hash: hash, key: *key},
+						entry: entryNoHash[K, V]{key: *key},
 					}
 					fn(noEscape(&it))
 					if it.op != updateOp {
 						v28EndWriteUnchanged(b, ctrl)
 						return v28OK, *new(V), false, false
 					}
-					e.val = it.entry.value
+					e.val = it.entry.val
 					v28StoreTag(b, lane, tag)
 					v28EndWriteModified(b, ctrl)
 					table.size.Add(v28CntTombstones, ^uintptr(0))
-					return v28OK, it.entry.value, false, false
+					return v28OK, it.entry.val, false, false
 				}
 				tombstones &= tombstones - 1
 			}

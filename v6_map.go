@@ -159,6 +159,14 @@ type v6Bucket struct {
 	state atomic.Uint64
 }
 
+// v6Entry intentionally does not cache the full hash.
+//
+// An entryWithHash-style layout was tested for string keys. It did not produce
+// a stable insert-throughput win in V6: bucket tags already filter most failed
+// candidates before key equality, and adding a hash widens every flat entry,
+// increasing cache footprint and resize copy traffic. Keep the hash out of the
+// V6 payload unless a future benchmark demonstrates a clear net win for a
+// specific larger-key workload.
 type v6Entry[K comparable, V any] struct {
 	key K
 	val V
@@ -300,7 +308,7 @@ func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
-				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&e.entry.val)),
 				noescape(unsafe.Pointer(&old)),
 			) {
 				e.Update(new)
@@ -322,7 +330,7 @@ func (m *V6Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	fn := func(e *MapEntry[K, V]) {
 		if e.Loaded() {
 			if m.valEqual(
-				noescape(unsafe.Pointer(&e.entry.value)),
+				noescape(unsafe.Pointer(&e.entry.val)),
 				noescape(unsafe.Pointer(&old)),
 			) {
 				e.Delete()
@@ -534,12 +542,12 @@ restart:
 			lane := v6FirstMarkedLane(full)
 			slot := table.entry(i, lane)
 			e := slot.ReadUnfenced()
-			it.entry.key, it.entry.value = e.key, e.val
+			it.entry.key, it.entry.val = e.key, e.val
 			it.op = cancelOp
 			shouldContinue := yield(noEscape(&it))
 			switch it.op {
 			case updateOp:
-				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.value})
+				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.val})
 				modified = true
 			case deleteOp:
 				if !v6EnableSameKeyTombstoneReuse {
@@ -1122,14 +1130,14 @@ func (m *V6Map[K, V]) computeIn(
 					return status, *new(V), false, false
 				}
 				it := MapEntry[K, V]{
-					entry:  entry_[K, V]{hash: hash, key: *key, value: e.val},
+					entry:  entryNoHash[K, V]{key: *key, val: e.val},
 					loaded: true,
 				}
 				fn(noEscape(&it))
-				ret := it.entry.value
+				ret := it.entry.val
 				switch it.op {
 				case updateOp:
-					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.value})
+					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.val})
 					v6EndWriteModified(b, ctrl)
 					return v6OK, ret, true, false
 				case deleteOp:
@@ -1165,22 +1173,22 @@ func (m *V6Map[K, V]) computeIn(
 			}
 			lane, reuseDeleted := v6InsertLane(ctrl, empty)
 			it := MapEntry[K, V]{
-				entry: entry_[K, V]{hash: hash, key: *key},
+				entry: entryNoHash[K, V]{key: *key},
 			}
 			fn(noEscape(&it))
 			if it.op != updateOp {
 				v6EndWriteUnchanged(b, ctrl)
 				return v6OK, *new(V), false, false
 			}
-			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: it.entry.value})
+			table.entry(bi, lane).WriteUnfenced(v6Entry[K, V]{key: *key, val: it.entry.val})
 			ctrl = v6SetTag(ctrl, lane, tag)
 			v6EndWriteModified(b, ctrl)
 			if reuseDeleted {
 				table.size.Add(v6CntTombstones, ^uintptr(0))
-				return v6OK, it.entry.value, false, false
+				return v6OK, it.entry.val, false, false
 			}
 			local := table.size.Add(v6CntOccupied, 1)
-			return v6OK, it.entry.value, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
+			return v6OK, it.entry.val, false, empty&(empty-1) == 0 && int(local) >= table.stripeCap
 		}
 		if v6EnableSameKeyTombstoneReuse {
 			tombstones := v6DeletedBits(ctrl)
@@ -1203,18 +1211,18 @@ func (m *V6Map[K, V]) computeIn(
 						return status, *new(V), false, false
 					}
 					it := MapEntry[K, V]{
-						entry: entry_[K, V]{hash: hash, key: *key},
+						entry: entryNoHash[K, V]{key: *key},
 					}
 					fn(noEscape(&it))
 					if it.op != updateOp {
 						v6EndWriteUnchanged(b, ctrl)
 						return v6OK, *new(V), false, false
 					}
-					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.value})
+					slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.val})
 					ctrl = v6SetTag(ctrl, lane, tag)
 					v6EndWriteModified(b, ctrl)
 					table.size.Add(v6CntTombstones, ^uintptr(0))
-					return v6OK, it.entry.value, false, false
+					return v6OK, it.entry.val, false, false
 				}
 				tombstones &= tombstones - 1
 			}
