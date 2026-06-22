@@ -95,7 +95,7 @@ func (m *Map[K, V]) stats() *mapStats {
 		return stats
 	}
 	stats.RootBuckets = table.mask + 1
-	stats.Counter = table.SumSize()
+	stats.Counter = int(table.size.Value(0))
 	stats.CounterLen = table.size.Size()
 	for i := uintptr(0); i <= table.mask; i++ {
 		var entries uintptr

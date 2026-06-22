@@ -336,7 +336,7 @@ slowPath:
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
-			table.size.Add(fSizeCounter, 1)
+			table.size.Add(0, 1)
 			return
 		}
 	}
@@ -346,9 +346,9 @@ slowPath:
 	root.UnlockWithMeta(meta | opNextMask)
 
 	// Check if the table needs to grow
-	if int(table.size.Get(fSizeCounter)) >= table.stripeCap {
+	if int(table.size.Get(0)) >= table.stripeCap {
 		if loadPtr(&m.rs) == nil {
-			totalSize := int(table.size.Value(fSizeCounter)) + table.overflow.Size()
+			totalSize := int(table.size.Value(0)) + table.overflow.Size()
 			if totalSize >= table.growCap {
 				m.tryResize(mapGrowHint, (table.mask+1)<<1)
 			}
@@ -729,16 +729,16 @@ slowPath:
 			storePtr(root.At(emptyIdx), newEntry)
 			newMeta := setByte(meta, h2v, emptyIdx)
 			root.UnlockWithMeta(newMeta)
-			table.size.Add(fSizeCounter, 1)
+			table.size.Add(0, 1)
 			return retV, it.loaded
 		}
 		table.overflow.Store(*key, it.entry.value)
 		root.UnlockWithMeta(meta | opNextMask)
 
 		// Check if the table needs to grow
-		if int(table.size.Get(fSizeCounter)) >= table.stripeCap {
+		if int(table.size.Get(0)) >= table.stripeCap {
 			if loadPtr(&m.rs) == nil {
-				totalSize := int(table.size.Value(fSizeCounter)) + table.overflow.Size()
+				totalSize := int(table.size.Value(0)) + table.overflow.Size()
 				if totalSize >= table.growCap {
 					m.tryResize(mapGrowHint, (table.mask+1)<<1)
 				}
@@ -759,7 +759,7 @@ slowPath:
 		storePtr(root.At(j), nil)
 		newMeta := setByte(meta, h2Empty, j)
 		root.UnlockWithMeta(newMeta)
-		table.size.Add(fSizeCounter, ^uintptr(0))
+		table.size.Add(0, ^uintptr(0))
 
 		// Check if table shrinking is needed
 		if m.shrinkOn {
@@ -767,7 +767,7 @@ slowPath:
 				if loadPtr(&m.rs) == nil {
 					tableLen := table.mask + 1
 					if m.minLen < tableLen {
-						totalSize := int(table.size.Value(fSizeCounter)) + table.overflow.Size()
+						totalSize := int(table.size.Value(0)) + table.overflow.Size()
 						if totalSize < int(tableLen*fEntriesPerBucket/shrinkFraction) {
 							m.tryResize(mapShrinkHint, tableLen>>1)
 						}
@@ -834,7 +834,7 @@ func (m *FunnelMap[K, V]) Size() int {
 	if table == nil {
 		return 0
 	}
-	totalSize := int(table.size.Value(fSizeCounter)) + table.overflow.Size()
+	totalSize := int(table.size.Value(0)) + table.overflow.Size()
 	return max(totalSize, 0)
 }
 
@@ -962,7 +962,7 @@ restart:
 				storePtr(b.At(j), nil)
 				meta = setByte(meta, h2Empty, j)
 				storeUint64(&b.meta, meta)
-				table.size.Add(fSizeCounter, ^uintptr(0))
+				table.size.Add(0, ^uintptr(0))
 			default:
 				// cancelOp: no-op
 			}
@@ -1073,7 +1073,7 @@ func (m *FunnelMap[K, V]) doResize(
 			if sizeAdd <= 0 {
 				return
 			}
-			totalSize := int(table.size.Value(fSizeCounter)) + table.overflow.Size()
+			totalSize := int(table.size.Value(0)) + table.overflow.Size()
 			newLen = fCalcTableLen(totalSize + sizeAdd)
 			if newLen <= tableLen {
 				return
@@ -1083,7 +1083,7 @@ func (m *FunnelMap[K, V]) doResize(
 			if tableLen <= m.minLen {
 				return
 			}
-			totalSize := int(table.size.Value(fSizeCounter)) + table.overflow.Size()
+			totalSize := int(table.size.Value(0)) + table.overflow.Size()
 			newLen = fCalcTableLen(totalSize)
 			if newLen >= tableLen {
 				return
@@ -1132,7 +1132,7 @@ func (m *FunnelMap[K, V]) CloneTo(clone *FunnelMap[K, V]) {
 	clone.keyHash = m.keyHash
 	clone.valEqual = m.valEqual
 	clone.minLen = m.minLen
-	totalSize := int(table.size.Value(fSizeCounter)) + table.overflow.Size()
+	totalSize := int(table.size.Value(0)) + table.overflow.Size()
 	newLen := fCalcTableLen(totalSize)
 	newTable := newFunnelTable[K, V](newLen)
 	atomic.StorePointer(&clone.table, unsafe.Pointer(newTable))
@@ -1364,7 +1364,7 @@ func (m *FunnelMap[K, V]) copyBucket(
 		}
 	}
 	if copiedInline != 0 {
-		newTable.size.Add(fSizeCounter, copiedInline)
+		newTable.size.Add(0, copiedInline)
 	}
 }
 
@@ -1404,7 +1404,7 @@ func (m *FunnelMap[K, V]) copyBucketWithOverflow(table *funnelTable[K, V], newTa
 		}
 	}
 	if copied != 0 {
-		newTable.size.Add(fSizeCounter, copied)
+		newTable.size.Add(0, copied)
 	}
 }
 
@@ -1440,8 +1440,6 @@ func (b *funnelBucket) UnlockWithMeta(meta uint64) {
 }
 
 const (
-	fSizeCounter = 0
-
 	// fEntriesPerBucket defines the number of per-bucket entry pointers.
 	// Computed at compile time to avoid padding while packing buckets
 	// tightly within cache lines.

@@ -285,9 +285,6 @@ func TestV6MapSkippedWritesDoNotPublish(t *testing.T) {
 
 	m.Store(key, key)
 	table := m.table.Load()
-	if table == nil {
-		t.Fatal("table is nil")
-	}
 	keyCopy := key
 	_, start := v6HashParts(m.hashKey(&keyCopy), m.intKey, table.mask)
 	b := table.buckets.At(start)
@@ -527,9 +524,6 @@ func TestV6MapStoreReusesHashAfterResizeHelp(t *testing.T) {
 		}),
 	)
 	old := m.table.Load()
-	if old == nil {
-		t.Fatal("table is nil")
-	}
 	old.nextTable.Store(newV6Table[int, int](old.bucketLen() << 1))
 
 	m.Store(7, 70)
@@ -660,9 +654,6 @@ func TestV6MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
 	}
 
 	table := m.table.Load()
-	if table == nil {
-		t.Fatal("table is nil")
-	}
 	if table.probeLimit <= uintptr(64) {
 		t.Fatalf("probeLimit = %d, want > baseline %d", table.probeLimit, 64)
 	}

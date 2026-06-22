@@ -717,9 +717,6 @@ func TestPLocalCounterN_Reset(t *testing.T) {
 func TestPLocalCounterN_Alignment(t *testing.T) {
 	c := NewPLocalCounterN()
 	shards := c.shards.Load()
-	if shards == nil {
-		t.Fatal("Expected initialized shards")
-	}
 	if size := unsafe.Sizeof(pLocalCounterNSlot{}); size != opt.CacheLineSize_ {
 		t.Fatalf("Expected slot size %d, got %d", opt.CacheLineSize_, size)
 	}
@@ -813,9 +810,6 @@ func TestPLocalCounter64N_Reset(t *testing.T) {
 func TestPLocalCounter64N_Alignment(t *testing.T) {
 	c := NewPLocalCounter64N()
 	shards := c.shards.Load()
-	if shards == nil {
-		t.Fatal("Expected initialized shards")
-	}
 	if size := unsafe.Sizeof(pLocalCounter64NSlot{}); size != opt.CacheLineSize_ {
 		t.Fatalf("Expected slot size %d, got %d", opt.CacheLineSize_, size)
 	}

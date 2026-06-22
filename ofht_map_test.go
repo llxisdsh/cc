@@ -465,9 +465,6 @@ func TestOFHTMapSameKeyTombstoneReuse(t *testing.T) {
 	}
 
 	table := m.table.Load()
-	if table == nil {
-		t.Fatal("table is nil")
-	}
 	if slotLen := table.mask + 1; slotLen != ofhtMinSlots {
 		t.Fatalf("same-key tombstone churn grew table to %d slots, want %d", slotLen, ofhtMinSlots)
 	}
@@ -513,9 +510,6 @@ func TestOFHTMapLongProbeLimitRepeatedResizeBadHash(t *testing.T) {
 	}
 
 	table := m.table.Load()
-	if table == nil {
-		t.Fatal("table is nil")
-	}
 	if table.probeLimit < uintptr(64) {
 		t.Fatalf("probeLimit=%d, want >= %d", table.probeLimit, 64)
 	}
