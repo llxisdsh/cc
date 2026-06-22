@@ -27,6 +27,15 @@ const (
 	// dwhtEnableSameKeyTombstoneReuse lets a Store revive a tombstone left by
 	// the same key. When enabled, deletes keep only a key-bearing zero-value
 	// entry so the deleted value can be released before resize compaction.
+	//
+	// Do not add a V6-style terminal tombstone reuse switch here without fresh
+	// proof and benchmarks. In a serial probe, reaching Empty can prove that an
+	// earlier Deleted slot is reusable. In DWHT's per-slot DWCAS protocol, the
+	// earlier tombstone and the later empty slot are not covered by one bucket
+	// snapshot; reusing the tombstone would need a second validation pass over
+	// the probe chain to avoid racing with a concurrent insert of the same key.
+	// That validation adds retry and cache traffic, while resize compaction
+	// already removes tombstones in the common recovery path.
 	dwhtEnableSameKeyTombstoneReuse = true
 )
 

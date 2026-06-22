@@ -25,6 +25,15 @@ const (
 	// ofhtEnableSameKeyTombstoneReuse lets a Store revive a tombstone left by
 	// the same key. When disabled, deletes clear both key and value while the
 	// tombstone remains as a probe-continuation marker until resize compaction.
+	//
+	// Do not add a V6-style terminal tombstone reuse switch here without fresh
+	// proof and benchmarks. In a serial probe, reaching Empty can prove that an
+	// earlier Deleted slot is reusable. In OFHT's optimistic per-slot protocol,
+	// the earlier tombstone and the later empty slot are not covered by one
+	// bucket snapshot; reusing the tombstone would need a second validation pass
+	// over the probe chain to avoid racing with a concurrent insert of the same
+	// key. That validation adds retry and cache traffic, while resize compaction
+	// already removes tombstones in the common recovery path.
 	ofhtEnableSameKeyTombstoneReuse = true
 )
 
