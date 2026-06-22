@@ -171,7 +171,9 @@ type counterStripe struct {
 //
 //go:nosplit
 func cacheHash[K comparable]() bool {
-	return unsafe.Sizeof(*new(K)) >= 2*unsafe.Sizeof(uintptr(0))
+	// return unsafe.Sizeof(*new(K)) >= 2*unsafe.Sizeof(uintptr(0))
+	// Disabled after trade-off evaluation.
+	return false
 }
 
 // calcParallelism calculates the number of goroutines for parallel processing.
