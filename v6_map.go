@@ -10,6 +10,7 @@ import (
 	"unsafe"
 )
 
+// V6 compile-time feature knobs.
 const (
 	// v6EnableIntKey enables the specialized integer hash/start path.
 	v6EnableIntKey = true
@@ -33,36 +34,60 @@ const (
 	v6EnableTerminalTombstoneReuse = true
 )
 
+// V6 table geometry.
 const (
-	v6MinBuckets     = 32
+	// Bucket lane count. 3..7 lanes are supported; 6 is the default V6 layout.
 	v6SlotsPerBucket = 6
-	v6LoadFactor     = 0.75
-	v6LaneMarkerMask = uint64(0x808080808080)
+	// Smallest table size; keep it power-of-two for mask-based bucket indexing.
+	v6MinBuckets = 32
+	// Target occupancy for physical lanes; tombstones count as occupied until
+	// resize/compaction.
+	v6LoadFactor = 0.75
 )
 
+// V6 ctrl word layout derived from v6SlotsPerBucket: low bytes are lane tags,
+// followed by writing, frozen, and the remaining high bits as version.
+const (
+	// Terminal tombstone reuse needs enough lanes for Full + Deleted + Empty in
+	// one bucket; the upper bound preserves room for control bits in the 64-bit word.
+	_ = uint8(1) / uint8(v6SlotsPerBucket-2) // 3 <= slots
+	_ = uint8(1) / uint8(8-v6SlotsPerBucket) // slots <= 7
+
+	v6TagBits        = v6SlotsPerBucket * 8
+	v6TagMask        = (uint64(1) << v6TagBits) - 1
+	v6TagByteLow     = v6TagMask / 0xff
+	v6TagByteLow7    = v6TagByteLow * 0x7f
+	v6LaneMarkerMask = v6TagByteLow * 0x80
+
+	v6WritingShift = v6TagBits
+	v6FrozenShift  = v6TagBits + 1
+	v6VersionShift = v6TagBits + 2
+	v6VersionBits  = 64 - v6VersionShift
+
+	// Keep ctrl for version/frozen/writing only. If miss-heavy workloads need a
+	// probe-continuation hint, prefer a side structure so displaced inserts do not
+	// have to update shared bucket metadata.
+	v6WritingMask = uint64(1) << v6WritingShift
+	v6FrozenMask  = uint64(1) << v6FrozenShift
+	v6VersionMask = ^((uint64(1) << v6VersionShift) - 1)
+	v6VersionInc  = uint64(1) << v6VersionShift
+)
+
+// Reserved lane-tag states. Full h2 tags always have the high bit set, so they
+// cannot collide with Empty or Deleted.
 const (
 	v6TagEmpty   = uint8(0)
 	v6TagDeleted = uint8(1)
 )
 
+// V6 table counters. Occupied tracks physical lanes that are no longer Empty
+// (Full + Tombstone); Tombstones tracks lanes currently in Deleted state.
 const (
-	// Keep ctrl for version/frozen/writing only. If miss-heavy workloads need a
-	// probe-continuation hint, prefer a side structure so displaced inserts do not
-	// have to update shared bucket metadata.
-	v6FrozenMask  = uint64(1) << 49
-	v6WritingMask = uint64(1) << 48
-	v6VersionMask = /* unused but kept for ref */ uint64(0x3fff) << 50
-	v6VersionInc  = uint64(1) << 50
-)
-
-const (
-	// occupied tracks physical lanes that are no longer Empty: Full + Tombstone.
-	// tombstones tracks lanes currently in Deleted/Tombstone state, not total
-	// delete operations.
 	v6CntOccupied = iota
 	v6CntTombstones
 )
 
+// V6 write/search status codes used by retrying public operations.
 type v6Status uint8
 
 const (
@@ -72,6 +97,8 @@ const (
 	v6Frozen
 )
 
+// V6 resize reasons. The hint influences target sizing after the winner
+// re-checks the current live/occupied counts.
 type v6ResizeHint uint8
 
 const (
@@ -82,13 +109,13 @@ const (
 
 // V6Map is an experimental SWAR-probed open-addressed map.
 //
-// Each bucket stores six one-byte tags plus a compact control word. Entries
-// are kept in a separate flat array and addressed by bucket/lane, so probing
-// stays compact while key/value storage remains contiguous. Reads use a bucket
-// version snapshot; writes publish through a short per-bucket writing window,
-// and resize freezes old buckets cooperatively. Like [OFHTMap], entry payloads
-// are copied through SeqLockSlot so weak-memory architectures do not move
-// large key/value reads outside the version-checked window.
+// Each bucket stores v6SlotsPerBucket one-byte tags plus a compact control
+// word. Entries are kept in a separate flat array and addressed by bucket/lane,
+// so probing stays compact while key/value storage remains contiguous. Reads
+// use a bucket version snapshot; writes publish through a short per-bucket
+// writing window, and resize freezes old buckets cooperatively. Like [OFHTMap],
+// entry payloads are copied through SeqLockSlot so weak-memory architectures do
+// not move large key/value reads outside the version-checked window.
 //
 // Integer keys use the fast integer hash path. Other comparable key shapes
 // keep Go's built-in hasher to preserve == semantics. Use [WithKeyHasherUnsafe]
@@ -129,32 +156,36 @@ type v6Table[K comparable, V any] struct {
 }
 
 // v6Bucket stores the tags and control metadata unified in a single 64-bit word.
-// Layout: 6 bytes (48 bits) for tags, 2 bytes (16 bits) for control metadata.
-// Total 8 bytes.
-// Alignment: 8-byte aligned (due to atomic.Uint64).
-// Padding: Perfectly packed, 0 bytes of padding.
+// Layout: v6SlotsPerBucket bytes for tags, then writing/frozen/version control
+// bits in the remaining high bits. The bucket stays exactly 8 bytes.
 //
 // ABA boundary: the single atomic state makes tag and control snapshots
-// tear-free. The 14-bit version is not a formal ABA-proof sequence counter, but
+// tear-free. The version field is not a formal ABA-proof sequence counter, but
 // a harmful ABA requires all of these conditions at once:
-//  1. writes to the same bucket complete a full 16,384-version wrap;
+//  1. writes to the same bucket complete a full version wrap;
 //  2. a reader keeps an unfenced entry copy from the old snapshot across that
 //     wrap; and
 //  3. the repeated state validates a torn K/V value from the entry copy.
 //
 // For normal small-K/V workloads this is a strong practical boundary: the entry
-// copy is usually only a few machine-word loads, while the version wrap requires
-// sustained concurrent writes to the same bucket. A public-API stress test using
+// copy is usually only a few machine-word loads, while the version wrap needs
+// many consecutive writes to the same bucket. A public-API stress test using
 // string keys and string values ran for 30 minutes without reproducing a
 // failure. The remaining risk is concentrated in larger K/V types, extremely hot
 // buckets, long scheduler or OS pauses, and very high-frequency mutation of the
 // same bucket. V6 intentionally favors compact buckets and read-path speed over
-// formal ABA immunity for arbitrary K/V sizes.
+// formal ABA immunity for arbitrary K/V sizes. With the default 6 lanes,
+// v6VersionBits is 14 and the wrap distance is 16,384 writes.
+//
+// Default 6-lane ctrl layout:
 //
 // ┌───────────────────┬──────┬───────┬─────────────────────────────────────┐
 // │ version (14 bits) │frozen│writing│     6 × 8-bit h2 tags (48 bits)     │
 // │    bits 63-50     │bit 49│bit 48 │              bits 47-0              │
 // └───────────────────┴──────┴───────┴─────────────────────────────────────┘
+//
+// The actual shifts are derived from v6SlotsPerBucket:
+// tags occupy bits [0, v6TagBits), followed by writing, frozen, then version.
 type v6Bucket struct {
 	state atomic.Uint64
 }
@@ -172,6 +203,8 @@ type v6Entry[K comparable, V any] struct {
 	val V
 }
 
+// NewV6Map creates a new V6Map instance. Direct zero-value initialization is
+// also supported.
 func NewV6Map[K comparable, V any](options ...func(*MapConfig)) *V6Map[K, V] {
 	var cfg MapConfig
 	for _, o := range options {
@@ -203,6 +236,7 @@ func (m *V6Map[K, V]) init(cfg *MapConfig) {
 	m.table.Store(newV6Table[K, V](m.minLen))
 }
 
+// Load returns the value stored for key, if any.
 func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 	table := m.table.Load()
 	if table == nil {
@@ -248,6 +282,7 @@ func (m *V6Map[K, V]) Load(key K) (value V, ok bool) {
 	return *new(V), false
 }
 
+// Store inserts or replaces the value for key.
 func (m *V6Map[K, V]) Store(key K, value V) {
 	m.store(&key, &value, false)
 }
@@ -286,18 +321,25 @@ func (m *V6Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
 	return actual, true
 }
 
+// LoadAndUpdate replaces the value for an existing key and returns the previous
+// value. It leaves the map unchanged when key is absent.
 func (m *V6Map[K, V]) LoadAndUpdate(key K, value V) (previous V, loaded bool) {
 	return m.update(&key, &value, false)
 }
 
+// LoadAndDelete deletes the value for key and returns the previous value, if
+// present.
 func (m *V6Map[K, V]) LoadAndDelete(key K) (previous V, loaded bool) {
 	return m.delete(&key, true)
 }
 
+// Delete removes the value for key, if any.
 func (m *V6Map[K, V]) Delete(key K) {
 	m.delete(&key, false)
 }
 
+// CompareAndSwap replaces the value for key only when the current value equals
+// old. It returns whether the replacement happened.
 func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	if m.table.Load() == nil {
 		return false
@@ -320,6 +362,8 @@ func (m *V6Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
 	return swapped
 }
 
+// CompareAndDelete deletes key only when the current value equals old. It
+// returns whether the deletion happened.
 func (m *V6Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 	if m.table.Load() == nil {
 		return false
@@ -409,6 +453,12 @@ func (m *V6Map[K, V]) compute(
 	}
 }
 
+// Range calls yield sequentially for each key and value present in the map
+// until yield returns false or the traversal finishes.
+//
+// Range is weakly consistent: concurrent updates may or may not be observed,
+// and entries may be skipped or observed more than once if a resize restarts
+// placement while the traversal is in progress.
 func (m *V6Map[K, V]) Range(yield func(K, V) bool) {
 	table := m.table.Load()
 	if table == nil {
@@ -445,6 +495,7 @@ func (m *V6Map[K, V]) Range(yield func(K, V) bool) {
 	}
 }
 
+// All returns Range as a range-over-func iterator.
 func (m *V6Map[K, V]) All() func(yield func(K, V) bool) {
 	return m.Range
 }
@@ -550,10 +601,10 @@ restart:
 				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: it.entry.val})
 				modified = true
 			case deleteOp:
-				if !v6EnableSameKeyTombstoneReuse {
-					slot.WriteUnfenced(v6Entry[K, V]{})
-				} else {
+				if v6EnableSameKeyTombstoneReuse {
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key})
+				} else {
+					slot.WriteUnfenced(v6Entry[K, V]{})
 				}
 				newCtrl = v6SetTag(newCtrl, lane, v6TagDeleted)
 				tombstoneAdds++
@@ -648,6 +699,8 @@ func (m *V6Map[K, V]) stats() v6MapStats {
 	return stats
 }
 
+// Size returns the current number of live key-value pairs recorded by the map.
+// It is an O(1) counter snapshot.
 func (m *V6Map[K, V]) Size() int {
 	table := m.table.Load()
 	if table == nil {
@@ -1066,10 +1119,10 @@ func (m *V6Map[K, V]) deleteIn(
 				if needValue {
 					prev = e.val
 				}
-				if !v6EnableSameKeyTombstoneReuse {
-					slot.WriteUnfenced(v6Entry[K, V]{})
-				} else {
+				if v6EnableSameKeyTombstoneReuse {
 					slot.WriteUnfenced(v6Entry[K, V]{key: e.key})
+				} else {
+					slot.WriteUnfenced(v6Entry[K, V]{})
 				}
 				ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
 				v6EndWriteModified(b, ctrl)
@@ -1141,10 +1194,10 @@ func (m *V6Map[K, V]) computeIn(
 					v6EndWriteModified(b, ctrl)
 					return v6OK, ret, true, false
 				case deleteOp:
-					if !v6EnableSameKeyTombstoneReuse {
-						slot.WriteUnfenced(v6Entry[K, V]{})
-					} else {
+					if v6EnableSameKeyTombstoneReuse {
 						slot.WriteUnfenced(v6Entry[K, V]{key: e.key})
+					} else {
+						slot.WriteUnfenced(v6Entry[K, V]{})
 					}
 					ctrl = v6SetTag(ctrl, lane, v6TagDeleted)
 					v6EndWriteModified(b, ctrl)
@@ -1725,19 +1778,17 @@ func v6FullBits(words uint64) uint64 {
 
 //go:nosplit
 func v6BroadcastTag(tag uint8) uint64 {
-	return uint64(tag) * 0x010101010101
+	return uint64(tag) * v6TagByteLow
 }
 
 //go:nosplit
 func v6MaybeZeroByteBits(words uint64) uint64 {
-	const lowBits = uint64(0x010101010101)
-	return (words - lowBits) &^ words & v6LaneMarkerMask
+	return (words - v6TagByteLow) &^ words & v6LaneMarkerMask
 }
 
 //go:nosplit
 func v6ZeroByteBits(words uint64) uint64 {
-	const lowBits = uint64(0x7f7f7f7f7f7f)
-	return ^(((words & lowBits) + lowBits) | words | lowBits) & v6LaneMarkerMask
+	return ^(((words & v6TagByteLow7) + v6TagByteLow7) | words | v6TagByteLow7) & v6LaneMarkerMask
 }
 
 //go:nosplit
