@@ -1192,7 +1192,9 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 					dst.key = e.key
 					dst.val = e.val
 					v28StoreTag(b, lane, tag)
-					v28EndWriteModified(b, ctrl)
+					// Do not use v28EndWriteModified here: the next table is not
+					// current yet, so no reader validates copies through version.
+					v28EndWriteUnchanged(b, ctrl)
 					break
 				}
 				if probe > next.mask {

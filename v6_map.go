@@ -1487,7 +1487,9 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 					dst := next.entry(bi, lane)
 					dst.WriteUnfenced(e)
 					ctrl = v6SetTag(ctrl, lane, tag)
-					v6EndWriteModified(b, ctrl)
+					// Do not use v6EndWriteModified here: the next table is not
+					// current yet, so no reader validates copies through version.
+					v6EndWriteUnchanged(b, ctrl)
 					break
 				}
 				if probe > next.mask {
