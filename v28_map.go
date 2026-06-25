@@ -1173,32 +1173,42 @@ func (m *V28Map[K, V]) helpResizeInto(old, next *v28Table[K, V]) *v28Table[K, V]
 				}
 				tag, insertStart := v28HashParts(hash, m.intKey, next.mask)
 				var probe uintptr
-				for probe = 0; probe <= next.mask; probe++ {
+				// The next table is not published until every chunk finishes, so no
+				// public reader can observe a tag before its entry payload is written.
+				// Other copiers only use tag bytes to claim distinct lanes. V28 keeps
+				// tags outside ctrl, so reserve one empty tag byte with an aligned
+				// 32-bit CAS instead of taking the bucket write window.
+			appendToDest:
+				for {
 					bi := (insertStart + probe) & next.mask
 					b := next.buckets.At(bi)
-					ctrl, status := v28BeginWrite(b)
-					if status != v28OK {
-						probe--
-						continue
+					for {
+						words := v28LoadTagWords(b)
+						empty := v28EmptyBits(words)
+						if empty == 0 {
+							break
+						}
+						lane := uintptr(bits.TrailingZeros32(empty))
+						wordBase := lane &^ 3
+						shift := uint((lane & 3) * 8)
+						mask := uint32(0xff) << shift
+						wordp := (*uint32)(unsafe.Pointer(&b.tags[wordBase]))
+						word := atomic.LoadUint32(wordp)
+						if word&mask != 0 {
+							continue
+						}
+						if !atomic.CompareAndSwapUint32(wordp, word, word|uint32(tag)<<shift) {
+							continue
+						}
+						dst := next.entry(bi, lane)
+						dst.key = e.key
+						dst.val = e.val
+						break appendToDest
 					}
-					words := v28LoadTagWords(b)
-					empty := v28EmptyBits(words)
-					if empty == 0 {
-						v28EndWriteUnchanged(b, ctrl)
-						continue
+					probe++
+					if probe > next.mask {
+						panicV28GrowFullTable()
 					}
-					lane := uintptr(bits.TrailingZeros32(empty))
-					dst := next.entry(bi, lane)
-					dst.key = e.key
-					dst.val = e.val
-					v28StoreTag(b, lane, tag)
-					// Do not use v28EndWriteModified here: the next table is not
-					// current yet, so no reader validates copies through version.
-					v28EndWriteUnchanged(b, ctrl)
-					break
-				}
-				if probe > next.mask {
-					panicV28GrowFullTable()
 				}
 				copied++
 				if probe > copyMaxProbe {

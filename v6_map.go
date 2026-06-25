@@ -1523,30 +1523,32 @@ func (m *V6Map[K, V]) helpResizeInto(old, next *v6Table[K, V]) *v6Table[K, V] {
 				}
 				tag, insertStart := v6HashParts(hash, m.intKey, next.mask)
 				var probe uintptr
-				for probe = 0; probe <= next.mask; probe++ {
+				// The next table is not published until every chunk finishes, so no
+				// public reader can observe a tag before its entry payload is written.
+				// Other copiers only use the tag word to claim distinct lanes, so a
+				// direct ctrl CAS is enough here; no write-window bit or version bump
+				// is needed.
+			appendToDest:
+				for {
 					bi := (insertStart + probe) & next.mask
 					b := next.buckets.At(bi)
-					ctrl, status := v6BeginWrite(b)
-					if status != v6OK {
-						probe--
-						continue
+					for {
+						ctrl := b.state.Load()
+						empty := v6EmptyBits(ctrl)
+						if empty == 0 {
+							break
+						}
+						lane := v6FirstMarkedLane(empty)
+						if !b.state.CompareAndSwap(ctrl, v6SetTag(ctrl, lane, tag)) {
+							continue
+						}
+						next.entry(bi, lane).WriteUnfenced(e)
+						break appendToDest
 					}
-					empty := v6EmptyBits(ctrl)
-					if empty == 0 {
-						v6EndWriteUnchanged(b, ctrl)
-						continue
+					probe++
+					if probe > next.mask {
+						panicV6GrowFullTable()
 					}
-					lane := v6FirstMarkedLane(empty)
-					dst := next.entry(bi, lane)
-					dst.WriteUnfenced(e)
-					ctrl = v6SetTag(ctrl, lane, tag)
-					// Do not use v6EndWriteModified here: the next table is not
-					// current yet, so no reader validates copies through version.
-					v6EndWriteUnchanged(b, ctrl)
-					break
-				}
-				if probe > next.mask {
-					panicV6GrowFullTable()
 				}
 				copied++
 				if probe > copyMaxProbe {
