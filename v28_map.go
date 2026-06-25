@@ -1426,11 +1426,6 @@ func v28BumpCtrl(ctrl uint32) uint32 {
 }
 
 //go:nosplit
-func v28LoadTagWords(b *v28Bucket) archsimd.Uint8x32 {
-	return archsimd.LoadUint8x32((*[32]uint8)(unsafe.Pointer(&b.tags[0])))
-}
-
-//go:nosplit
 func v28StoreTag(b *v28Bucket, lane uintptr, tag uint8) {
 	b.tags[lane] = tag
 }
