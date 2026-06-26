@@ -1,4 +1,4 @@
-//go:build !race && amd64 && goexperiment.simd
+//go:build !race && amd64 && goexperiment.simd && go1.27
 
 package cc
 
@@ -241,29 +241,29 @@ func TestV28MapSkippedWritesDoNotPublish(t *testing.T) {
 	}
 	keyCopy := key
 	_, start := v28HashParts(m.hashKey(&keyCopy), m.intKey, table.mask)
-	b := table.buckets.At(start)
-	ctrl := b.ctrl.Load()
+	b := table.bucket(start)
+	ctrl := b.ctrl().Load()
 
 	if actual, loaded := m.LoadOrStore(key, 99); !loaded || actual != key {
 		t.Fatalf("LoadOrStore = (%d, %v), want (%d, true)", actual, loaded, key)
 	}
-	if got := b.ctrl.Load(); got != ctrl {
+	if got := b.ctrl().Load(); got != ctrl {
 		t.Fatalf("LoadOrStore bumped ctrl: got %#x, want %#x", got, ctrl)
 	}
 	if previous, loaded := m.LoadAndUpdate(key, key); !loaded || previous != key {
 		t.Fatalf("LoadAndUpdate = (%d, %v), want (%d, true)", previous, loaded, key)
 	}
-	if got := b.ctrl.Load(); got != ctrl {
+	if got := b.ctrl().Load(); got != ctrl {
 		t.Fatalf("LoadAndUpdate bumped ctrl: got %#x, want %#x", got, ctrl)
 	}
 	m.Store(key, key)
-	if got := b.ctrl.Load(); got != ctrl {
+	if got := b.ctrl().Load(); got != ctrl {
 		t.Fatalf("Store bumped ctrl: got %#x, want %#x", got, ctrl)
 	}
 	if m.CompareAndSwap(key, key+1, key+2) {
 		t.Fatal("CompareAndSwap with mismatched old succeeded")
 	}
-	if got := b.ctrl.Load(); got != ctrl {
+	if got := b.ctrl().Load(); got != ctrl {
 		t.Fatalf("failed CompareAndSwap bumped ctrl: got %#x, want %#x", got, ctrl)
 	}
 	if !m.CompareAndSwap(key, key, key) {
@@ -272,11 +272,11 @@ func TestV28MapSkippedWritesDoNotPublish(t *testing.T) {
 	if value, ok := m.Load(key); !ok || value != key {
 		t.Fatalf("Load after same-value CompareAndSwap = (%d, %v), want (%d, true)", value, ok, key)
 	}
-	ctrl = b.ctrl.Load()
+	ctrl = b.ctrl().Load()
 	if m.CompareAndDelete(key, key+1) {
 		t.Fatal("CompareAndDelete with mismatched old succeeded")
 	}
-	if got := b.ctrl.Load(); got != ctrl {
+	if got := b.ctrl().Load(); got != ctrl {
 		t.Fatalf("failed CompareAndDelete bumped ctrl: got %#x, want %#x", got, ctrl)
 	}
 }
@@ -373,14 +373,14 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
 	)
 
-	for i := range v28SlotsPerBucket {
+	for i := 0; i < int(v28SlotsPerBucket); i++ {
 		m.Store(i, i*10)
 	}
 	before := m.stats()
 	if before.Live != v28SlotsPerBucket || before.Occupied != v28SlotsPerBucket || before.Tombstones != 0 {
 		t.Fatalf("stats before delete = %+v, want live=%d occupied=%d tombstones=0", before, v28SlotsPerBucket, v28SlotsPerBucket)
 	}
-	if empty := v28EmptyBits(v28LoadTagWords(m.table.Load().buckets.At(0))); empty != 0 {
+	if empty := v28EmptyBits(m.table.Load().bucket(0)); empty != 0 {
 		t.Fatalf("test bucket has empty lanes before delete: %#x", empty)
 	}
 
@@ -388,7 +388,7 @@ func TestV28MapSameKeyTombstoneReuse(t *testing.T) {
 	if prev, ok := m.LoadAndDelete(key); !ok || prev != 10 {
 		t.Fatalf("LoadAndDelete = (%d, %v), want (10, true)", prev, ok)
 	}
-	if empty := v28EmptyBits(v28LoadTagWords(m.table.Load().buckets.At(0))); empty != 0 {
+	if empty := v28EmptyBits(m.table.Load().bucket(0)); empty != 0 {
 		t.Fatalf("test bucket has empty lanes after delete: %#x", empty)
 	}
 	if stats := m.stats(); stats.Live != before.Live-1 || stats.Occupied != before.Occupied || stats.Tombstones != 1 {
@@ -580,7 +580,7 @@ func TestV28MapStringResize(t *testing.T) {
 }
 
 func TestV28MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
-	const n = v28SlotsPerBucket*64*3 + 1
+	n := int(v28SlotsPerBucket*64*3 + 1)
 	m := NewV28Map[int, int](
 		WithCapacity(1),
 		WithKeyHasher(func(int, uintptr) uintptr { return 0 }),
@@ -606,17 +606,14 @@ func TestV28MapLongProbeLimitSurvivesResizeBadHash(t *testing.T) {
 }
 
 func TestV28MapBucketAndEntryAlignment(t *testing.T) {
-	size := unsafe.Sizeof(v28Bucket{})
-	if size != 32 {
-		t.Fatalf("bucket size = %d, want 32", size)
-	}
+	size := v28VectorBytes
 	table := newV28Table[int, int](v28MinBuckets)
-	bucketBase := uintptr(unsafe.Pointer(table.buckets.At(0)))
+	bucketBase := uintptr(table.bucket(0).ptr)
 	align := size
 	if bucketBase&(uintptr(align)-1) != 0 {
 		t.Fatalf("bucket base = %#x, want %d-byte aligned", bucketBase, align)
 	}
-	if uintptr(unsafe.Pointer(table.buckets.At(1)))-bucketBase != size {
+	if uintptr(table.bucket(1).ptr)-bucketBase != size {
 		t.Fatal("bucket stride mismatch")
 	}
 	entryBase := uintptr(unsafe.Pointer(table.entries.At(0)))
