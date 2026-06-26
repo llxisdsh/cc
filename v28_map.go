@@ -52,8 +52,8 @@ const (
 
 var (
 	v28VectorBytes    = uintptr(32)
-	v28SlotsPerBucket = uintptr(28)
-	v28LaneMask       = uint64(1)<<28 - 1
+	v28SlotsPerBucket = v28VectorBytes - v28CtrlBytes
+	v28LaneMask       = uint64(1)<<v28SlotsPerBucket - 1
 )
 
 const (
@@ -138,10 +138,14 @@ type v28Table[K comparable, V any] struct {
 	bucketBacking unsafe.Pointer
 }
 
-// v28Bucket points at one raw, vector-aligned metadata bucket. The first
-// v28SlotsPerBucket bytes are h2 tags; the final four bytes are the ctrl word.
-// The physical bucket width is selected at init from the SIMD backend:
-// 16/32/64 bytes produce 12/28/60 tag lanes respectively.
+// v28Bucket is a by-value handle for one raw, vector-aligned metadata bucket.
+// It stores the address of the bucket bytes themselves, not a pointer to a
+// separately allocated bucket object. The physical bucket width is selected at
+// init from the SIMD backend, and the lane count is derived as:
+//
+//	v28SlotsPerBucket = v28VectorBytes - sizeof(uint32 ctrl)
+//
+// So 16/32/64 byte vectors produce 12/28/60 tag lanes respectively.
 //
 // Default 256-bit layout:
 //
