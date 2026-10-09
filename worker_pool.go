@@ -24,6 +24,8 @@ type WorkerPool struct {
 
 // NewWorkerPool creates a new pool with the given number of workers and queue size.
 // The workers are started lazily as tasks are submitted.
+// workers must be positive and fit in int32; queueSize must be non-negative
+// (zero is unbuffered).
 func NewWorkerPool(workers int, queueSize int) *WorkerPool {
 	return &WorkerPool{
 		jobs:      make(chan func(), queueSize),
@@ -49,11 +51,8 @@ func (p *WorkerPool) Submit(task func()) error {
 		return ErrPoolClosed
 	}
 
-	p.taskWg.Add(1)
-	p.jobs <- task
-	p.mu.RUnlock()
-
-	// Lazy start workers
+	// Start before sending so an unbuffered queue has a receiver. Keep the read
+	// lock until workers are registered so Close cannot miss a new worker.
 	if p.workers.Load() < p.maxWorker {
 		if p.workers.Add(1) <= p.maxWorker {
 			p.startWorker()
@@ -61,6 +60,10 @@ func (p *WorkerPool) Submit(task func()) error {
 			p.workers.Add(-1)
 		}
 	}
+
+	p.taskWg.Add(1)
+	p.jobs <- task
+	p.mu.RUnlock()
 
 	return nil
 }
@@ -115,6 +118,9 @@ func (p *WorkerPool) Close() {
 
 // Wait blocks until all submitted tasks complete, without closing the pool.
 // This is useful for batch synchronization while keeping the pool alive.
+//
+// Notes:
+//   - Concurrent batch reuse must obey [WaitGroup]'s generation restriction.
 func (p *WorkerPool) Wait() {
 	p.taskWg.Wait()
 }

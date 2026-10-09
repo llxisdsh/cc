@@ -6978,6 +6978,27 @@ func TestMap_RangeProcess_WriterBlocking_Verification(t *testing.T) {
 	}
 }
 
+func TestMap_Rebuild_ZeroValue(t *testing.T) {
+	var m Map[string, int]
+	done := make(chan struct{})
+	go func() {
+		m.Rebuild(func(r *MapRebuild[string, int]) { r.Store("key", 1) })
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Rebuild on a zero-value map blocked")
+	}
+	if v, ok := m.Load("key"); !ok || v != 1 {
+		t.Fatalf("Load = (%d, %v), want (1, true)", v, ok)
+	}
+	m.Store("other", 2)
+	if size := m.Size(); size != 2 {
+		t.Fatalf("Size = %d, want 2", size)
+	}
+}
+
 func TestMap_Rebuild_Wrapper(t *testing.T) {
 	m := NewMap[int, int]()
 

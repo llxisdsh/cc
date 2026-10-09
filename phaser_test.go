@@ -48,6 +48,32 @@ func TestPhaser_Basic(t *testing.T) {
 	}
 }
 
+func TestPhaser_SplitPhase(t *testing.T) {
+	for _, name := range []string{"Arrive", "ArriveAndDeregister", "ArriveThenDeregister"} {
+		t.Run(name, func(t *testing.T) {
+			p := NewPhaser()
+			p.Register()
+			p.Register()
+			arrive := p.Arrive
+			if name == "ArriveAndDeregister" {
+				arrive = p.ArriveAndDeregister
+			}
+			for i := range 2 {
+				if name == "ArriveThenDeregister" && i == 1 {
+					arrive = p.ArriveAndDeregister
+				}
+				phase := arrive()
+				if phase != 0 {
+					t.Fatalf("arrival phase = %d, want 0", phase)
+				}
+			}
+			if next := p.AwaitAdvance(0); next != 1 {
+				t.Fatalf("AwaitAdvance = %d, want 1", next)
+			}
+		})
+	}
+}
+
 func TestPhaser_Dynamic(t *testing.T) {
 	p := NewPhaser()
 	p.Register() // Me

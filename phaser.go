@@ -58,7 +58,7 @@ func (p *Phaser) Register() int {
 }
 
 // Arrive signals that the current party has reached the barrier.
-// It returns the current phase number.
+// It returns the arrival phase for use with AwaitAdvance, even if this call advances it.
 // It does NOT wait for others.
 func (p *Phaser) Arrive() int {
 	p.mu.Lock()
@@ -84,7 +84,7 @@ func (p *Phaser) Arrive() int {
 		// Assuming we started both at 0.
 		p.epoch.Add(1)
 		p.mu.Unlock()
-		return phase + 1
+		return phase
 	}
 
 	// Update arrived count
@@ -136,6 +136,7 @@ func (p *Phaser) ArriveAndAwaitAdvance() int {
 }
 
 // ArriveAndDeregister signals arrival and removes the party.
+// It returns the arrival phase for use with AwaitAdvance, even if this call advances it.
 func (p *Phaser) ArriveAndDeregister() int {
 	p.mu.Lock()
 
@@ -153,7 +154,7 @@ func (p *Phaser) ArriveAndDeregister() int {
 		p.state.Store(uint64(phase+1) << 32) // parties=0, arrived=0
 		p.epoch.Add(1)
 		p.mu.Unlock()
-		return phase + 1
+		return phase
 	}
 
 	if arrived == parties {
@@ -161,7 +162,7 @@ func (p *Phaser) ArriveAndDeregister() int {
 		p.state.Store(uint64(phase+1)<<32 | uint64(parties)<<16)
 		p.epoch.Add(1)
 		p.mu.Unlock()
-		return phase + 1
+		return phase
 	}
 
 	// Just update parties

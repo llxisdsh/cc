@@ -7,6 +7,9 @@ package cc
 // It keeps the stable FlatMap API while using the current compact SWAR-probed
 // engine underneath. Prefer FlatMap for performance-sensitive workloads that
 // benefit from low GC pressure and fast iteration.
+//
+// Notes:
+//   - [V6Map]'s version-wrap and callback panic restrictions also apply here.
 type FlatMap[K comparable, V any] = V6Map[K, V]
 
 func NewFlatMap[K comparable, V any](options ...func(*MapConfig)) *FlatMap[K, V] {

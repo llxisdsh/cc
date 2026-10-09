@@ -120,6 +120,13 @@ const (
 // Integer keys use the fast integer hash path. Other comparable key shapes
 // keep Go's built-in hasher to preserve == semantics. Use [WithKeyHasherUnsafe]
 // to supply a custom hasher for custom key types.
+//
+// Notes:
+//   - V6 favors compact buckets and read-path speed. With the default six
+//     lanes, version-wrap ABA requires an operation to retain a control snapshot
+//     across at least 16,384 same-bucket modifications and observe the same
+//     tag/control state again.
+//   - Write/rebuild callbacks must return normally; see [V6Map.Compute] and [V6Map.Rebuild].
 type V6Map[K comparable, V any] struct {
 	_         noCopy
 	table     atomic.Pointer[v6Table[K, V]]
@@ -161,21 +168,29 @@ type v6Table[K comparable, V any] struct {
 //
 // ABA boundary: the single atomic state makes tag and control snapshots
 // tear-free. The version field is not a formal ABA-proof sequence counter, but
-// a harmful ABA requires all of these conditions at once:
+// a harmful version-wrap ABA requires all of these conditions at once:
 //  1. writes to the same bucket complete a full version wrap;
-//  2. a reader keeps an unfenced entry copy from the old snapshot across that
-//     wrap; and
-//  3. the repeated state validates a torn K/V value from the entry copy.
+//  2. an operation retains the old control snapshot across that wrap; and
+//  3. the tags and control bits return to the same state, allowing an entry copy
+//     to pass validation against that repeated state.
 //
-// For normal small-K/V workloads this is a strong practical boundary: the entry
-// copy is usually only a few machine-word loads, while the version wrap needs
-// many consecutive writes to the same bucket. A public-API stress test using
-// string keys and string values ran for 30 minutes without reproducing a
-// failure. The remaining risk is concentrated in larger K/V types, extremely hot
-// buckets, long scheduler or OS pauses, and very high-frequency mutation of the
-// same bucket. V6 intentionally favors compact buckets and read-path speed over
-// formal ABA immunity for arbitrary K/V sizes. With the default 6 lanes,
-// v6VersionBits is 14 and the wrap distance is 16,384 writes.
+// For small K/V types, the entry copy is usually only a few machine-word loads,
+// while a version wrap needs many consecutive modifications to the same bucket.
+// A previously recorded public-API stress test using string keys and string
+// values ran for 30 minutes without reproducing a failure. The relevant factors
+// are K/V copy size, bucket mutation rate, and scheduler, OS, or callback pauses
+// that extend the snapshot's lifetime. V6 intentionally favors compact buckets
+// and read-path speed over formal ABA immunity for arbitrary K/V sizes. With
+// the default 6 lanes, v6VersionBits is 14 and the wrap distance is 16,384 writes.
+//
+// Notes:
+//   - A controlled public-API test paused Swap in WithValueEqual after reading
+//     the entry, performed 16,384 same-key updates, then resumed it. Swap stored
+//     its new value but returned the pre-pause value. With 16,383 or 16,385 updates,
+//     it retried and returned the latest value. This demonstrates a stale previous
+//     value without requiring a torn K/V copy. The stress run and the forced
+//     schedule cover different interleavings; neither establishes their frequency
+//     in normal workloads.
 //
 // Default 6-lane ctrl layout:
 //
@@ -397,6 +412,11 @@ func (m *V6Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 //
 // The callback runs inside the bucket's short write window; keep it
 // lightweight and do not call other operations on the same map from it.
+//
+// Notes:
+//   - Ending the write window is not deferred for performance. fn must return
+//     normally; recover inside fn if needed, not around Compute. Recovery does not
+//     roll back entry changes. An escaping panic leaves the bucket write-locked.
 //
 // Returns:
 //   - actual: the current value in the map after the operation
@@ -747,6 +767,8 @@ func (m *V6Map[K, V]) Clear() {
 //   - You must use the `m *MapRebuild[K, V]` parameter passed to `fn` for
 //     processing. Do not call methods on the Map instance directly, as this
 //     may cause deadlocks.
+//   - fn must return normally. An escaping panic leaves the rebuild active;
+//     recovery outside Rebuild does not release it or roll back changes.
 func (m *V6Map[K, V]) Rebuild(fn func(m *MapRebuild[K, V])) {
 	for {
 		if rs := m.rs.Load(); rs != nil {
@@ -919,8 +941,8 @@ func (m *V6Map[K, V]) storeIn(
 				}
 				slot.WriteUnfenced(v6Entry[K, V]{key: e.key, val: *val})
 				v6EndWriteModified(b, ctrl)
-				// e is still current: the CAS in v6BeginWriteWithCtrl validated
-				// the same ctrl snapshot the read was checked against.
+				// The CAS in v6BeginWriteWithCtrl matched the same ctrl snapshot
+				// used for the entry read, subject to the version window above.
 				return v6OK, e.val, true, false
 			}
 			match &= match - 1

@@ -10,8 +10,9 @@ import (
 //
 // WARNING:
 // - Only valid inside the callback; do NOT keep, return, or use it outside.
+// - Callbacks have the same panic restrictions as [Map.Compute] and [Map.Rebuild].
 // - Not safe across goroutines.
-// 警告：仅在回调期间有效；不可保存或让其指针逃逸，也不可跨协程使用。
+// 警告：仅在回调期间有效；不可保存或让其指针逃逸，不可跨协程使用，不得Panic或不外泄。
 type MapRebuild[K comparable, V any] struct {
 	m *Map[K, V]
 	f *FlatMap[K, V]

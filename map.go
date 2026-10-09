@@ -24,6 +24,8 @@ import (
 //
 // Notes:
 //   - Map must not be copied after first use.
+//   - Callbacks under write/rebuild locks must return normally; see [Map.Compute]
+//     and [Map.Rebuild] for panic constraints.
 type Map[K comparable, V any] struct {
 	_        noCopy
 	table    unsafe.Pointer // [*mapTable]
@@ -528,6 +530,11 @@ func (m *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
 // Returns:
 //   - actual: The value as returned by the callback.
 //   - loaded: True if the key existed before the callback, false otherwise.
+//
+// Notes:
+//   - Unlocking is not deferred for performance. fn must return normally;
+//     recover inside fn if needed, not around Compute. Recovery does not roll back
+//     entry changes. An escaping panic leaves the bucket locked.
 func (m *Map[K, V]) Compute(
 	key K,
 	fn func(e *MapEntry[K, V]),
@@ -1162,6 +1169,8 @@ func (m *Map[K, V]) CloneTo(clone *Map[K, V]) {
 //   - You must use the `m *MapRebuild[K, V]` parameter passed to `fn` for
 //     processing. Do not call methods on the Map instance directly, as this
 //     may cause deadlocks.
+//   - fn must return normally. An escaping panic leaves the rebuild active;
+//     recovery outside Rebuild does not release it or roll back changes.
 func (m *Map[K, V]) Rebuild(fn func(m *MapRebuild[K, V])) {
 	m.rebuild(mapRebuildBlockWritersHint, fn)
 }
@@ -1190,6 +1199,10 @@ func (m *Map[K, V]) rebuild(
 		}
 
 		if rs := m.beginRebuild(hint); rs != nil {
+			// Initialize while holding rs so callback writes cannot wait on it.
+			if loadPtr(&m.table) == nil {
+				m.init(&MapConfig{})
+			}
 			fn(noEscape(&MapRebuild[K, V]{m: m}))
 			m.endRebuild(rs)
 			return

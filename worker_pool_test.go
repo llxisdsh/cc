@@ -63,6 +63,28 @@ func TestWorkerPool_Panic(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_Unbuffered(t *testing.T) {
+	p := NewWorkerPool(1, 0)
+	var ran atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		err := p.Submit(func() { ran.Store(true) })
+		p.Close()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unbuffered Submit or Close blocked")
+	}
+	if !ran.Load() {
+		t.Fatal("Close returned before the task completed")
+	}
+}
+
 func TestWorkerPool_Lazy(t *testing.T) {
 	p := NewWorkerPool(10, 10)
 	// Internal field check (using reflection or just implicit behavior)

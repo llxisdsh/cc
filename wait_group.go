@@ -7,8 +7,12 @@ import (
 )
 
 // WaitGroup is a reusable WaitGroup.
-// Unlike sync.WaitGroup, it can be reused immediately after the previous batch of tasks is done,
-// without waiting for all Wait() calls to return.
+// Unlike sync.WaitGroup, it permits adjacent generations to overlap.
+//
+// Notes:
+//   - Before starting generation g+2, all Wait calls for generation g must
+//     have returned. Two semaphore slots isolate adjacent generations only;
+//     reusing a slot earlier can steal wakeups, causing early returns or stuck waiters.
 //
 // Limitations:
 // - Max tasks: 2^32 - 1 (approx 4.29 billion)
@@ -22,7 +26,7 @@ type WaitGroup struct {
 	// - Task Counter (32 bits)
 	state atomic.Uint64
 
-	// sema is a double-buffered semaphore to prevent signal stealing.
+	// sema isolates adjacent generations; slots are reused every two generations.
 	sema [2]opt.Sema
 }
 

@@ -17,6 +17,12 @@ import (
 //
 // It is zero-value usable (starts Closed).
 //
+// Notes:
+//   - Waiters released in generation g must return before generation g+2
+//     accepts waiters. Close and Pulse advance generations; the two semaphore slots
+//     do not support unbounded cycling past delayed waiters. Earlier slot reuse can
+//     steal wakeups, causing early returns or stuck waiters.
+//
 // Limitations:
 // - Max waiters: 2^32 - 1. Panics on overflow.
 type Gate struct {
@@ -27,8 +33,7 @@ type Gate struct {
 	//   Bit 0-31:  Waiter Count
 	state atomic.Uint64
 
-	// sema is a double-buffered semaphore to prevent signal stealing
-	// during rapid Open/Close cycles.
+	// sema isolates adjacent generations; slots are reused every two generations.
 	sema [2]opt.Sema
 }
 

@@ -88,7 +88,7 @@ func NewPLocal[T any](provider func() T) *PLocal[T] {
 //	val := p.Get()
 //	*val++ // Use immediately
 //
-// If you need to persist usage across yields, use With or copy the value.
+// Use With for short, non-blocking pinned access, or copy the value before yielding.
 // This method is designed for extreme low-latency scenarios where function
 // call overhead of With is significant.
 func (p *PLocal[T]) Get() *T {
@@ -131,9 +131,11 @@ func (p *PLocal[T]) slowGet() *T {
 // The goroutine is pinned to the P during the execution of fn to ensure the value
 // remains local to that P.
 //
-// Notes: fn must not block or call functions that might yield the processor
-// (e.g., I/O, channel operations, select, runtime.Gosched). Doing so while pinned
-// can delay garbage collection and cause other system-wide pauses.
+// Notes:
+//   - fn must return normally without panicking, blocking, or yielding
+//     (e.g., I/O, channel operations, select, runtime.Gosched). A panic while pinned
+//     is a fatal runtime error, even with recover inside fn. Blocking/yielding can
+//     also terminate the process or stall garbage collection.
 func (p *PLocal[T]) With(fn func(*T)) {
 	shards := p.shards.Load()
 	// Fast path: if shards exist
@@ -793,6 +795,10 @@ type pooledLocalCounterNPool struct {
 //
 // PooledLocalCounterN must be created by NewPooledLocalCounterN; its
 // zero value is not usable.
+//
+// Notes:
+//   - All indexed methods require i < n. Bounds are unchecked for performance;
+//     invalid indices can access invalid memory or corrupt another counter group.
 type PooledLocalCounterN struct {
 	base         unsafe.Pointer
 	mask         uintptr
@@ -902,6 +908,9 @@ func (p *pooledLocalCounterNPool) New(n uintptr) PooledLocalCounterN {
 // Add adds delta to counter i in the current P-local slot and returns that
 // slot's new value.
 //
+// Notes:
+//   - i must be less than the group's n; bounds are not checked.
+//
 //go:nosplit
 func (c *PooledLocalCounterN) Add(i uintptr, delta uintptr) uintptr {
 	rawPid := uintptr(runtime_procPin())
@@ -915,6 +924,9 @@ func (c *PooledLocalCounterN) Add(i uintptr, delta uintptr) uintptr {
 
 // Get returns counter i from the current P-local slot.
 //
+// Notes:
+//   - i must be less than the group's n; bounds are not checked.
+//
 //go:nosplit
 func (c *PooledLocalCounterN) Get(i uintptr) uintptr {
 	pid := uintptr(runtime_procPin()) & c.mask
@@ -927,7 +939,9 @@ func (c *PooledLocalCounterN) Get(i uintptr) uintptr {
 
 // Value returns the aggregated value of counter i across all P-local slots.
 //
-// Note: The result is an approximation if concurrent Adds are happening.
+// Notes:
+//   - i must be less than the group's n; bounds are not checked.
+//   - The result is an approximation if concurrent Adds are happening.
 func (c *PooledLocalCounterN) Value(i uintptr) uintptr {
 	var sum uintptr
 	offset := i * unsafe.Sizeof(atomic.Uintptr{})
@@ -941,6 +955,9 @@ func (c *PooledLocalCounterN) Value(i uintptr) uintptr {
 }
 
 // Reset atomically reads counter i and resets it to zero in all P-local slots.
+//
+// Notes:
+//   - i must be less than the group's n; bounds are not checked.
 func (c *PooledLocalCounterN) Reset(i uintptr) uintptr {
 	var sum uintptr
 	offset := i * unsafe.Sizeof(atomic.Uintptr{})
