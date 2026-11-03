@@ -1,0 +1,24 @@
+// Copyright 2026 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+//go:build goexperiment.simd && amd64
+
+package bridge
+
+import "simd/archsimd"
+
+func (x Mask8x16) ToBits(dst []uint) int {
+	dst[0] = uint(archsimd.Mask8x16(x).ToBits())
+	return 1
+}
+
+func (x Mask8x32) ToBits(dst []uint) int {
+	dst[0] = uint(archsimd.Mask8x32(x).ToBits())
+	return 1
+}
+
+func (x Mask8x64) ToBits(dst []uint) int {
+	dst[0] = uint(archsimd.Mask8x64(x).ToBits())
+	return 1
+}

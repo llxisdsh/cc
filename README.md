@@ -24,10 +24,12 @@ State-of-the-art concurrent map implementations, delivering extreme performance 
 | [**FunnelMap**](./funnel_map.go) | **Highly robust**, utilizes SkipMap for collisions and PLocal for size tracking. | Extreme resilience against poor hash distributions without degradation.          |
 | [**OFHTMap**](./ofht_map.go)     | **Experimental**, optimistic open-addressing with inline key/value storage.      | Lowest GC overhead for allocation-sensitive workloads.                           |
 | [**DWHTMap**](./dwht_map.go)     | **Experimental**, fully lock-free open-addressing with DWCAS slot publication.   | Low-latency reads and writes under high concurrency.                             |
-| [**V28Map**](./v28_map.go)       | **Experimental**, SIMD-probed open-addressing with separate entries.             | High load factor and compact memory use on amd64 AVX2/SIMD builds only.         |
+| [**V28Map**](./v28_map.go)       | **Experimental**, portable SIMD-probed open-addressing with separate entries.    | High load factor and compact memory use with hardware acceleration where supported. |
 | [**V6Map**](./v6_map.go)         | **Experimental**, SWAR-probed open-addressing with compact 6-slot buckets.       | Low-GC flat storage with portable fast probing and moderate load factor.         |
 
 > **Note**: `Map` is a streamlined version of the high-performance [llxisdsh/pb](https://github.com/llxisdsh/pb) map. `FlatMap` is the stable flat-storage API, currently backed by `V6Map`. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [benchmark](./benchmark) directory.
+
+> **V28 builds**: The V28 backend currently requires Go 1.27+, `GOEXPERIMENT=simd`, and a non-race build. Until `Mask8s.ToBits` is available in the official toolchain, use the [temporary SIMD overlay](./tools/v28-simd/README.md). Other builds use `Map`. Vector width and hardware acceleration follow Go's portable SIMD feature selection.
 
 ### ⚡ Processor Local
 

@@ -1,4 +1,4 @@
-//go:build !race && amd64 && goexperiment.simd && go1.27
+//go:build !race && goexperiment.simd && go1.27
 
 package cc
 
@@ -6,6 +6,7 @@ import (
 	"math/bits"
 	"math/rand/v2"
 	"runtime"
+	"simd"
 	"sync/atomic"
 	"unsafe"
 )
@@ -147,7 +148,7 @@ type v28Table[K comparable, V any] struct {
 //
 // So 16/32/64 byte vectors produce 12/28/60 tag lanes respectively.
 //
-// Default 256-bit layout:
+// Example 256-bit layout:
 //
 //	┌──────────────────────────────────────────────┬───────────────────────────┐
 //	│        28 x 8-bit h2 tags, bytes 0-27        │ ctrl uint32, bytes 28-31  │
@@ -200,6 +201,11 @@ func (m *V28Map[K, V]) init(cfg *MapConfig) {
 }
 
 func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
+	return v28Load(m, key)
+}
+
+// Go 1.27's SIMD rewriter rejects this body as a generic method.
+func v28Load[K comparable, V any](m *V28Map[K, V], key K) (value V, ok bool) {
 	table := m.table.Load()
 	if table == nil {
 		return *new(V), false
@@ -211,22 +217,29 @@ func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
 		hash = m.keyHash(noescape(unsafe.Pointer(&key)), m.seed)
 	}
 	tag, start := v28HashParts(hash, m.intKey, table.mask)
+	// Keep layout arithmetic visible to SIMD specialization.
+	vectorBytes := uintptr(simd.Uint8s{}.Len())
+	slots := vectorBytes - v28CtrlBytes
+	laneMask := uint64(1)<<slots - 1
 	for probe := uintptr(0); probe < table.probeLimit; probe++ {
 		bi := (start + probe) & table.mask
-		b := table.bucket(bi)
+		b := v28Bucket{ptr: unsafe.Add(table.buckets, bi*vectorBytes)}
 		// spins := 0
 	retryBucket:
-		ctrl := b.ctrl().Load()
+		ctrl := (*atomic.Uint32)(unsafe.Add(b.ptr, slots)).Load()
 		if ctrl&v28WritingMask != 0 {
 			// delay(&spins)
 			goto retryBucket
 		}
-		match := v28MatchBits(b, tag)
+		words := simd.LoadUint8s(unsafe.Slice((*uint8)(b.ptr), simd.Uint8s{}.Len()))
+		var bitmap [simd.MaxMaskBitsLen]uint
+		words.Equal(simd.BroadcastUint8s(tag)).ToBits(bitmap[:])
+		match := uint64(bitmap[0]) & laneMask
 		for match != 0 {
 			lane := uintptr(bits.TrailingZeros64(match))
-			e := table.entry(bi, lane)
+			e := table.entries.At(bi*slots + lane)
 			k, v := e.key, e.val
-			ctrl2 := b.ctrl().Load()
+			ctrl2 := (*atomic.Uint32)(unsafe.Add(b.ptr, slots)).Load()
 			if ctrl != ctrl2 {
 				goto retryBucket
 			}
@@ -235,8 +248,9 @@ func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
 			}
 			match &= match - 1
 		}
-		if v28EmptyBits(b) != 0 {
-			if ctrl != b.ctrl().Load() {
+		words.Equal(simd.BroadcastUint8s(v28TagEmpty)).ToBits(bitmap[:])
+		if uint64(bitmap[0])&laneMask != 0 {
+			if ctrl != (*atomic.Uint32)(unsafe.Add(b.ptr, slots)).Load() {
 				goto retryBucket
 			}
 			return *new(V), false
