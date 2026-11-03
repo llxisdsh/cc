@@ -29,7 +29,7 @@ State-of-the-art concurrent map implementations, delivering extreme performance 
 
 > **Note**: `Map` is a streamlined version of the high-performance [llxisdsh/pb](https://github.com/llxisdsh/pb) map. `FlatMap` is the stable flat-storage API, currently backed by `V6Map`. For comprehensive benchmarks (throughput, tail latency, memory usage, cold starts) and advanced architectural details, please refer to the [benchmark](./benchmark) directory.
 
-> **V28 builds**: The V28 backend currently requires Go 1.27+, `GOEXPERIMENT=simd`, and a non-race build. Until `Mask8s.ToBits` is available in the official toolchain, use the [temporary SIMD overlay](./tools/v28-simd/README.md). Other builds use `Map`. Vector width and hardware acceleration follow Go's portable SIMD feature selection.
+> **V28 builds**: The V28 backend targets Go 1.28+, `GOEXPERIMENT=simd`, and non-race builds. It requires the native `Mask8s.ToBits` API; no toolchain overlay is provided. Older Go versions and other builds use `Map`. See the [SIMD build notes](./tools/v28-simd/README.md) for release verification and feature selection.
 
 ### ⚡ Processor Local
 

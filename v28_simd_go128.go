@@ -1,4 +1,4 @@
-//go:build !race && goexperiment.simd && go1.27
+//go:build !race && goexperiment.simd && go1.28
 
 package cc
 
@@ -8,8 +8,6 @@ import (
 	"unsafe"
 )
 
-// Mask bitmap extraction requires Go CL 855881. v28_simd.ps1 temporarily
-// supplies the same Mask8s implementation on Go 1.27 without modifying GOROOT.
 func init() {
 	v28InitSIMDLayout()
 }

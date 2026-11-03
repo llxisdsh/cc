@@ -1,4 +1,4 @@
-//go:build !race && goexperiment.simd && go1.27
+//go:build !race && goexperiment.simd && go1.28
 
 package cc
 

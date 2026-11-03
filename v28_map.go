@@ -1,4 +1,4 @@
-//go:build !race && goexperiment.simd && go1.27
+//go:build !race && goexperiment.simd && go1.28
 
 package cc
 
@@ -201,11 +201,6 @@ func (m *V28Map[K, V]) init(cfg *MapConfig) {
 }
 
 func (m *V28Map[K, V]) Load(key K) (value V, ok bool) {
-	return v28Load(m, key)
-}
-
-// Go 1.27's SIMD rewriter rejects this body as a generic method.
-func v28Load[K comparable, V any](m *V28Map[K, V], key K) (value V, ok bool) {
 	table := m.table.Load()
 	if table == nil {
 		return *new(V), false
